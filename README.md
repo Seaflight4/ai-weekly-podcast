@@ -42,12 +42,12 @@ cp .env.example .env    # then set SKAINET_API_KEY
 
 ```bash
 # run all three stages
-.venv/bin/python -m pipeline
+.venv/bin/python -m pipeline run
 
 # or re-run a single stage from the previous stage's file
-.venv/bin/python -m pipeline --only collect
-.venv/bin/python -m pipeline --only rank
-.venv/bin/python -m pipeline --only generate
+.venv/bin/python -m pipeline run --only collect
+.venv/bin/python -m pipeline run --only rank
+.venv/bin/python -m pipeline run --only generate
 ```
 
 The final step is intentionally manual: open `data/podcast_brief.md` in
