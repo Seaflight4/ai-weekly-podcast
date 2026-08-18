@@ -1,7 +1,8 @@
 from . import RankedItem, Episode
-import json, pathlib, datetime
+import asyncio, json, pathlib, datetime
 
 DATA = pathlib.Path("data")
+NOTEBOOK = "AI News Digest"
 INTRO = """# AI News Digest — {date}
 
 A pipeline-generated brief of this week's most interesting AI work.
@@ -24,6 +25,8 @@ def generate(items: list[RankedItem]) -> Episode:
         lines.append("")
     brief.write_text("\n".join(lines), encoding="utf-8")
 
+    asyncio.run(_generate_audio(brief, audio))
+
     ep = Episode(
         audio_path=str(audio),
         manifest=items,
@@ -36,6 +39,24 @@ def generate(items: list[RankedItem]) -> Episode:
     })
     print(f"      wrote {brief.name} ({len(items)} sections)")
     return ep
+
+async def _generate_audio(brief: pathlib.Path, audio: pathlib.Path):
+    from notebooklm import NotebookLMClient, AudioFormat, AudioLength
+    async with NotebookLMClient.from_storage() as client:
+        notebooks = await client.notebooks.list()
+        nb = next((n for n in notebooks if n.title == NOTEBOOK), None)
+        if nb is None:
+            nb = await client.notebooks.create(NOTEBOOK)
+        await client.sources.add_file(nb.id, str(brief), wait=True)
+        status = await client.artifacts.generate_audio(
+            nb.id,
+            instructions="a lively two-host AI news podcast",
+            audio_format=AudioFormat.BRIEF,
+            audio_length=AudioLength.SHORT,
+        )
+        await client.artifacts.wait_for_completion(nb.id, status.task_id, timeout=1200)
+        await client.artifacts.download_audio(nb.id, str(audio))
+        print(f"      audio -> {audio.name} (via notebooklm-py)")
 
 def _write(name, payload):
     DATA.mkdir(exist_ok=True)
