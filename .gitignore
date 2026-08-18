@@ -1,0 +1,30 @@
+# --- Python ---
+.venv/
+__pycache__/
+*.pyc
+
+# --- Runtime data ---
+data/
+
+# --- Secrets ---
+.env
+
+# --- Teaching workspace (kept locally, excluded from the public repo) ---
+lessons/
+reference/
+assets/
+learning-records/
+MISSION.md
+NOTES.md
+RESOURCES.md
+AGENTS.md
+skills-lock.json
+.agents/
+docs/
+.scratch/
+
+# --- Editors / OS ---
+.idea/
+.vscode/
+*.log
+.DS_Store
