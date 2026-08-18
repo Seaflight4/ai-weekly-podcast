@@ -1,8 +1,8 @@
 import sys
 from .orchestrator import run
 
-USAGE = "usage: python -m pipeline run [--only collect|rank|generate]"
-STAGES = ("collect", "rank", "generate")
+USAGE = "usage: python -m pipeline run [--only collect|distil|rank|generate]"
+STAGES = ("collect", "distil", "rank", "generate")
 
 def main(argv: list[str]) -> None:
     if not argv or argv[0] != "run":

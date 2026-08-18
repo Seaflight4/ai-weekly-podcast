@@ -1,16 +1,22 @@
-from . import Item, RankedItem
+from . import Item, RankedItem, StoryGroup
 from openai import OpenAI
 import json, os, pathlib
 
 DATA = pathlib.Path("data")
-TOP_N = 5
+TOP_N = 10
 SKAINET_BASE_URL = "https://chat.model.tngtech.com/v1/"
 SKAINET_DEFAULT_MODEL = "deepseek-ai/DeepSeek-V4-Flash-0731"
 
-RUBRIC = """You are judging AI news items for a weekly podcast aimed at
+RUBRIC = """You are judging AI news stories for a weekly podcast aimed at
 AI researchers at a software consulting firm.
 
-Score each item from 0.0 to 1.0 on how well it would translate into a
+Each story was covered by one or more news sources; its "consensus" is the
+number of DISTINCT sources that covered it (a higher number is a stronger
+signal the story matters this week). Weigh consensus as evidence, but it is
+not a veto — a story covered by one high-quality source may still beat a
+mainstream one that does not fit our listener.
+
+Score each story from 0.0 to 1.0 on how well it would translate into a
 podcast segment the listener would find interesting. Consider:
 
 - Is the claim concrete, not vague hype?
@@ -32,24 +38,39 @@ def _get_client() -> OpenAI:
         )
     return _client
 
-def rank(items: list[Item]) -> list[RankedItem]:
+def rank(items: list[Item] | list[StoryGroup]) -> list[RankedItem]:
     ranked = []
-    for i, item in enumerate(items):
-        print(f"      [{i+1}/{len(items)}] {item.title[:60]}")
-        score, reason = _judge(item)
-        ranked.append(RankedItem(**item.__dict__, score=score, judge_reason=reason))
+    for i, group in enumerate(items):
+        label = group.title if isinstance(group, StoryGroup) else group.title
+        print(f"      [{i+1}/{len(items)}] {label[:60]}")
+        score, reason = _judge(group)
+        ranked.append(_to_ranked(group, score, reason))
     ranked.sort(key=lambda r: r.score, reverse=True)
     top = ranked[:TOP_N]
     _write("rank.json", [r.__dict__ for r in top])
     return top
 
-def _judge(item: Item) -> tuple[float, str]:
-    user_msg = f"Title: {item.title}\nSource: {item.source}\nURL: {item.url}\n\nAbstract:\n{item.body}"
+def _judge(group: Item | StoryGroup) -> tuple[float, str]:
+    if isinstance(group, StoryGroup):
+        head = (
+            f"Title: {group.title}\n"
+            f"Sources: {', '.join(sorted(group.sources))}\n"
+            f"Consensus: {group.consensus} source(s)\n"
+            f"URL: {group.rep_url}\n\n"
+            f"Story:\n{group.content}"
+        )
+    else:
+        head = (
+            f"Title: {group.title}\n"
+            f"Source: {group.source}\n"
+            f"URL: {group.url}\n\n"
+            f"Abstract:\n{group.body}"
+        )
     resp = _get_client().chat.completions.create(
         model=SKAINET_DEFAULT_MODEL,
         messages=[
             {"role": "system", "content": RUBRIC},
-            {"role": "user", "content": user_msg},
+            {"role": "user", "content": head},
         ],
     )
     raw = resp.choices[0].message.content
@@ -62,6 +83,19 @@ def _judge(item: Item) -> tuple[float, str]:
             f"raw response:\n{raw}\n"
             f"parsed object: {parsed}"
         )
+
+def _to_ranked(group: Item | StoryGroup, score: float, reason: str) -> RankedItem:
+    if isinstance(group, StoryGroup):
+        return RankedItem(
+            title=group.title,
+            url=group.rep_url,
+            date=group.first_date,
+            body=group.content,
+            source="/".join(sorted(group.sources)),
+            score=score,
+            judge_reason=reason,
+        )
+    return RankedItem(**group.__dict__, score=score, judge_reason=reason)
 
 def _parse_json(raw: str) -> dict:
     s = raw.strip()
