@@ -77,6 +77,13 @@ def _paper_pdf_url(item: RankedItem) -> str | None:
         return item.url.replace(ARXIV_ABS, ARXIV_PDF, 1)
     return None
 
+async def _clear_sources(client, notebook_id: str) -> None:
+    """Remove every existing source from the notebook so each run starts fresh."""
+    sources = await client.sources.list(notebook_id)
+    for s in sources:
+        await client.sources.delete(notebook_id, s.id)
+        print(f"      [source] removed {s.title or s.url}")
+
 async def _generate_audio(items: list[RankedItem], brief: pathlib.Path, audio: pathlib.Path):
     from notebooklm import NotebookLMClient, AudioFormat, AudioLength
     from notebooklm.artifacts import with_rate_limit_retry
@@ -88,17 +95,12 @@ async def _generate_audio(items: list[RankedItem], brief: pathlib.Path, audio: p
         if nb is None:
             nb = await client.notebooks.create(NOTEBOOK)
 
-        existing = await client.sources.list(nb.id)
-        existing_urls = {s.url for s in existing if s.url}
-        existing_titles = {s.title for s in existing if s.title}
+        await _clear_sources(client, nb.id)
 
         for i, item in enumerate(items):
             url = _paper_pdf_url(item)
             if url is None:
                 print(f"      [source {i+1}/{len(items)}] {item.url}: not an arXiv URL, skipped")
-                continue
-            if url in existing_urls:
-                print(f"      [source {i+1}/{len(items)}] already present, skipped {url}")
                 continue
             try:
                 await with_rate_limit_retry(
@@ -110,23 +112,21 @@ async def _generate_audio(items: list[RankedItem], brief: pathlib.Path, audio: p
                 print(f"      [source {i+1}/{len(items)}] rate-limited adding {url}, skipped")
             await asyncio.sleep(1)
 
-        if brief.name not in existing_titles:
-            try:
-                await with_rate_limit_retry(
-                    lambda: client.sources.add_file(nb.id, str(brief), wait=True),
-                    max_retries=3,
-                )
-                print(f"      [source] added {brief.name}")
-            except RateLimitError:
-                print(f"      [source] rate-limited adding {brief.name}, skipped")
-        else:
-            print(f"      [source] already present, skipped {brief.name}")
+        try:
+            await with_rate_limit_retry(
+                lambda: client.sources.add_file(nb.id, str(brief), wait=True),
+                max_retries=3,
+            )
+            print(f"      [source] added {brief.name}")
+        except RateLimitError:
+            print(f"      [source] rate-limited adding {brief.name}, skipped")
 
         status = await client.artifacts.generate_audio(
             nb.id,
-            instructions="a lively two-host AI news podcast",
-            audio_format=AudioFormat.BRIEF,
-            audio_length=AudioLength.SHORT,
+            instructions="a lively two-host AI news podcast: deep-dive each arXiv paper"
+                         " thoroughly, then quickly recap each HN story",
+            audio_format=AudioFormat.DEEP_DIVE,
+            audio_length=AudioLength.DEFAULT,
         )
         await client.artifacts.wait_for_completion(nb.id, status.task_id, timeout=1200)
         await client.artifacts.download_audio(nb.id, str(audio))
