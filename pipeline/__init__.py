@@ -15,6 +15,7 @@ class Item:
 class RankedItem(Item):
     score: float         # 0.0 - 1.0, judge's rubric score
     judge_reason: str = ""
+    kind: str = ""       # "deep" (arXiv paper) or "brief" (HN news)
 
 @dataclass
 class Episode:

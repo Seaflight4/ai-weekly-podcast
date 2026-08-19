@@ -7,7 +7,7 @@ contract, so any stage can be swapped without touching its neighbours.
 ```
 collect ──> HN (points>100, 7d, batched LLM relevance gate, per-URL body fetch)
         ─-> arXiv (cs.AI, 7d, full abstracts) — HN→arXiv dedup is free & O(n)
-rank    ─-> LLM judge scores each item (batched); keep the top `TOP_N`
+rank    ─-> two judges: arXiv papers → deep dives (5), HN stories → quick briefs (5)
 generate ─> write a podcast brief (you turn it into audio with Gemini Notebook)
 ```
 
@@ -16,7 +16,7 @@ generate ─> write a podcast brief (you turn it into audio with Gemini Notebook
 | Stage | Input | Output |
 |-------|-------|--------|
 | `collect` | date (default: today) | `data/collect.json` — every `Item`: title, url, date, body, source (`hn` or `arxiv`) |
-| `rank` | `data/collect.json` | `data/rank.json` — top `TOP_N` with `score` + `judge_reason` |
+| `rank` | `data/collect.json` | `data/rank.json` — `DEEP_N` deep dives + `BRIEF_N` quick briefs, each with `score` + `judge_reason` + `kind` |
 | `generate` | `data/rank.json` | `data/podcast_brief.md` + `data/episode.json` manifest |
 
 Each stage writes its output to `data/`, so it can be re-run in isolation from
@@ -34,9 +34,14 @@ stage, so the judge weighs content, not hype.
 URL, hash-lookup against the collected arXiv set, and drop the HN twin (the arXiv
 entry already carries the full abstract). No quadratic similarity search.
 
-**Batched judging**: `rank` scores stories in one LLM request per batch
-(`BATCH_SIZE=25`, empirically ~3× faster than one per story) instead of one per
-story.
+**Two-track judging**: `rank` never mixes the pools. arXiv papers are judged
+against a *research* rubric and become **deep dives** (`DEEP_N`, default 5);
+HN stories are judged against a *news* rubric (client signal, concrete
+capabilities/pricing/incidents) and become **quick briefs** (`BRIEF_N`, default
+5). Each pool is scored in one LLM request per batch (`BATCH_SIZE=25`,
+empirically ~3× faster than one per story) and trimmed to its slot count, so
+both sources always get airtime regardless of pool sizes (arXiv ≈ 987/wk vs
+HN ≈ 60/wk).
 
 ## Requirements
 
@@ -76,5 +81,5 @@ NotebookLM automation wrapper. Everything before that click is automated.
 |----------|---------|
 | `SKAINET_API_KEY` | API key for the OpenAI-compatible judge backend (required) |
 
-The judge model, base URL, `TOP_N`, and the batch size are constants in
-`pipeline/rank.py`.
+The judge model, base URL, `DEEP_N`/`BRIEF_N`, and the batch size are constants
+in `pipeline/rank.py`.

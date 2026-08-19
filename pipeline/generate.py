@@ -6,7 +6,9 @@ NOTEBOOK = "AI News Digest"
 INTRO = """# AI News Digest — {date}
 
 A pipeline-generated brief of this week's most interesting AI work.
-Each section is one paper you may want to discuss on your podcast.
+
+- **Deep dives**: the arXiv papers worth studying closely.
+- **Quick briefs**: the Hacker News stories clients will be asking about.
 
 """
 
@@ -18,14 +20,14 @@ def generate(items: list[RankedItem], make_audio: bool = True) -> Episode:
     brief = DATA / "podcast_brief.md"
     today = datetime.date.today().isoformat()
 
+    deep = [r for r in items if r.kind == "deep"]
+    brief_items = [r for r in items if r.kind != "deep"]
+
     lines = [INTRO.format(date=today)]
-    for i, item in enumerate(items, 1):
-        lines.append(f"## {i}. {item.title}")
-        lines.append(f"- Source: {item.source} | URL: {item.url}")
-        lines.append(f"- Score: {item.score:.2f} — {item.judge_reason}")
-        lines.append("")
-        lines.append(item.body)
-        lines.append("")
+
+    _write_section(lines, "Deep dives", deep)
+    _write_section(lines, "Quick briefs", brief_items)
+
     brief.write_text("\n".join(lines), encoding="utf-8")
 
     if make_audio:
@@ -52,6 +54,22 @@ def generate(items: list[RankedItem], make_audio: bool = True) -> Episode:
     })
     print(f"      wrote {brief.name} ({len(items)} sections)")
     return ep
+
+def _write_section(lines: list[str], title: str, items: list[RankedItem]) -> None:
+    if not items:
+        lines.append(f"## {title}")
+        lines.append("_(none this week)_")
+        lines.append("")
+        return
+    lines.append(f"## {title}")
+    lines.append("")
+    for i, item in enumerate(items, 1):
+        lines.append(f"### {i}. {item.title}")
+        lines.append(f"- Source: {item.source} | URL: {item.url}")
+        lines.append(f"- Score: {item.score:.2f} — {item.judge_reason}")
+        lines.append("")
+        lines.append(item.body)
+        lines.append("")
 
 def _paper_pdf_url(item: RankedItem) -> str | None:
     """Rewrite an arXiv abstract URL to its PDF URL, else None."""
