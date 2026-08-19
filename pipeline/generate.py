@@ -13,7 +13,7 @@ Each section is one paper you may want to discuss on your podcast.
 ARXIV_ABS = "https://arxiv.org/abs/"
 ARXIV_PDF = "https://arxiv.org/pdf/"
 
-def generate(items: list[RankedItem]) -> Episode:
+def generate(items: list[RankedItem], make_audio: bool = True) -> Episode:
     audio = DATA / "episode.mp3"
     brief = DATA / "podcast_brief.md"
     today = datetime.date.today().isoformat()
@@ -28,10 +28,20 @@ def generate(items: list[RankedItem]) -> Episode:
         lines.append("")
     brief.write_text("\n".join(lines), encoding="utf-8")
 
-    asyncio.run(_generate_audio(items, brief, audio))
+    if make_audio:
+        try:
+            asyncio.run(_generate_audio(items, brief, audio))
+        except Exception as e:
+            # NotebookLM creds may be absent (no stored auth) — the brief is
+            # still valid for the manual Audio Overview step.
+            print(f"      [warn] audio generation failed: {e}")
+            print(f"      [warn] {audio.name} not produced; drop the brief into NotebookLM manually")
+            audio = pathlib.Path("")  # mark as not produced
+    else:
+        print("      skipping audio (generate(make_audio=False) or --no-audio)")
 
     ep = Episode(
-        audio_path=str(audio),
+        audio_path=str(audio) if audio else "",
         manifest=items,
         created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
     )

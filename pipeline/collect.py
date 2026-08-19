@@ -1,32 +1,59 @@
 from . import Item
-import json, pathlib, urllib.request, urllib.parse, datetime, re, html as H, xml.etree.ElementTree as ET
+from .rank import _get_client, _parse_json, SKAINET_DEFAULT_MODEL as _MODEL
+import json, pathlib, urllib.request, urllib.parse, datetime, re
+import xml.etree.ElementTree as ET
+import trafilatura
 
 DATA = pathlib.Path("data")
-HF_API = "https://huggingface.co/api/papers"
 HN_API = "https://hn.algolia.com/api/v1/search"
-BATCH_INDEX = "https://www.deeplearning.ai/the-batch/"
-BATCH_ISSUE = "https://www.deeplearning.ai/the-batch/issue-{n}"
-IMPORT_AI_FEED = "https://importai.substack.com/feed"
-BENSBITES_FEED = "https://www.bensbites.com/feed"
-LAST_WEEK_IN_AI_FEED = "https://lastweekin.ai/feed"
+ARXIV_API = "https://export.arxiv.org/api/query"
 
-def collect(
-    date: str | None = None,
-    sources: list[str] | None = None,
-) -> list[Item]:
+RELEVANCE_GATE_BATCH = 100   # HN titles per LLM relevance call
+MAX_FETCH_BYTES = 1_000_000   # cap a single HN target page (~1 MB raw HTML)
+
+RELEVANCE_PROMPT = """You are screening Hacker News stories for a weekly AI podcast
+for AI researchers at a software consulting firm.
+
+You are given a JSON array of candidate stories, each with "index", "title", and
+"url". Decide which are worth including in a podcast summarizing the week's most
+important AI research and product news.
+
+Include a story if it is relevant to AI researchers in a company: model releases,
+research papers or results, tools/libraries for AI engineering, datasets and
+benchmarks, noteworthy AI industry/company news. Exclude general tech, personal
+essays about productivity, UI/programming-language churn, releases of unrelated
+software, and pure entertainment.
+
+Return ONLY a JSON object with a single key "relevant", an array of the integer
+indices of the stories that pass. If none pass, return {"relevant": []}.
+No prose before or after. No markdown fences.
+"""
+
+def collect(date: str | None = None) -> list[Item]:
+    """Fetch the week's AI news from HN (points>100 + LLM gate + body fetch) and arXiv (cs.AI)."""
     if date is None:
         date = datetime.date.today().isoformat()
-    if sources is None:
-        sources = ["hf-papers", "rss:import-ai", "rss:bensbites", "batch", "rss:lwiai"]
 
     items: list[Item] = []
-    for name in sources:
-        if name not in _SOURCES:
-            known = ", ".join(_SOURCES)
-            raise SystemExit(f"collect: unknown source {name!r} (known: {known})")
+    for name in ("hn", "arxiv"):
         fetched = _SOURCES[name](date)
-        print(f"      {name}: {len(fetched)} items")
+        print(f"      {name}: {len(fetched)} raw items")
         items.extend(fetched)
+
+    items = _dedup_hn_arxiv(items)
+
+    # HN-specific post-processing: relevance gate first (cheap), body fetch last (slow)
+    hn_items = [i for i in items if i.source == "hn"]
+    if hn_items:
+        print(f"      hn: {len(hn_items)} survive arXiv dedup, gating relevance...")
+        kept = _hn_relevant(hn_items)
+        print(f"      hn: {len(kept)} relevant, fetching bodies...")
+        for i, item in enumerate(kept):
+            if not item.body:
+                item.body = _fetch_body(item.url)
+            if i % 25 == 0:
+                print(f"      hn: {i+1}/{len(kept)} bodies fetched")
+        items = [i for i in items if i.source != "hn"] + kept
 
     if not items:
         raise SystemExit("collect: no items from any source — refusing to write an empty file")
@@ -34,133 +61,171 @@ def collect(
     _write("collect.json", [i.__dict__ for i in items])
     return items
 
-# --- source: Hugging Face Daily Papers (JSON array) ---
-def _hf_papers(date: str) -> list[Item]:
-    url = f"{HF_API}?date={date}&limit=5"
-    print(f"      fetching {url}")
-    raw = _get_json(url)
-    return [
-        Item(
-            title=p["title"],
-            url=f"https://arxiv.org/abs/{p['id']}",
-            date=p.get("publishedAt", date),
-            body=p["summary"],
-            source="hf-papers",
-        )
-        for p in raw
-    ]
-
-# --- source: Hacker News (Algolia JSON) ---
+# --- source: Hacker News (Algolia JSON): points>100 candidates, title+URL only ---
 def _hn(date: str) -> list[Item]:
     day = datetime.datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=datetime.timezone.utc)
     cutoff = int((day - datetime.timedelta(days=7)).timestamp())
-    query = {"query": "AI", "tags": "story", "hitsPerPage": 30,
-             "numericFilters": f"created_at_i>{cutoff}"}
-    url = f"{HN_API}?{urllib.parse.urlencode(query)}"
-    print(f"      fetching {url}")
-    raw = _get_json(url)
-    return [
-        Item(
+    hits: list[dict] = []
+    page = 0
+    per_page = 100
+    nb_pages = None
+    while True:
+        query = {"tags": "story", "hitsPerPage": per_page, "page": page,
+                 "numericFilters": f"points>100,created_at_i>{cutoff}"}
+        url = f"{HN_API}?{urllib.parse.urlencode(query)}"
+        print(f"      fetching {url}")
+        raw = _get_json(url)
+        got = raw.get("hits", [])
+        hits.extend(got)
+        nb_pages = raw.get("nbPages", nb_pages)
+        if not got or nb_pages is None or page + 1 >= nb_pages:
+            break
+        page += 1
+
+    # dedupe by objectID (multi-page paging can repeat)
+    seen: set[str] = set()
+    out: list[Item] = []
+    for h in hits:
+        oid = h["objectID"]
+        if oid in seen:
+            continue
+        seen.add(oid)
+        out.append(Item(
             title=h["title"],
-            url=h.get("url") or f"https://news.ycombinator.com/item?id={h['objectID']}",
+            url=h.get("url") or f"https://news.ycombinator.com/item?id={oid}",
             date=h["created_at"],
-            body=h.get("story_text") or "",
+            body="",  # points used only to select; never emitted
             source="hn",
-        )
-        for h in raw.get("hits", [])
-    ]
-
-# --- source: The Batch (HTML scrape of latest weekly issue) ---
-def _batch(date: str) -> list[Item]:
-    day = datetime.date.fromisoformat(date)
-    print(f"      fetching {BATCH_INDEX}")
-    index = _get(BATCH_INDEX)
-    nums = [int(n) for n in re.findall(r"/the-batch/issue-(\d+)", index)]
-    if not nums:
-        return []
-    latest = max(nums)
-    print(f"      fetching {BATCH_ISSUE.format(n=latest)}")
-    issue_html = _get(BATCH_ISSUE.format(n=latest))
-    issue_date = _find_issue_date(issue_html)
-    if issue_date is None or not _is_recent(issue_date, day):
-        print(f"      issue {latest} dated {issue_date} outside 7-day window")
-        return []
-    return [
-        Item(
-            title=a["title"],
-            url=a["url"] or BATCH_ISSUE.format(n=latest),
-            date=issue_date,
-            body=a["intro"],
-            source="batch",
-        )
-        for a in _extract_articles(issue_html)
-    ]
-
-# --- sources: Substack newsletters (RSS / XML family) ---
-def _substack_rss(feed_url: str, source_tag: str, date: str) -> list[Item]:
-    day = datetime.date.fromisoformat(date)
-    print(f"      fetching {feed_url}")
-    root = ET.fromstring(_get(feed_url))
-    items = []
-    for entry in root.iter("item"):
-        link = entry.findtext("link") or entry.findtext("guid")
-        if not link:
-            continue
-        pub = _to_iso(entry.findtext("pubDate") or "")
-        if pub and not _is_recent(pub, day):
-            continue
-        body = entry.findtext("{http://purl.org/rss/1.0/modules/content/}encoded")
-        if body is None:
-            body = entry.findtext("description") or ""
-        body = H.unescape(re.sub(r"<[^>]+>", " ", body))
-        body = re.sub(r"\s+", " ", body).strip()
-        items.append(Item(
-            title=(entry.findtext("title") or "").strip(),
-            url=link,
-            date=pub,
-            body=body,
-            source=source_tag,
         ))
-    return items
-
-def _to_iso(rfc822: str) -> str:
-    for fmt in ("%a, %d %b %Y %H:%M:%S %Z",
-                "%a, %d %b %Y %H:%M:%S %z",
-                "%d %b %Y %H:%M:%S %Z"):
-        try:
-            return datetime.datetime.strptime(rfc822, fmt).date().isoformat()
-        except ValueError:
-            continue
-    return ""
-
-def _find_issue_date(html_text: str) -> str | None:
-    m = re.search(r"[A-Z][a-z]{2} \d{1,2}, \d{4}", html_text)
-    if not m:
-        return None
-    return datetime.datetime.strptime(m.group(0), "%b %d, %Y").date().isoformat()
-
-def _extract_articles(html_text: str) -> list[dict]:
-    starts = [
-        (m.start(), re.sub(r"<[^>]+>", "", html_text[m.end():html_text.find("</h1>", m.end())]).strip())
-        for m in re.finditer(r"<h1[^>]*>", html_text)
-    ]
-    article_idx = [i for i, (_, t) in enumerate(starts) if t.lower() != "news"]
-    out = []
-    for k, i in enumerate(article_idx):
-        pos, title = starts[i]
-        end = starts[article_idx[k + 1]][0] if k + 1 < len(article_idx) else len(html_text)
-        seg = html_text[pos:end]
-        pm = re.search(r"<p>(.*?)</p>", seg, re.S)
-        intro = re.sub(r"<[^>]+>", " ", pm.group(1)).strip() if pm else ""
-        intro = H.unescape(re.sub(r"\s+", " ", intro))
-        links = re.findall(r'href="(https?://[^"]+)"', seg)
-        foreign = [
-            l for l in links
-            if all(x not in l for x in ("deeplearning.ai", "bit.ly", "charonhub",
-                                        "facebook", "twitter", "youtube", "linkedin"))
-        ]
-        out.append({"title": title, "url": foreign[0] if foreign else None, "intro": intro})
     return out
+
+# --- source: arXiv (official Atom API): cat:cs.AI, 7-day window, latest version ---
+def _arxiv(date: str) -> list[Item]:
+    day = datetime.date.fromisoformat(date)
+    cutoff = day - datetime.timedelta(days=7)
+    entries: list[Item] = []
+    seen_ids: set[str] = set()
+    start = 0
+    max_results = 100
+    while True:
+        params = {"search_query": "cat:cs.AI", "sortBy": "submittedDate",
+                  "sortOrder": "descending", "start": start, "max_results": max_results}
+        url = f"{ARXIV_API}?{urllib.parse.urlencode(params)}"
+        print(f"      fetching {url}")
+        xml = _get(url)
+        feed = ET.fromstring(xml)
+        page = feed.findall("{http://www.w3.org/2005/Atom}entry")
+        if not page:
+            break
+        for e in page:
+            published = (e.findtext("{http://www.w3.org/2005/Atom}published") or "").strip()
+            pub_date = published[:10]
+            if _is_recent(pub_date, day):
+                base_id = _arxiv_id(e.findtext("{http://www.w3.org/2005/Atom}id") or "")
+                if base_id and base_id not in seen_ids and not _withdrawn(e):
+                    seen_ids.add(base_id)
+                    entries.append(Item(
+                        title=_strip_tags(e.findtext("{http://www.w3.org/2005/Atom}title") or ""),
+                        url=f"https://arxiv.org/abs/{base_id}",
+                        date=pub_date,
+                        body=_strip_tags(e.findtext("{http://www.w3.org/2005/Atom}summary") or ""),
+                        source="arxiv",
+                    ))
+        total = feed.findtext("{http://a9.com/-/spec/opensearch/1.1/}totalResults")
+        if start + len(page) >= int(total or 0):
+            break
+        oldest_on_page = page[-1].findtext("{http://www.w3.org/2005/Atom}published") or ""
+        if oldest_on_page[:10] and oldest_on_page[:10] < cutoff.isoformat():
+            break  # fully past the window; no more to page
+        start += len(page)
+        if start > 2000:
+            raise SystemExit("collect: arXiv paging exceeded 2000 entries — window too wide?")
+    return entries
+
+def _withdrawn(entry: ET.Element) -> bool:
+    """True if the entry's arxiv:comment or attributes mark it withdrawn."""
+    NS = "{http://arxiv.org/schemas/atom}"
+    comment = (entry.findtext(f"{NS}comment") or "").lower()
+    atype = (entry.attrib.get(f"{NS}announce_type") or "")
+    return "withdraw" in comment or "withdrawn" in atype
+
+def _arxiv_id(url_or_id: str) -> str | None:
+    """Extract a bare arXiv ID from an abs/pdf URL or an Atom id like .../abs/2608.18076v1."""
+    if not url_or_id:
+        return None
+    # arXiv IDs: YYMM.NNNNN or YYYY.NNNNN (4- or 5-digit second part). Must be
+    # delimited so a longer trailing number doesn't partially match.
+    m = re.search(r"arxiv\.org/(?:abs|pdf)/(\d{4}\.\d{4,5})(?:v\d+)?$", url_or_id.strip().rstrip("/"))
+    if not m:
+        m = re.search(r"(?<![\d/])(\d{4}\.\d{4,5})(?:v\d+)?(?!\d)", url_or_id.strip().rstrip("/"))
+    return m.group(1) if m else None
+
+# --- cross-source dedup: drop HN items pointing at a paper we already collected ---
+def _dedup_hn_arxiv(items: list[Item]) -> list[Item]:
+    arxiv_ids = {_arxiv_id(i.url) for i in items if i.source == "arxiv"}
+    if not arxiv_ids:
+        return items
+    kept: list[Item] = []
+    dropped = 0
+    for it in items:
+        if it.source == "hn" and _arxiv_id(it.url) in arxiv_ids:
+            dropped += 1
+            continue
+        kept.append(it)
+    if dropped:
+        print(f"      dedup: dropped {dropped} HN item(s) pointing at a collected arXiv paper")
+    return kept
+
+# --- batched LLM relevance gate over HN titles ---
+def _hn_relevant(items: list[Item]) -> list[Item]:
+    if not items:
+        return []
+    kept: list[Item] = []
+    for lo in range(0, len(items), RELEVANCE_GATE_BATCH):
+        chunk = items[lo:lo + RELEVANCE_GATE_BATCH]
+        payload = [
+            {"index": i, "title": it.title, "url": it.url}
+            for i, it in enumerate(chunk)
+        ]
+        raw = _chat(payload)
+        try:
+            rel = _parse_json(raw).get("relevant") or []
+        except ValueError:
+            print(f"      hn relevance gate: bad response, keeping whole chunk ({len(chunk)})")
+            rel = list(range(len(chunk)))
+        for i in sorted(set(int(x) for x in rel)):
+            if 0 <= i < len(chunk):
+                kept.append(chunk[i])
+    return kept
+
+def _chat(payload) -> str:
+    resp = _get_client().chat.completions.create(
+        model=_MODEL,
+        messages=[
+            {"role": "system", "content": RELEVANCE_PROMPT},
+            {"role": "user", "content": json.dumps(payload)},
+        ],
+    )
+    return resp.choices[0].message.content
+
+# --- fetch an arbitrary HN target page and extract the main text ---
+def _fetch_body(url: str) -> str:
+    try:
+        html = _get(url, max_bytes=MAX_FETCH_BYTES)
+    except Exception:
+        return ""
+    try:
+        text = trafilatura.extract(html, url=url, include_links=False, include_images=False,
+                                   favor_recall=False)
+    except Exception:
+        text = None
+    if not text:
+        return ""
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:8000]
+
+def _strip_tags(text: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", text or "")).strip()
 
 def _is_recent(pub: str, day: datetime.date) -> bool:
     try:
@@ -169,15 +234,16 @@ def _is_recent(pub: str, day: datetime.date) -> bool:
     except ValueError:
         return False
 
-def _get(url: str) -> str:
+def _get(url: str, max_bytes: int | None = None) -> str:
     req = urllib.request.Request(
         url,
         headers={"User-Agent": "ai-weekly-podcast-poc/0.1"},
     )
     with urllib.request.urlopen(req, timeout=30) as r:
-        return r.read().decode("utf-8")
+        data = r.read(max_bytes) if max_bytes else r.read()
+    return data.decode("utf-8", "replace")
 
-def _get_json(url: str):  # list (HF) or dict (HN) — caller knows which
+def _get_json(url: str):  # HN returns a dict — caller knows which
     return json.loads(_get(url))
 
 def _write(name, payload):
@@ -185,10 +251,6 @@ def _write(name, payload):
     (DATA / name).write_text(json.dumps(payload, indent=2))
 
 _SOURCES = {
-    "hf-papers": _hf_papers,
     "hn": _hn,
-    "batch": _batch,
-    "rss:import-ai": lambda date: _substack_rss(IMPORT_AI_FEED, "rss:import-ai", date),
-    "rss:bensbites": lambda date: _substack_rss(BENSBITES_FEED, "rss:bensbites", date),
-    "rss:lwiai": lambda date: _substack_rss(LAST_WEEK_IN_AI_FEED, "rss:lwiai", date),
+    "arxiv": _arxiv,
 }

@@ -1,29 +1,30 @@
-from . import Item, RankedItem, StoryGroup
+from . import Item, RankedItem
 from openai import OpenAI
 import json, os, pathlib
 
 DATA = pathlib.Path("data")
 TOP_N = 10
+BATCH_SIZE = 25            # stories per batch-judge request (empirically fastest: ~3x vs 1)
+MAX_JUDGE_TRIES = 3        # retries per batch before giving up on malformed JSON
 SKAINET_BASE_URL = "https://chat.model.tngtech.com/v1/"
 SKAINET_DEFAULT_MODEL = "deepseek-ai/DeepSeek-V4-Flash-0731"
 
 RUBRIC = """You are judging AI news stories for a weekly podcast aimed at
 AI researchers at a software consulting firm.
 
-Each story was covered by one or more news sources; its "consensus" is the
-number of DISTINCT sources that covered it (a higher number is a stronger
-signal the story matters this week). Weigh consensus as evidence, but it is
-not a veto — a story covered by one high-quality source may still beat a
-mainstream one that does not fit our listener.
-
-Score each story from 0.0 to 1.0 on how well it would translate into a
-podcast segment the listener would find interesting. Consider:
+You are given a JSON array of stories, each with an integer "index", and a
+"title", "url", and "body". Score each story from 0.0 to 1.0 on how well it
+would translate into a podcast segment the listener would find interesting.
+Consider:
 
 - Is the claim concrete, not vague hype?
 - Would a listener come away with something they could use in client work?
 - Is the source primary (paper, official blog) or derivative?
 
-Return ONLY a JSON object with two keys: a float "score" and a one-sentence string "reason". No prose before or after. No markdown fences.
+Return ONLY a JSON object with a single key "scores", an array of objects, one
+per story, each with keys "index" (the story's integer index), "score" (a
+float), and "reason" (a one-sentence string). Each index must appear exactly
+once. No prose before or after. No markdown fences.
 """
 
 _client = None
@@ -38,63 +39,73 @@ def _get_client() -> OpenAI:
         )
     return _client
 
-def rank(items: list[Item] | list[StoryGroup]) -> list[RankedItem]:
-    ranked = []
-    for i, group in enumerate(items):
-        label = group.title if isinstance(group, StoryGroup) else group.title
-        print(f"      [{i+1}/{len(items)}] {label[:60]}")
-        score, reason = _judge(group)
-        ranked.append(_to_ranked(group, score, reason))
+def rank(items: list[Item]) -> list[RankedItem]:
+    ranked: list[RankedItem] = []
+    for lo in range(0, len(items), BATCH_SIZE):
+        chunk = items[lo:lo + BATCH_SIZE]
+        print(f"      judging {lo+1}-{lo+len(chunk)}/{len(items)} (batch {BATCH_SIZE})")
+        result = _judge_batch(chunk)
+        for (score, reason), group in zip(result, chunk):
+            ranked.append(_to_ranked(group, score, reason))
     ranked.sort(key=lambda r: r.score, reverse=True)
     top = ranked[:TOP_N]
     _write("rank.json", [r.__dict__ for r in top])
     return top
 
-def _judge(group: Item | StoryGroup) -> tuple[float, str]:
-    if isinstance(group, StoryGroup):
-        head = (
-            f"Title: {group.title}\n"
-            f"Sources: {', '.join(sorted(group.sources))}\n"
-            f"Consensus: {group.consensus} source(s)\n"
-            f"URL: {group.rep_url}\n\n"
-            f"Story:\n{group.content}"
-        )
-    else:
-        head = (
-            f"Title: {group.title}\n"
-            f"Source: {group.source}\n"
-            f"URL: {group.url}\n\n"
-            f"Abstract:\n{group.body}"
-        )
+def _story_to_dict(group: Item, idx: int) -> dict:
+    return {"index": idx, "title": group.title,
+            "url": group.url, "body": group.body}
+
+def _judge_batch(groups: list[Item]) -> list[tuple[float, str]]:
+    """Judge a batch of stories in one LLM request. Returns (score, reason) per story.
+
+    Retries up to MAX_JUDGE_TRIES if the model returns malformed JSON or omits an
+    index (reasoning models occasionally do), since one bad batch shouldn't kill
+    a long ranking run.
+    """
+    payload = [_story_to_dict(g, i) for i, g in enumerate(groups)]
+    user_msg = json.dumps(payload)
+    last_err: ValueError | None = None
+    for attempt in range(MAX_JUDGE_TRIES):
+        raw = _chat(user_msg)
+        try:
+            parsed = _parse_json(raw)
+            entries = parsed.get("scores")
+            if not isinstance(entries, list) or not entries:
+                raise ValueError(f"model returned no 'scores' list.\nraw response:\n{raw}")
+            by_index: dict[int, tuple[float, str]] = {}
+            for e in entries:
+                try:
+                    by_index[int(e["index"])] = (float(e["score"]), e["reason"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+            out = []
+            missing = []
+            for i in range(len(groups)):
+                if i not in by_index:
+                    missing.append(i)
+                else:
+                    out.append(by_index[i])
+            if missing:
+                raise ValueError(
+                    f"model omitted indices {missing} from batch.\nraw response:\n{raw}"
+                )
+            return out
+        except ValueError as e:
+            last_err = e
+    raise last_err
+
+def _chat(user_msg: str) -> str:
     resp = _get_client().chat.completions.create(
         model=SKAINET_DEFAULT_MODEL,
         messages=[
             {"role": "system", "content": RUBRIC},
-            {"role": "user", "content": head},
+            {"role": "user", "content": user_msg},
         ],
     )
-    raw = resp.choices[0].message.content
-    parsed = _parse_json(raw)
-    try:
-        return float(parsed["score"]), parsed["reason"]
-    except KeyError:
-        raise ValueError(
-            f"model returned JSON without 'score'/'reason' keys.\n"
-            f"raw response:\n{raw}\n"
-            f"parsed object: {parsed}"
-        )
+    return resp.choices[0].message.content
 
-def _to_ranked(group: Item | StoryGroup, score: float, reason: str) -> RankedItem:
-    if isinstance(group, StoryGroup):
-        return RankedItem(
-            title=group.title,
-            url=group.rep_url,
-            date=group.first_date,
-            body=group.content,
-            source="/".join(sorted(group.sources)),
-            score=score,
-            judge_reason=reason,
-        )
+def _to_ranked(group: Item, score: float, reason: str) -> RankedItem:
     return RankedItem(**group.__dict__, score=score, judge_reason=reason)
 
 def _parse_json(raw: str) -> dict:
@@ -102,18 +113,27 @@ def _parse_json(raw: str) -> dict:
     if s.startswith("```"):
         s = s.split("\n", 1)[1] if "\n" in s else s
         s = s.rsplit("```", 1)[0]
-    last = s.rfind("}")
-    if last == -1:
+    # Reasoning models often prefix a `thinking` prose block before the JSON.
+    # Find every balanced JSON `{...}` span and return the first one that
+    # actually parses as a dict (the full object), tolerating nested braces
+    # and trailing prose.
+    start = s.find("{")
+    if start == -1:
         raise ValueError(f"no JSON object found in model response:\n{raw}")
-    cursor = 0
-    while cursor <= last:
-        start = s.find("{", cursor)
-        if start == -1 or start > last:
-            break
-        try:
-            return json.loads(s[start : last + 1])
-        except json.JSONDecodeError:
-            cursor = start + 1
+    depth = 0
+    for i in range(start, len(s)):
+        if s[i] == "{":
+            depth += 1
+        elif s[i] == "}":
+            depth -= 1
+            if depth == 0:
+                cand = s[start : i + 1]
+                try:
+                    obj = json.loads(cand)
+                    if isinstance(obj, dict):
+                        return obj
+                except json.JSONDecodeError:
+                    continue
     raise ValueError(f"found braces but no valid JSON object in model response:\n{raw}")
 
 def _write(name, payload):
