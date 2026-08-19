@@ -96,6 +96,7 @@ def rank(items: list[Item]) -> list[RankedItem]:
     return ranked
 
 def _rank_pool(items: list[Item], rubric: str, n: int, kind: str) -> list[RankedItem]:
+    items = _dedup_by_url(items)
     ranked: list[RankedItem] = []
     for lo in range(0, len(items), BATCH_SIZE):
         chunk = items[lo:lo + BATCH_SIZE]
@@ -105,6 +106,23 @@ def _rank_pool(items: list[Item], rubric: str, n: int, kind: str) -> list[Ranked
             ranked.append(_to_ranked(item, score, reason, kind))
     ranked.sort(key=lambda r: r.score, reverse=True)
     return ranked[:n]
+
+def _dedup_by_url(items: list[Item]) -> list[Item]:
+    """Drop duplicate-URL items, keeping the first occurrence.
+
+    Belt-and-suspenders: collect() already dedups by URL (highest points), but
+    this guarantees podcast slots never contain the same URL twice even if a
+    later stage reintroduces a duplicate.
+    """
+    seen: set[str] = set()
+    out: list[Item] = []
+    for item in items:
+        key = (item.url or "").strip().rstrip("/").lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+    return out
 
 def _story_to_dict(group: Item, idx: int) -> dict:
     return {"index": idx, "title": group.title,

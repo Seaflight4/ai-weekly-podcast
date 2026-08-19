@@ -82,17 +82,38 @@ def _hn(date: str) -> list[Item]:
             break
         page += 1
 
-    # dedupe by objectID (multi-page paging can repeat)
+    # dedupe by objectID (multi-page paging can repeat). A repost of the same
+    # URL gets a new objectID, so also dedupe by (normalized) URL keeping the
+    # highest-points posting. First-seen order is preserved for both kinds.
     seen: set[str] = set()
-    out: list[Item] = []
+    slots: dict[str, dict] = {}     # slot key -> winning hit
+    order: list[str] = []
+    url_slot: dict[str, str] = {}   # normalized URL -> its slot key
     for h in hits:
         oid = h["objectID"]
         if oid in seen:
             continue
         seen.add(oid)
+        url = (h.get("url") or "").strip().rstrip("/").lower()
+        if url:
+            slot = url_slot.get(url)
+            if slot is None:
+                slot = "url:" + url
+                url_slot[url] = slot
+                order.append(slot)
+            if h.get("points", 0) > slots.get(slot, {}).get("points", 0):
+                slots[slot] = h
+        else:
+            slot = "oid:" + oid
+            order.append(slot)
+            slots[slot] = h
+
+    out: list[Item] = []
+    for slot in order:
+        h = slots[slot]
         out.append(Item(
             title=h["title"],
-            url=h.get("url") or f"https://news.ycombinator.com/item?id={oid}",
+            url=h.get("url") or f"https://news.ycombinator.com/item?id={h['objectID']}",
             date=h["created_at"],
             body="",  # points used only to select; never emitted
             source="hn",
