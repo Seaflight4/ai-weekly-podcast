@@ -1,5 +1,6 @@
 from . import Item
-from .rank import _get_client, _parse_json, SKAINET_DEFAULT_MODEL as _MODEL
+from .rank import _get_client, _parse_json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json, pathlib, urllib.request, urllib.parse, datetime, re
 import xml.etree.ElementTree as ET
 import trafilatura
@@ -10,6 +11,8 @@ ARXIV_API = "https://export.arxiv.org/api/query"
 
 RELEVANCE_GATE_BATCH = 100   # HN titles per LLM relevance call
 MAX_FETCH_BYTES = 1_000_000   # cap a single HN target page (~1 MB raw HTML)
+BODY_FETCH_WORKERS = 8        # parallel trafilatura body fetches
+RELEVANCE_MODEL = "mistralai/Mistral-Small-3.2-24B-Instruct-2506"
 
 RELEVANCE_PROMPT = """You are screening Hacker News stories for a weekly AI podcast
 for AI researchers at a software consulting firm.
@@ -47,12 +50,22 @@ def collect(date: str | None = None) -> list[Item]:
     if hn_items:
         print(f"      hn: {len(hn_items)} survive arXiv dedup, gating relevance...")
         kept = _hn_relevant(hn_items)
-        print(f"      hn: {len(kept)} relevant, fetching bodies...")
-        for i, item in enumerate(kept):
-            if not item.body:
-                item.body = _fetch_body(item.url)
-            if i % 25 == 0:
-                print(f"      hn: {i+1}/{len(kept)} bodies fetched")
+        print(f"      hn: {len(kept)} relevant, fetching bodies in parallel (up to {BODY_FETCH_WORKERS} workers)...")
+        t0 = datetime.datetime.now(datetime.timezone.utc)
+        with ThreadPoolExecutor(max_workers=BODY_FETCH_WORKERS) as ex:
+            futures = {ex.submit(_fetch_body, it.url): it for it in kept if not it.body}
+            done = 0
+            for fut in as_completed(futures):
+                it = futures[fut]
+                try:
+                    it.body = fut.result() or ""
+                except Exception:
+                    it.body = ""
+                done += 1
+                if done % 10 == 0 or done == len(futures):
+                    print(f"      hn: {done}/{len(kept)} bodies fetched")
+        dt = (datetime.datetime.now(datetime.timezone.utc) - t0).total_seconds()
+        print(f"      hn: body fetch took {dt:.1f}s")
         items = [i for i in items if i.source != "hn"] + kept
 
     if not items:
@@ -202,30 +215,46 @@ def _hn_relevant(items: list[Item]) -> list[Item]:
     if not items:
         return []
     kept: list[Item] = []
-    for lo in range(0, len(items), RELEVANCE_GATE_BATCH):
+    n_batches = (len(items) + RELEVANCE_GATE_BATCH - 1) // RELEVANCE_GATE_BATCH
+    gate_t0 = datetime.datetime.now(datetime.timezone.utc)
+    for bi, lo in enumerate(range(0, len(items), RELEVANCE_GATE_BATCH), 1):
         chunk = items[lo:lo + RELEVANCE_GATE_BATCH]
         payload = [
             {"index": i, "title": it.title, "url": it.url}
             for i, it in enumerate(chunk)
         ]
+        print(f"      hn relevance gate: batch {bi}/{n_batches} ({len(chunk)} titles)...")
+        t0 = datetime.datetime.now(datetime.timezone.utc)
         raw = _chat(payload)
+        dt = (datetime.datetime.now(datetime.timezone.utc) - t0).total_seconds()
         try:
             rel = _parse_json(raw).get("relevant") or []
         except ValueError:
             print(f"      hn relevance gate: bad response, keeping whole chunk ({len(chunk)})")
             rel = list(range(len(chunk)))
-        for i in sorted(set(int(x) for x in rel)):
+        kept_idx: list[int] = []
+        for x in rel:
+            try:
+                i = int(x)
+            except (TypeError, ValueError):
+                continue
             if 0 <= i < len(chunk):
-                kept.append(chunk[i])
+                kept_idx.append(i)
+        kept_idx = sorted(set(kept_idx))
+        kept.extend(chunk[i] for i in kept_idx)
+        print(f"      hn relevance gate: batch {bi}/{n_batches} done in {dt:.1f}s, kept {len(kept_idx)}/{len(chunk)}")
+    gate_dt = (datetime.datetime.now(datetime.timezone.utc) - gate_t0).total_seconds()
+    print(f"      hn relevance gate: {len(items)} -> {len(kept)} across {n_batches} batches, took {gate_dt:.1f}s total")
     return kept
 
 def _chat(payload) -> str:
     resp = _get_client().chat.completions.create(
-        model=_MODEL,
+        model=RELEVANCE_MODEL,
         messages=[
             {"role": "system", "content": RELEVANCE_PROMPT},
             {"role": "user", "content": json.dumps(payload)},
         ],
+        temperature=0,  # greedy: same input -> same gate verdict (reproducible)
     )
     return resp.choices[0].message.content
 

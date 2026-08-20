@@ -1,6 +1,7 @@
 from . import Item, RankedItem
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from openai import OpenAI
-import json, os, pathlib
+import json, os, pathlib, time
 
 DATA = pathlib.Path("data")
 DEEP_N = 5               # arXiv papers to deep-dive
@@ -8,8 +9,9 @@ BRIEF_N = 5              # HN stories to quick-brief
 TOP_N = DEEP_N + BRIEF_N
 BATCH_SIZE = 25            # stories per batch-judge request (empirically fastest: ~3x vs 1)
 MAX_JUDGE_TRIES = 3        # retries per batch before giving up on malformed JSON
+JUDGE_WORKERS = 4          # concurrent batch-judge calls to the SkAInet backend
 SKAINET_BASE_URL = "https://chat.model.tngtech.com/v1/"
-SKAINET_DEFAULT_MODEL = "deepseek-ai/DeepSeek-V4-Flash-0731"
+SKAINET_DEFAULT_MODEL = os.environ.get("JUDGE_MODEL", "deepseek-ai/DeepSeek-V4-Flash-0731")
 
 PAPER_RUBRIC = """You are a senior researcher at a software consulting firm choosing
 which arXiv papers deserve a deep-dive segment on this week's internal AI podcast.
@@ -98,11 +100,22 @@ def rank(items: list[Item]) -> list[RankedItem]:
 def _rank_pool(items: list[Item], rubric: str, n: int, kind: str) -> list[RankedItem]:
     items = _dedup_by_url(items)
     ranked: list[RankedItem] = []
-    for lo in range(0, len(items), BATCH_SIZE):
-        chunk = items[lo:lo + BATCH_SIZE]
-        print(f"      judging {lo+1}-{lo+len(chunk)}/{len(items)} (batch {BATCH_SIZE})")
-        result = _judge_batch(chunk, rubric)
-        for (score, reason), item in zip(result, chunk):
+    chunks = [items[i:i + BATCH_SIZE] for i in range(0, len(items), BATCH_SIZE)]
+    results: dict[int, list] = {}
+    with ThreadPoolExecutor(max_workers=JUDGE_WORKERS) as ex:
+        futures = {ex.submit(_judge_batch, chunk, rubric): ci
+                   for ci, chunk in enumerate(chunks)}
+        print(f"      judging {len(chunks)} batches (up to {JUDGE_WORKERS} in parallel)...")
+        done = 0
+        for fut in as_completed(futures):
+            ci = futures[fut]
+            t_b = time.time()
+            results[ci] = fut.result()
+            dt = time.time() - t_b
+            done += 1
+            print(f"      batch {ci + 1}/{len(chunks)} done in {dt:.1f}s ({done}/{len(chunks)} complete)")
+    for ci in sorted(results):
+        for (score, reason), item in zip(results[ci], chunks[ci]):
             ranked.append(_to_ranked(item, score, reason, kind))
     ranked.sort(key=lambda r: r.score, reverse=True)
     return ranked[:n]

@@ -65,10 +65,12 @@ def _write_section(lines: list[str], title: str, items: list[RankedItem]) -> Non
     lines.append("")
     for i, item in enumerate(items, 1):
         lines.append(f"### {i}. {item.title}")
-        lines.append(f"- Source: {item.source} | URL: {item.url}")
+        links = [item.url]
+        pdf = _paper_pdf_url(item)
+        if pdf and pdf != item.url:
+            links.append(pdf)
+        lines.append("- Links: " + " · ".join(links))
         lines.append(f"- Score: {item.score:.2f} — {item.judge_reason}")
-        lines.append("")
-        lines.append(item.body)
         lines.append("")
 
 def _paper_pdf_url(item: RankedItem) -> str | None:
@@ -98,10 +100,7 @@ async def _generate_audio(items: list[RankedItem], brief: pathlib.Path, audio: p
         await _clear_sources(client, nb.id)
 
         for i, item in enumerate(items):
-            url = _paper_pdf_url(item)
-            if url is None:
-                print(f"      [source {i+1}/{len(items)}] {item.url}: not an arXiv URL, skipped")
-                continue
+            url = _paper_pdf_url(item) or item.url
             try:
                 await with_rate_limit_retry(
                     lambda url=url: client.sources.add_url(nb.id, url, wait=True),
@@ -120,6 +119,11 @@ async def _generate_audio(items: list[RankedItem], brief: pathlib.Path, audio: p
             print(f"      [source] added {brief.name}")
         except RateLimitError:
             print(f"      [source] rate-limited adding {brief.name}, skipped")
+
+        sources = await client.sources.list(nb.id)
+        print(f"      [sources] {len(sources)} sources now in notebook:")
+        for s in sources:
+            print(f"        - {s.title or s.url}")
 
         status = await client.artifacts.generate_audio(
             nb.id,

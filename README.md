@@ -21,9 +21,12 @@ generate ─> write a podcast brief (you turn it into audio with Gemini Notebook
 
 Each stage writes its output to `data/`, so it can be re-run in isolation from
 its predecessor's file. The stage-3 contract is deliberately thin: it returns a
-clean Markdown brief plus a manifest. The brief is designed to be dropped into
-Gemini Notebook (formerly NotebookLM) → **Audio Overview** → download as
-`data/episode.mp3`.
+clean **episode outline** (titles, links, score, judge reason — no content
+dumps) plus a manifest. The brief lists every source link, so it can be dropped
+into Gemini Notebook (formerly NotebookLM) → **Audio Overview** → download as
+`data/episode.mp3`. The automated audio path ingests the sources itself: it
+adds each arXiv paper's **PDF** and each HN story's **URL** so NotebookLM reads
+the full content, regardless of what the brief shows.
 
 **HN prefiltering** happens server-side at `points>100` (community signal), then
 a **batched LLM relevance gate** keeps only stories useful to AI researchers at
