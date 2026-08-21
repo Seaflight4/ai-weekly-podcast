@@ -10,6 +10,7 @@ HN_API = "https://hn.algolia.com/api/v1/search"
 ARXIV_API = "https://export.arxiv.org/api/query"
 
 RELEVANCE_GATE_BATCH = 100   # HN titles per LLM relevance call
+ARXIV_GATE_BATCH = 20         # arXiv title+abstract per relevance call (~9k tokens/chunk)
 MAX_FETCH_BYTES = 1_000_000   # cap a single HN target page (~1 MB raw HTML)
 BODY_FETCH_WORKERS = 8        # parallel trafilatura body fetches
 RELEVANCE_MODEL = "mistralai/Mistral-Small-3.2-24B-Instruct-2506"
@@ -29,6 +30,30 @@ software, and pure entertainment.
 
 Return ONLY a JSON object with a single key "relevant", an array of the integer
 indices of the stories that pass. If none pass, return {"relevant": []}.
+No prose before or after. No markdown fences.
+"""
+
+ARXIV_GATE_PROMPT = """You are screening arXiv papers for a weekly AI podcast for AI
+researchers at a software consulting firm.
+
+You are given a JSON array of papers, each with an integer "index", a "title",
+and a "body" (the abstract). Decide which papers are worth carrying into a
+ranking stage that scores the week's most important AI research.
+
+Keep a paper if it is plausibly interesting to practitioners: client outcomes
+(agents and agentic RL, evals & reliability, inference cost and latency,
+security, data tooling), a concrete method or framework we could borrow, a
+genuinely novel result, or a rigor/evidence win we can reason about. Drop only
+obvious noise: narrow-focus incremental results on a niche benchmark, toy
+settings, pure theory with no application path, or work well outside AI (pure
+math, physics, non-AI linguistics).
+
+Be recall-leaning — when in doubt, KEEP. This gate only trims the obvious
+junk; a fine-grained scoring judge downstream decides what actually airs.
+Prefer to over-keep rather than silently drop a borderline-but-important paper.
+
+Return ONLY a JSON object with a single key "relevant", an array of the integer
+indices of the papers that pass. If none pass, return {"relevant": []}.
 No prose before or after. No markdown fences.
 """
 
@@ -67,6 +92,13 @@ def collect(date: str | None = None) -> list[Item]:
         dt = (datetime.datetime.now(datetime.timezone.utc) - t0).total_seconds()
         print(f"      hn: body fetch took {dt:.1f}s")
         items = [i for i in items if i.source != "hn"] + kept
+
+    # arXiv relevance gate: trim the ~987/wk stream to the plausibly-relevant
+    # survivors before the judge scores any of them (~5x cheaper rank).
+    arxiv_items = [i for i in items if i.source == "arxiv"]
+    if arxiv_items:
+        print(f"      arxiv: gating {len(arxiv_items)} papers by relevance...")
+        items = [i for i in items if i.source != "arxiv"] + _arxiv_relevant(arxiv_items)
 
     if not items:
         raise SystemExit("collect: no items from any source — refusing to write an empty file")
@@ -210,27 +242,35 @@ def _dedup_hn_arxiv(items: list[Item]) -> list[Item]:
         print(f"      dedup: dropped {dropped} HN item(s) pointing at a collected arXiv paper")
     return kept
 
-# --- batched LLM relevance gate over HN titles ---
-def _hn_relevant(items: list[Item]) -> list[Item]:
+# --- batched LLM relevance gate (shared by HN titles and arXiv abstracts) ---
+def _gate(items: list[Item], prompt: str, model: str, batch_size: int,
+          label: str, include_body: bool = False) -> list[Item]:
+    """Batched recall-leaning relevance gate. Returns the kept subset.
+
+    Same input -> same verdict (temperature=0) so re-runs are reproducible. On a
+    malformed response, keep the whole chunk rather than drop it (recall over
+    precision): a bad batch must never silently zero out stories.
+    """
     if not items:
         return []
     kept: list[Item] = []
-    n_batches = (len(items) + RELEVANCE_GATE_BATCH - 1) // RELEVANCE_GATE_BATCH
+    n_batches = (len(items) + batch_size - 1) // batch_size
     gate_t0 = datetime.datetime.now(datetime.timezone.utc)
-    for bi, lo in enumerate(range(0, len(items), RELEVANCE_GATE_BATCH), 1):
-        chunk = items[lo:lo + RELEVANCE_GATE_BATCH]
+    for bi, lo in enumerate(range(0, len(items), batch_size), 1):
+        chunk = items[lo:lo + batch_size]
         payload = [
-            {"index": i, "title": it.title, "url": it.url}
+            {"index": i, "title": it.title, "url": it.url,
+             **({"body": it.body[:2000]} if include_body else {})}
             for i, it in enumerate(chunk)
         ]
-        print(f"      hn relevance gate: batch {bi}/{n_batches} ({len(chunk)} titles)...")
+        print(f"      {label} relevance gate: batch {bi}/{n_batches} ({len(chunk)} items)...")
         t0 = datetime.datetime.now(datetime.timezone.utc)
-        raw = _chat(payload)
+        raw = _chat(payload, prompt, model)
         dt = (datetime.datetime.now(datetime.timezone.utc) - t0).total_seconds()
         try:
             rel = _parse_json(raw).get("relevant") or []
         except ValueError:
-            print(f"      hn relevance gate: bad response, keeping whole chunk ({len(chunk)})")
+            print(f"      {label} relevance gate: bad response, keeping whole chunk ({len(chunk)})")
             rel = list(range(len(chunk)))
         kept_idx: list[int] = []
         for x in rel:
@@ -242,16 +282,25 @@ def _hn_relevant(items: list[Item]) -> list[Item]:
                 kept_idx.append(i)
         kept_idx = sorted(set(kept_idx))
         kept.extend(chunk[i] for i in kept_idx)
-        print(f"      hn relevance gate: batch {bi}/{n_batches} done in {dt:.1f}s, kept {len(kept_idx)}/{len(chunk)}")
+        print(f"      {label} relevance gate: batch {bi}/{n_batches} done in {dt:.1f}s, kept {len(kept_idx)}/{len(chunk)}")
     gate_dt = (datetime.datetime.now(datetime.timezone.utc) - gate_t0).total_seconds()
-    print(f"      hn relevance gate: {len(items)} -> {len(kept)} across {n_batches} batches, took {gate_dt:.1f}s total")
+    print(f"      {label} relevance gate: {len(items)} -> {len(kept)} across {n_batches} batches, took {gate_dt:.1f}s total")
     return kept
 
-def _chat(payload) -> str:
+def _hn_relevant(items: list[Item]) -> list[Item]:
+    return _gate(items, RELEVANCE_PROMPT, RELEVANCE_MODEL, RELEVANCE_GATE_BATCH, "hn")
+
+def _arxiv_relevant(items: list[Item]) -> list[Item]:
+    kept = _gate(items, ARXIV_GATE_PROMPT, RELEVANCE_MODEL, ARXIV_GATE_BATCH, "arxiv", include_body=True)
+    if not kept:
+        raise SystemExit("collect: arXiv gate dropped every paper — refusing to write an empty file")
+    return kept
+
+def _chat(payload, prompt: str, model: str) -> str:
     resp = _get_client().chat.completions.create(
-        model=RELEVANCE_MODEL,
+        model=model,
         messages=[
-            {"role": "system", "content": RELEVANCE_PROMPT},
+            {"role": "system", "content": prompt},
             {"role": "user", "content": json.dumps(payload)},
         ],
         temperature=0,  # greedy: same input -> same gate verdict (reproducible)

@@ -12,7 +12,11 @@ license = { text = "MIT" }
 dependencies = [
     "openai>=1.0.0",
     "trafilatura>=2.2.0",
+    "sentence-transformers>=2.2.0",
 ]
+
+[project.optional-dependencies]
+test = ["pytest>=8.0.0"]
 
 [project.scripts]
 ai-podcast = "pipeline.__main__:main"
