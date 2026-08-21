@@ -15,9 +15,13 @@ generate ─> write a podcast brief (you turn it into audio with Gemini Notebook
 
 | Stage | Input | Output |
 |-------|-------|--------|
-| `collect` | date (default: today) | `data/collect.json` — every `Item`: title, url, date, body, source (`hn` or `arxiv`) |
-| `rank` | `data/collect.json` | `data/rank.json` — `DEEP_N` deep dives + `BRIEF_N` quick briefs, each with `score` + `judge_reason` + `kind` |
-| `generate` | `data/rank.json` | `data/podcast_brief.md` + `data/episode.json` manifest |
+| `collect` | date (default: today) | `<data/DD-MM-YYYY>/collect.json` — every `Item`: title, url, date, body, source (`hn` or `arxiv`) |
+| `rank` | collect.json | `<data/DD-MM-YYYY>/rank.json` — `DEEP_N` deep dives + `BRIEF_N` quick briefs, each with `score` + `judge_reason` + `kind` |
+| `generate` | rank.json | `<data/DD-MM-YYYY>/podcast_brief.md` + `<data/DD-MM-YYYY>/episode.json` manifest (+ `episode.mp3`) |
+
+Each run writes all of its outputs into a folder named `data/DD-MM-YYYY/` (local
+run date), so successive runs never overwrite each other. Running a single stage
+in isolation reads from the most recent folder's previous-stage file.
 
 Each stage writes its output to `data/`, so it can be re-run in isolation from
 its predecessor's file. The stage-3 contract is deliberately thin: it returns a
@@ -73,10 +77,11 @@ cp .env.example .env    # then set SKAINET_API_KEY
 .venv/bin/python -m pipeline run --only generate --no-audio
 ```
 
-The final step is intentionally flexible: open `data/podcast_brief.md` in
+The final step is intentionally flexible: open the run's `podcast_brief.md` in
 Gemini Notebook, create an Audio Overview, and save the MP3 as
-`data/episode.mp3`. The `--no-audio` flag skips the (optional, cred-gated)
-NotebookLM automation wrapper. Everything before that click is automated.
+`episode.mp3` in the run folder. The `--no-audio` flag skips the (optional,
+cred-gated) NotebookLM automation wrapper. Everything before that click is
+automated.
 
 ## Configuration
 
@@ -84,5 +89,6 @@ NotebookLM automation wrapper. Everything before that click is automated.
 |----------|---------|
 | `SKAINET_API_KEY` | API key for the OpenAI-compatible judge backend (required) |
 
-The judge model, base URL, `DEEP_N`/`BRIEF_N`, and the batch size are constants
-in `pipeline/rank.py`.
+The ranking judge model (`Qwen/Qwen3.8-27B` by default), base URL, `DEEP_N`/`BRIEF_N`,
+and the batch size are constants in `pipeline/rank.py`. Override the judge model
+via the `JUDGE_MODEL` env var. The relevance gate model is in `pipeline/collect.py`.

@@ -1,11 +1,11 @@
 from . import Item
+from . import store
 from .rank import _get_client, _parse_json
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import json, pathlib, urllib.request, urllib.parse, datetime, re
+import json, urllib.request, urllib.parse, datetime, re
 import xml.etree.ElementTree as ET
 import trafilatura
 
-DATA = pathlib.Path("data")
 HN_API = "https://hn.algolia.com/api/v1/search"
 ARXIV_API = "https://export.arxiv.org/api/query"
 
@@ -71,7 +71,7 @@ def collect(date: str | None = None) -> list[Item]:
     if not items:
         raise SystemExit("collect: no items from any source — refusing to write an empty file")
 
-    _write("collect.json", [i.__dict__ for i in items])
+    store.write("collect.json", [i.__dict__ for i in items])
     return items
 
 # --- source: Hacker News (Algolia JSON): points>100 candidates, title+URL only ---
@@ -295,10 +295,6 @@ def _get(url: str, max_bytes: int | None = None) -> str:
 
 def _get_json(url: str):  # HN returns a dict — caller knows which
     return json.loads(_get(url))
-
-def _write(name, payload):
-    DATA.mkdir(exist_ok=True)
-    (DATA / name).write_text(json.dumps(payload, indent=2))
 
 _SOURCES = {
     "hn": _hn,

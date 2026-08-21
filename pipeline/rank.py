@@ -1,17 +1,17 @@
 from . import Item, RankedItem
+from . import store
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from openai import OpenAI
-import json, os, pathlib, time
+import json, os, time
 
-DATA = pathlib.Path("data")
+SKAINET_BASE_URL = "https://chat.model.tngtech.com/v1/"
 DEEP_N = 5               # arXiv papers to deep-dive
 BRIEF_N = 5              # HN stories to quick-brief
 TOP_N = DEEP_N + BRIEF_N
 BATCH_SIZE = 25            # stories per batch-judge request (empirically fastest: ~3x vs 1)
 MAX_JUDGE_TRIES = 3        # retries per batch before giving up on malformed JSON
 JUDGE_WORKERS = 4          # concurrent batch-judge calls to the SkAInet backend
-SKAINET_BASE_URL = "https://chat.model.tngtech.com/v1/"
-SKAINET_DEFAULT_MODEL = os.environ.get("JUDGE_MODEL", "deepseek-ai/DeepSeek-V4-Flash-0731")
+SKAINET_DEFAULT_MODEL = os.environ.get("JUDGE_MODEL", "Qwen/Qwen3.8-27B")
 
 PAPER_RUBRIC = """You are a senior researcher at a software consulting firm choosing
 which arXiv papers deserve a deep-dive segment on this week's internal AI podcast.
@@ -94,7 +94,7 @@ def rank(items: list[Item]) -> list[RankedItem]:
     brief = _rank_pool(news, NEWS_RUBRIC, BRIEF_N, kind="brief")
 
     ranked = deep + brief
-    _write("rank.json", [r.__dict__ for r in ranked])
+    store.write("rank.json", [r.__dict__ for r in ranked])
     return ranked
 
 def _rank_pool(items: list[Item], rubric: str, n: int, kind: str) -> list[RankedItem]:
@@ -220,7 +220,3 @@ def _parse_json(raw: str) -> dict:
                 except json.JSONDecodeError:
                     continue
     raise ValueError(f"found braces but no valid JSON object in model response:\n{raw}")
-
-def _write(name, payload):
-    DATA.mkdir(exist_ok=True)
-    (DATA / name).write_text(json.dumps(payload, indent=2))

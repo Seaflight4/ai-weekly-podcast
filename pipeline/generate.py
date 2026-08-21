@@ -1,7 +1,7 @@
 from . import RankedItem, Episode
-import asyncio, json, pathlib, datetime
+from . import store
+import asyncio, pathlib, datetime
 
-DATA = pathlib.Path("data")
 NOTEBOOK = "AI News Digest"
 INTRO = """# AI News Digest — {date}
 
@@ -15,9 +15,19 @@ A pipeline-generated brief of this week's most interesting AI work.
 ARXIV_ABS = "https://arxiv.org/abs/"
 ARXIV_PDF = "https://arxiv.org/pdf/"
 
+# NotebookLM's server-side ingester cannot fetch these (JS-rendered, auth-walled,
+# or bot-hostile), so skip the URL source and fall back to text ingestion.
+UNFETCHABLE_HOSTS = {
+    "twitter.com",
+    "x.com",
+    "twitterusercontent.com",
+    "t.co",
+}
+
 def generate(items: list[RankedItem], make_audio: bool = True) -> Episode:
-    audio = DATA / "episode.mp3"
-    brief = DATA / "podcast_brief.md"
+    run = store.run_dir()
+    audio = run / "episode.mp3"
+    brief = run / "podcast_brief.md"
     today = datetime.date.today().isoformat()
 
     deep = [r for r in items if r.kind == "deep"]
@@ -47,8 +57,8 @@ def generate(items: list[RankedItem], make_audio: bool = True) -> Episode:
         manifest=items,
         created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
     )
-    _write("episode.json", {
-        "audio_path": ep.audio_path,
+    store.write("episode.json", {
+        "audio_path": str(audio),
         "created_at": ep.created_at,
         "manifest": [r.__dict__ for r in ep.manifest],
     })
@@ -89,9 +99,9 @@ async def _clear_sources(client, notebook_id: str) -> None:
 async def _generate_audio(items: list[RankedItem], brief: pathlib.Path, audio: pathlib.Path):
     from notebooklm import NotebookLMClient, AudioFormat, AudioLength
     from notebooklm.artifacts import with_rate_limit_retry
-    from notebooklm.exceptions import RateLimitError
+    from notebooklm.exceptions import RateLimitError, SourceError, RPCError
 
-    async with NotebookLMClient.from_storage() as client:
+    async with NotebookLMClient.from_storage(profile="personal") as client:
         notebooks = await client.notebooks.list()
         nb = next((n for n in notebooks if n.title == NOTEBOOK), None)
         if nb is None:
@@ -101,14 +111,24 @@ async def _generate_audio(items: list[RankedItem], brief: pathlib.Path, audio: p
 
         for i, item in enumerate(items):
             url = _paper_pdf_url(item) or item.url
+            if _host(url) in UNFETCHABLE_HOSTS:
+                print(f"      [source {i+1}/{len(items)}] skipping unfetchable host {url}")
+                await _add_text_source(client, nb.id, item)
+                continue
             try:
                 await with_rate_limit_retry(
                     lambda url=url: client.sources.add_url(nb.id, url, wait=True),
                     max_retries=3,
                 )
                 print(f"      [source {i+1}/{len(items)}] added {url}")
-            except RateLimitError:
-                print(f"      [source {i+1}/{len(items)}] rate-limited adding {url}, skipped")
+            except RateLimitError as e:
+                # Transient, retryable — exhausted the retry budget. Skip the
+                # source rather than add a duplicated text source.
+                print(f"      [source {i+1}/{len(items)}] rate-limited adding {url}, skipped: {e}")
+            except (SourceError, RPCError) as e:
+                # Unfetchable content — fall back to the collected body text.
+                print(f"      [source {i+1}/{len(items)}] url-add failed for {url}: {e}")
+                await _add_text_source(client, nb.id, item)
             await asyncio.sleep(1)
 
         try:
@@ -136,6 +156,19 @@ async def _generate_audio(items: list[RankedItem], brief: pathlib.Path, audio: p
         await client.artifacts.download_audio(nb.id, str(audio))
         print(f"      audio -> {audio.name} (via notebooklm-py)")
 
-def _write(name, payload):
-    DATA.mkdir(exist_ok=True)
-    (DATA / name).write_text(json.dumps(payload, indent=2))
+def _host(url: str) -> str:
+    from urllib.parse import urlparse
+    return (urlparse(url).netloc or "").lower().removeprefix("www.")
+
+async def _add_text_source(client, notebook_id: str, item: RankedItem) -> None:
+    body = (item.body or "").strip()
+    if not body:
+        print(f"        no body for {item.url}; skipping source")
+        return
+    try:
+        await client.sources.add_text(
+            notebook_id, title=item.title, content=body, wait=True,
+        )
+        print(f"        added text source for {item.title}")
+    except (SourceError, RPCError) as e:
+        print(f"        text-fallback also failed for {item.title}: {e}")
