@@ -21,11 +21,19 @@ from . import RankedItem, Topic, store
 from . import rank as rank_mod
 from . import inspect
 from .rank import _get_client, _parse_json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json, os
 
-EMBED_MODEL = "all-MiniLM-L6-v2"      # local, deterministic, offline, ~80-120MB
-SIM_THRESHOLD = 0.55                  # cosine above this -> same candidate cluster
+EMBED_MODEL = os.environ.get("EMBED_MODEL", "BAAI/bge-small-en-v1.5")
+# Re-tuned 2026-08-24 for BGE-small (was 0.55 for MiniLM). BGE embeddings have a
+# much tighter cosine distribution (median pairwise ~0.67 vs MiniLM's ~0.25),
+# so the threshold must be much higher to avoid collapse. 0.82 was chosen by
+# calibration on the 21-08-2026 top-50 pool: produces 4 clean multi-member
+# clusters (test-time scaling, browser/GUI agents, reasoning compute,
+# agentic RL harnesses) without spurious merges. Override via env for A/B.
+SIM_THRESHOLD = float(os.environ.get("SIM_THRESHOLD", "0.82"))
 MERGE_MODEL = os.environ.get("JUDGE_MODEL", "Qwen/Qwen3.8-27B")
+LABEL_WORKERS = int(os.environ.get("LABEL_WORKERS", "4"))
 
 LABEL_PROMPT = """You are labelling a cluster of this week's AI news items for a podcast topic.
 
@@ -130,8 +138,14 @@ def _minilm_clusters(pool: list[RankedItem]) -> list[Topic]:
 # --- Phase B: LLM per-cluster label ---------------------------------------
 
 def _label_clusters(candidates: list[Topic]) -> list[Topic]:
-    """One LLM call per candidate cluster: title, why, primary_url."""
-    for t in candidates:
+    """One LLM call per candidate cluster: title, why, primary_url.
+
+    Calls are independent and run in parallel (up to LABEL_WORKERS at a time).
+    """
+    if not candidates:
+        return candidates
+
+    def _label_one(t: Topic) -> None:
         payload = {
             "id": t.id,
             "members": [{"title": m.title, "source": m.source,
@@ -148,6 +162,14 @@ def _label_clusters(candidates: list[Topic]) -> list[Topic]:
             t.title = (t.members[0].title if t.members else t.id)
             t.why = ""
             t.primary_url = t.members[0].url if t.members else ""
+
+    with ThreadPoolExecutor(max_workers=LABEL_WORKERS) as ex:
+        futures = {ex.submit(_label_one, t): t for t in candidates}
+        done = 0
+        for fut in as_completed(futures):
+            fut.result()
+            done += 1
+            print(f"      cluster: labelled {done}/{len(candidates)}")
     return candidates
 
 # --- Phase C: cross-cluster LLM merge ------------------------------------

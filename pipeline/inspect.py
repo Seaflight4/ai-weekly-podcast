@@ -150,6 +150,88 @@ def rubric_ab_report(ranked_unified: list[dict], ranked_separated: list[dict],
         lines.append("_(none — unified did not surface new HN stories in the top)_")
     return _write("rank_report.md", "\n".join(lines))
 
+# --- Phase 2: personalization A/B report (ticket 08) ---------------------
+
+def personal_ab_report(plain: list[dict], personal: list[dict],
+                       top_n: int = 30) -> pathlib.Path:
+    """Compare plain (ALPHA=1.0) vs. personal arms on the same cached pool.
+
+    The **primary tuning digest**: shows which items each arm surfaced/demoted
+    so the listener can see what personalization is doing. Per top-N item:
+    rank, title, source, importance, personal, final score, which arm surfaced it.
+    """
+    p_top = sorted(plain, key=lambda r: r.get("final_score", r.get("score", 0)),
+                   reverse=True)[:top_n]
+    s_top = sorted(personal, key=lambda r: r.get("final_score", 0), reverse=True)[:top_n]
+    p_urls = {r["url"] for r in p_top}
+    s_urls = {r["url"] for r in s_top}
+    overlap = p_urls & s_urls
+    plain_only = p_urls - s_urls
+    personal_only = s_urls - p_urls
+
+    alpha = personal[0].get("alpha", 0.7) if personal else 0.7
+
+    def _row(r, rank):
+        sc = r.get("score", 0)
+        ps = r.get("personal_score", 0)
+        fs = r.get("final_score", sc)
+        return (f"| {rank} | {_short(r.get('title', ''), 70)} | "
+                f"{r.get('source', '?')} | {sc:.2f} | {ps:.2f} | {fs:.2f} |")
+
+    lines = [
+        "# Personalization A/B report",
+        "",
+        f"- ALPHA (personal arm): **{alpha}**",
+        f"- top-N compared: **{top_n}**",
+        f"- both arms: **{len(overlap)}** items",
+        f"- plain-only: **{len(plain_only)}** items",
+        f"- personal-only: **{len(personal_only)}** items",
+        "",
+        "## Personal arm top-N (the one you're tuning toward)",
+        "",
+        "| rank | title | src | imp | pers | final |",
+        "|------|-------|-----|-----|------|-------|",
+    ]
+    for i, r in enumerate(s_top, 1):
+        lines.append(_row(r, i))
+    lines += [
+        "",
+        "## Plain arm top-N (importance only, Phase 1 baseline)",
+        "",
+        "| rank | title | src | imp | pers | final |",
+        "|------|-------|-----|-----|------|-------|",
+    ]
+    for i, r in enumerate(p_top, 1):
+        lines.append(_row(r, i))
+    lines += [
+        "",
+        "## Items the personal arm surfaced (personal-only)",
+        "",
+    ]
+    surfaced = [r for r in s_top if r["url"] in personal_only]
+    if surfaced:
+        for r in surfaced:
+            sc = r.get("score", 0)
+            ps = r.get("personal_score", 0)
+            fs = r.get("final_score", sc)
+            lines.append(f"- **{_short(r.get('title', ''), 80)}** — "
+                         f"imp {sc:.2f} · pers {ps:.2f} · final {fs:.2f} — {r.get('url', '')}")
+    else:
+        lines.append("_(none — personal arm did not surface new items in the top)_")
+    lines += [
+        "",
+        "## Items the personal arm demoted out of top-N (plain-only)",
+        "",
+    ]
+    demoted = [r for r in p_top if r["url"] in plain_only]
+    if demoted:
+        for r in demoted:
+            sc = r.get("score", 0)
+            lines.append(f"- **{_short(r.get('title', ''), 80)}** — imp {sc:.2f} — {r.get('url', '')}")
+    else:
+        lines.append("_(none — personal arm kept every plain-top item)_")
+    return _write("rank_report.md", "\n".join(lines))
+
 # --- 04/05: cluster + merge report ---------------------------------------
 
 def cluster_report(topics: list[dict]) -> pathlib.Path:
@@ -244,6 +326,7 @@ def budget_report(ranked: list[dict], plan: dict, knee_index: int | None = None)
 
 def plan_report(plan: dict) -> pathlib.Path:
     segs = plan.get("segments", [])
+    groups = plan.get("editorial_groups", [])
     lines = [
         "# Narrative plan report",
         "",
@@ -251,16 +334,38 @@ def plan_report(plan: dict) -> pathlib.Path:
         f"- target minutes: {plan.get('target_minutes')}",
         f"- planned minutes: **{sum(s.get('minutes', 0) for s in segs)}**",
         f"- motif: *{_short(plan.get('motif', ''), 160)}*",
+    ]
+    if groups:
+        # Role distribution summary
+        role_counts: dict[str, int] = {}
+        for g in groups:
+            role_counts[g.get("role", "?")] = role_counts.get(g.get("role", "?"), 0) + 1
+        role_str = ", ".join(f"{r}:{n}" for r, n in sorted(role_counts.items()))
+        lines.append(f"- editorial groups: **{len(groups)}** ({role_str})")
+    lines += [
         "",
         "## Hook",
         "",
         plan.get("hook", ""),
+    ]
+    # Editorial groups section (ticket 13)
+    if groups:
+        lines += ["", "## Editorial meta-groups", ""]
+        for g in groups:
+            lines.append(f"### {g.get('label', '?')}  [role: {g.get('role', '?')}]")
+            lines.append(f"- opener: {g.get('opener', '')}")
+            tids = g.get("topic_ids", [])
+            lines.append(f"- topics ({len(tids)}): {', '.join(tids)}")
+            lines.append("")
+    lines += [
         "",
         "## Segments",
         "",
     ]
     for i, seg in enumerate(segs, 1):
-        lines.append(f"### {i}. {seg.get('topic_id')} ({seg.get('minutes', 0):.1f} min)")
+        grp = seg.get("editorial_group", "")
+        grp_tag = f"  [{grp}]" if grp else ""
+        lines.append(f"### {i}. {seg.get('topic_id')} ({seg.get('minutes', 0):.1f} min){grp_tag}")
         lines.append(f"- opening: {seg.get('opening', '')}")
         lines.append(f"- signposts: {'; '.join(seg.get('signposts', []))}")
         lines.append(f"- transition: {seg.get('transition_out', '')}")

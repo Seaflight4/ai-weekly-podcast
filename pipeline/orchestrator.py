@@ -41,7 +41,8 @@ def _timed(label: str, fn, *args, **kwargs):
 
 STAGES = ("collect", "rank", "cluster", "plan", "generate")
 
-def run(only: str | None = None, no_audio: bool = False, ab: bool = False):
+def run(only: str | None = None, no_audio: bool = False, ab: bool = False,
+        ab_personal: bool = False, from_cache: str | None = None):
     if only is None:
         print("[1/5] collecting...")
         items = _timed("collect", collect.collect)
@@ -72,6 +73,15 @@ def run(only: str | None = None, no_audio: bool = False, ab: bool = False):
         return
 
     if only == "rank":
+        if from_cache and ab_personal:
+            print(f"[2/5] A/B personalization on cache {from_cache}...")
+            rank.rank_ab_personal(from_cache)
+            return
+        if from_cache:
+            print(f"[2/5] ranking from cache {from_cache} (personal pass only)...")
+            ranked = _timed("rank_from_cache", rank.rank_from_cache, from_cache)
+            print(f"      scored {len(ranked)} items")
+            return
         items = _load("collect", Item)
         if ab:
             print(f"[2/5] A/B ranking {len(items)} cached items (both rubric arms)...")

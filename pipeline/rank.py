@@ -1,8 +1,10 @@
 from . import Item, RankedItem
 from . import store
+from . import profile as profile_mod
+from . import feedback as feedback_mod
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from openai import OpenAI
-import json, os, time
+import json, os, re, time
 
 SKAINET_BASE_URL = "https://chat.model.tngtech.com/v1/"
 DEEP_N = 5               # (legacy) arXiv deep dives — kept for the separated arm
@@ -12,6 +14,12 @@ BATCH_SIZE = 25            # stories per batch-judge request (empirically fastes
 MAX_JUDGE_TRIES = 3        # retries per batch before giving up on malformed JSON
 JUDGE_WORKERS = 4          # concurrent batch-judge calls to the SkAInet backend
 SKAINET_DEFAULT_MODEL = os.environ.get("JUDGE_MODEL", "Qwen/Qwen3.8-27B")
+
+# Phase 2 personalization: blend weight for importance vs personal score.
+# ALPHA=1.0 = pure importance (Phase 1 behaviour); ALPHA=0.0 = pure personal.
+ALPHA = float(os.environ.get("ALPHA", "0.7"))
+if not (0.0 <= ALPHA <= 1.0):
+    raise SystemExit(f"ALPHA={ALPHA!r} — expected a float in [0.0, 1.0]")
 
 # Which rubric arm to run. "unified" = one source-agnostic rubric over the whole
 # pool; "separated" = the legacy two-track (PAPER_RUBRIC for arxiv, NEWS_RUBRIC
@@ -124,6 +132,43 @@ float), and "reason" (a one-sentence string). Each index must appear exactly
 once. No prose before or after. No markdown fences.
 """
 
+# Phase 2: personal-match scoring. The prompt is FIXED (the no-prompt-chasing
+# rule). The listener tunes the profile, not the prompt. The profile body +
+# topics/anti_topics + recent feedback are injected as context.
+PERSONAL_PROMPT = """You are scoring this week's AI news items on how well they
+match an individual researcher's stated interests.
+
+The researcher's profile:
+- Topics they care about (promote): {topics}
+- Topics they want less of (demote): {anti_topics}
+- What they're working on (verbatim):
+{body}
+
+Recent feedback (last few runs):
+- Items they kept (found useful): {kept}
+- Items they skipped (found not useful): {skipped}
+
+You are given a JSON array of items, each with an integer "index", a "title",
+a "url", a "source" ("arxiv" or "hn"), and a "body". Score each 0.0 to 1.0 on
+**how well it matches this specific researcher's interests**.
+
+Scoring guide:
+- 0.9+ = core interest this quarter; directly about a listed topic.
+- 0.7-0.89 = adjacent; touches a listed topic or a method they could borrow.
+- 0.4-0.69 = tangential; same broad field but not their focus.
+- below 0.4 = off-target; matches an anti-topic or unrelated to their work.
+
+Anti-topics actively demote: an item about an anti-topic should score at most
+0.4, even if well-executed. Use the kept/skipped feedback as a weak prior only
+(items similar to kept ones rise slightly; similar to skipped ones fall
+slightly), never as a veto.
+
+Return ONLY a JSON object with a single key "scores", an array of objects,
+each with keys "index" (the item's integer index), "score" (a float), and
+"reason" (a one-sentence string explaining the match or non-match). Each
+index must appear exactly once. No prose before or after. No markdown fences.
+"""
+
 _client = None
 
 def _get_client() -> OpenAI:
@@ -144,6 +189,10 @@ def rank(items: list[Item]) -> list[RankedItem]:
       - "unified":    one source-agnostic rubric over the whole merged pool.
       - "separated":  the legacy two-track (PAPER_RUBRIC for arxiv, NEWS_RUBRIC
                       for hn), each judged in its own pool.
+
+    Phase 2: if a profile.md exists and ALPHA < 1.0, a personal-match pass
+    scores every item and `final_score = ALPHA*score + (1-ALPHA)*personal_score`.
+    Otherwise `final_score = score` (Phase 1 behaviour).
     """
     items = _dedup_by_url(items)
     print(f"      rank: RUBRIC_MODE={RUBRIC_MODE}, {len(items)} items")
@@ -159,9 +208,154 @@ def rank(items: list[Item]) -> list[RankedItem]:
         brief = _rank_pool(news, NEWS_RUBRIC, kind="brief") if news else []
         ranked = deep + brief
 
-    ranked.sort(key=lambda r: r.score, reverse=True)
+    # Phase 2: personal-match pass + linear blend.
+    _apply_personal(ranked)
+
+    ranked.sort(key=lambda r: r.final_score, reverse=True)
     store.write("rank.json", [r.__dict__ for r in ranked])
     return ranked
+
+
+def rank_from_cache(cache_path: str) -> list[RankedItem]:
+    """Load a saved rank.json (with importance scores), skip the importance
+    pass, run only the personal pass + blend. Writes the blended result to
+    the current run dir's rank.json. (Ticket 06 — fast iteration mode.)
+
+    Staleness guard: warns if the cache predates rank.py's mtime, since a
+    rubric change invalidates the cached importance scores.
+    """
+    import pathlib, time as _time
+    cache = pathlib.Path(cache_path)
+    if not cache.exists():
+        raise SystemExit(f"--from-cache: {cache} not found")
+    cache_mtime = cache.stat().st_mtime
+    rank_mtime = pathlib.Path(__file__).resolve().stat().st_mtime
+    if cache_mtime < rank_mtime:
+        print(f"      WARN: cache {cache.name} predates rank.py — importance "
+              f"scores may be stale; re-run `--only rank` without --from-cache "
+              f"to refresh.")
+
+    raw = json.loads(cache.read_text())
+    ranked = [RankedItem(**r) for r in raw]
+    print(f"      rank_from_cache: loaded {len(ranked)} items from {cache.name}")
+    _apply_personal(ranked)
+    ranked.sort(key=lambda r: r.final_score, reverse=True)
+    store.write("rank.json", [r.__dict__ for r in ranked])
+    return ranked
+
+
+def rank_ab_personal(cache_path: str, top_n: int = 30) -> dict[str, list[RankedItem]]:
+    """Run plain (ALPHA=1.0) vs. personal (configured ALPHA) arms on the same
+    cached rank.json, write both + a comparison report. (Ticket 08 — the
+    primary tuning digest.)
+
+    Saves `rank_plain.json` / `rank_personal.json` + `rank_report.md`. Does
+    NOT overwrite `rank.json` (the active arm stays in charge there), mirroring
+    the existing `--ab` rubric A/B.
+    """
+    import pathlib
+    from . import inspect
+    cache = pathlib.Path(cache_path)
+    if not cache.exists():
+        raise SystemExit(f"--ab-personal: {cache} not found")
+    raw = json.loads(cache.read_text())
+    base = [RankedItem(**r) for r in raw]
+    print(f"      [A/B personal] loaded {len(base)} items from {cache.name}")
+
+    # Plain arm: ALPHA=1.0, no personal pass. final_score == score.
+    plain = [RankedItem(**r.__dict__) for r in base]
+    for r in plain:
+        r.alpha = 1.0
+        r.personal_score = 0.0
+        r.personal_reason = ""
+        r.final_score = r.score
+    plain.sort(key=lambda r: r.final_score, reverse=True)
+    store.write("rank_plain.json", [r.__dict__ for r in plain])
+
+    # Personal arm: run the personal pass + blend at the configured ALPHA.
+    personal = [RankedItem(**r.__dict__) for r in base]
+    _apply_personal(personal)
+    personal.sort(key=lambda r: r.final_score, reverse=True)
+    store.write("rank_personal.json", [r.__dict__ for r in personal])
+
+    inspect.personal_ab_report(
+        [r.__dict__ for r in plain],
+        [r.__dict__ for r in personal],
+        top_n=top_n,
+    )
+    return {"plain": plain, "personal": personal}
+
+
+def _apply_personal(ranked: list[RankedItem]) -> None:
+    """Run the personal-match pass on `ranked` in place, then blend.
+
+    No-op (every item keeps final_score == score) when:
+      - profile.md is absent (no personal signal), or
+      - ALPHA == 1.0 (pure importance, Phase 1 behaviour).
+    Otherwise scores every item (or a subset, per `scope_fn`) and writes
+    `personal_score`, `personal_reason`, `alpha`, `final_score`.
+    """
+    prof = profile_mod.load_profile()
+    if not prof.topics and not prof.body:
+        print("      rank: no profile.md found — skipping personal pass (Phase 1 mode)")
+        for r in ranked:
+            r.final_score = r.score
+        return
+    if ALPHA >= 1.0:
+        print(f"      rank: ALPHA={ALPHA} — skipping personal pass (pure importance)")
+        for r in ranked:
+            r.final_score = r.score
+        return
+
+    log = feedback_mod.load_feedback()
+    # Titles for kept/skipped context (urls alone are useless to the judge).
+    kept_titles = _titles_for_urls(ranked, log.kept_urls)
+    skipped_titles = _titles_for_urls(ranked, log.skipped_urls)
+    print(f"      rank: personal pass (ALPHA={ALPHA}, {len(ranked)} items, "
+          f"{len(kept_titles)} kept, {len(skipped_titles)} skipped)...")
+    _personal_pass(ranked, prof, kept_titles, skipped_titles)
+    for r in ranked:
+        r.alpha = ALPHA
+        if r.personal_score > 0.0 or r.personal_reason:
+            r.final_score = ALPHA * r.score + (1.0 - ALPHA) * r.personal_score
+        else:
+            # out-of-scope item (ticket 07): final_score falls back to importance
+            r.final_score = r.score
+
+
+def _titles_for_urls(ranked: list[RankedItem], urls: set[str]) -> list[str]:
+    """Look up titles for a set of URLs in the ranked pool."""
+    by_url = {r.url: r.title for r in ranked}
+    return [by_url[u] for u in urls if u in by_url]
+
+
+def _personal_pass(ranked: list[RankedItem], prof, kept_titles: list[str],
+                   skipped_titles: list[str]) -> None:
+    """Score every item in `ranked` against the profile. Writes
+    `personal_score` and `personal_reason` in place."""
+    prompt = PERSONAL_PROMPT.format(
+        topics=", ".join(prof.topics) or "(none)",
+        anti_topics=", ".join(prof.anti_topics) or "(none)",
+        body=prof.body or "(none)",
+        kept="; ".join(kept_titles) or "(none yet)",
+        skipped="; ".join(skipped_titles) or "(none yet)",
+    )
+    chunks = [ranked[i:i + BATCH_SIZE] for i in range(0, len(ranked), BATCH_SIZE)]
+    results: dict[int, list] = {}
+    if chunks:
+        with ThreadPoolExecutor(max_workers=JUDGE_WORKERS) as ex:
+            futures = {ex.submit(_judge_batch, chunk, prompt): ci
+                       for ci, chunk in enumerate(chunks)}
+            done = 0
+            for fut in as_completed(futures):
+                ci = futures[fut]
+                results[ci] = fut.result()
+                done += 1
+                print(f"      personal batch {done}/{len(chunks)} done")
+    for ci in sorted(results):
+        for (score, reason), item in zip(results[ci], chunks[ci]):
+            item.personal_score = score
+            item.personal_reason = reason
 
 def rank_ab(items: list[Item]) -> dict[str, list[RankedItem]]:
     """Run both rubric arms on the same collect.json and write a comparison
@@ -359,10 +553,16 @@ def _chat(user_msg: str, rubric: str) -> str:
     return resp.choices[0].message.content
 
 def _to_ranked(item: Item, score: float, reason: str, kind: str) -> RankedItem:
-    return RankedItem(**item.__dict__, score=score, judge_reason=reason, kind=kind)
+    return RankedItem(
+        **item.__dict__,
+        score=score, judge_reason=reason, kind=kind,
+        personal_score=0.0, personal_reason="",
+        alpha=1.0, final_score=score,
+    )
 
 def _parse_json(raw: str) -> dict:
     s = raw.strip()
+    s = re.sub(r"<think>.*?</think>", "", s, flags=re.DOTALL)
     if s.startswith("```"):
         s = s.split("\n", 1)[1] if "\n" in s else s
         s = s.rsplit("```", 1)[0]

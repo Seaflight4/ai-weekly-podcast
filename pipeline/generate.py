@@ -99,12 +99,7 @@ def _section_lines(i: int, seg, t: Topic | None) -> list[str]:
     if t and t.why:
         out.append(f"**Why it matters**: {t.why}")
         out.append("")
-    if seg.opening:
-        out.append(f"> {seg.opening}")
-        out.append("")
     if t and t.members:
-        out.append("**Items in this topic:**")
-        out.append("")
         for m in t.members:
             pdf = _paper_pdf_url(m)
             link = f"- [{m.title}]({m.url})"
@@ -116,9 +111,6 @@ def _section_lines(i: int, seg, t: Topic | None) -> list[str]:
     if seg.signposts:
         out.append("**Signposts:** " + "; ".join(seg.signposts))
         out.append("")
-    if seg.transition_out:
-        out.append(f"_{seg.transition_out}_")
-        out.append("")
     return out
 
 def _paper_pdf_url(item: RankedItem) -> str | None:
@@ -129,30 +121,35 @@ def _paper_pdf_url(item: RankedItem) -> str | None:
 # --- NotebookLM audio -----------------------------------------------------
 
 def _instructions(plan: EpisodePlan, by_id: dict[str, Topic]) -> str:
-    """Build a rich instruction scaffold from the plan (replaces the old
-    one-liner). NotebookLM still writes the actual spoken script; this steers
-    motif, pacing, signposts, and topic allocation."""
+    """Build a lean instruction scaffold from the plan. NotebookLM still writes
+    the actual spoken script; this steers motif, pacing, and topic allocation
+    without padding."""
     seg_lines = []
     for i, seg in enumerate(plan.segments, 1):
         t = by_id.get(seg.topic_id)
         title = t.title if t else seg.topic_id
-        sources = ", ".join(sorted({m.source for m in t.members})) if t else "?"
-        seg_lines.append(
-            f"{i}. Topic \"{title}\" (~{seg.minutes:.0f} min; sources: {sources}). "
-            f"Open with: {seg.opening or '(setup)'}. "
-            f"Signposts: {'; '.join(seg.signposts) or '(none)'}. "
-            f"Transition: {seg.transition_out or '(bridge to next)'}."
-        )
+        parts = [f'{i}. "{title}" (~{seg.minutes:.0f} min)']
+        if seg.opening:
+            parts.append(f"Open: {seg.opening}")
+        if seg.signposts:
+            parts.append("Cues: " + "; ".join(seg.signposts))
+        if seg.transition_out:
+            parts.append(f"Bridge: {seg.transition_out}")
+        seg_lines.append(" · ".join(parts))
     return (
-        f"A lively two-host AI news podcast for AI researchers. "
-        f"Episode motif to return to in transitions: \"{plan.motif or '(decide naturally)'}\". "
-        f"Hook to open: {plan.hook or '(open with the biggest story)'}. "
+        f"A two-host AI news podcast for AI researchers. The audience's time "
+        f"is valuable.\n"
+        f"Core rule: for each topic, explain what happened, how it works, and "
+        f"why it matters. Nothing else. No filler, no restating the obvious, "
+        f"no template phrases.\n"
+        f"Episode motif: \"{plan.motif or '(decide naturally)'}\". "
+        f"Hook to open: {plan.hook or '(open with the biggest story)'}.\n"
         f"Cover these topics in this order (do not exceed the minutes):\n"
         + "\n".join(seg_lines)
-        + f"\n\nFor each topic: weave the paper(s) and the HN coverage together — they "
-        f"are the same story; cross-reference them, do not read items as a bullet list. "
-        f"Pacing: break stats-heavy segments with a host question; no single topic runs "
-        f"more than ~4 min straight. Close with: {plan.outro or '(point to the links)'}."
+        + f"\n\nFor each topic: weave the paper(s) and the HN coverage together "
+        f"— they are the same story; cross-reference them, do not read items "
+        f"as a bullet list. Pacing: no single topic runs more than ~4 min "
+        f"straight. Close with: {plan.outro or '(point to the links)'}."
     )
 
 async def _generate_audio(plan: EpisodePlan, by_id: dict[str, Topic],
@@ -203,7 +200,7 @@ async def _generate_audio(plan: EpisodePlan, by_id: dict[str, Topic],
             print(f"        - {s.title or s.url}")
 
         instructions = _instructions(plan, by_id)
-        print(f"      [instructions] {len(instructions)} chars (was a one-liner before)")
+        print(f"      [instructions] {len(instructions)} chars")
         status = await client.artifacts.generate_audio(
             nb.id,
             instructions=instructions,
