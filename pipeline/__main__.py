@@ -1,10 +1,10 @@
 import sys
 from .orchestrator import run
 
-USAGE = ("usage: python -m pipeline run [--only collect|rank|cluster|plan|generate] "
-         "[--no-audio] [--ab] [--from-cache <rank.json>] [--ab-personal]\n"
+USAGE = ("usage: python -m pipeline run [--only collect|rank|generate] "
+         "[--no-audio] [--from-cache <rank.json>]\n"
          "       python -m pipeline mark <url> kept|skipped")
-STAGES = ("collect", "rank", "cluster", "plan", "generate")
+STAGES = ("collect", "rank", "generate")
 
 def main(argv: list[str]) -> None:
     if not argv:
@@ -17,18 +17,12 @@ def main(argv: list[str]) -> None:
     args = argv[1:]
     only = None
     no_audio = False
-    ab = False
-    ab_personal = False
     from_cache = None
     rest = []
     while args:
         a = args.pop(0)
         if a == "--no-audio":
             no_audio = True
-        elif a == "--ab":
-            ab = True
-        elif a == "--ab-personal":
-            ab_personal = True
         elif a == "--from-cache":
             if not args:
                 raise SystemExit(f"{USAGE}\n(error: `--from-cache` needs a path)")
@@ -44,8 +38,7 @@ def main(argv: list[str]) -> None:
             rest.append(a)
     if rest:
         raise SystemExit(f"{USAGE}\n(error: unexpected argument {rest[0]!r})")
-    run(only=only, no_audio=no_audio, ab=ab, ab_personal=ab_personal,
-        from_cache=from_cache)
+    run(only=only, no_audio=no_audio, from_cache=from_cache)
 
 def _mark(args: list[str]) -> None:
     from . import feedback

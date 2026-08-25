@@ -1,5 +1,5 @@
-from . import RankedItem, Topic, EpisodePlan, Episode
-from . import store
+from . import RankedItem, Episode
+from . import store, profile as profile_mod
 import asyncio, pathlib, datetime
 
 NOTEBOOK = "AI News Digest"
@@ -16,36 +16,54 @@ UNFETCHABLE_HOSTS = {
     "t.co",
 }
 
-def generate(plan: EpisodePlan, topics: list[Topic], make_audio: bool = True) -> Episode:
-    """Render the narrative plan as a topic-grouped digestible brief, then
-    optionally produce audio via NotebookLM fed a rich instruction scaffold.
+# Map profile.format -> notebooklm.AudioFormat
+_FORMAT_MAP = {
+    "deep_dive": "DEEP_DIVE",
+    "brief": "BRIEF",
+    "critique": "CRITIQUE",
+    "debate": "DEBATE",
+}
+# Map profile.target_length -> notebooklm.AudioLength
+_LENGTH_MAP = {
+    "short": "SHORT",
+    "default": "DEFAULT",
+    "long": "LONG",
+}
 
-    `plan` is the narrative outline; `topics` carries the members so the brief
-    can link each item for deeper reading.
+
+def generate(ranked: list[RankedItem], make_audio: bool = True,
+             profile: profile_mod.Profile | None = None) -> Episode:
+    """Feed the top-N ranked items to NotebookLM and produce audio.
+
+    The narrative style comes from `profile.md` (loaded if `profile` is None):
+    `format`/`target_length` reach NotebookLM's audio knobs; the rest template
+    into the `instructions` string that steers it. No per-run planner LLM call.
     """
+    if profile is None:
+        profile = profile_mod.load_profile()
+
     run = store.run_dir()
     audio = run / "episode.mp3"
     brief = run / "podcast_brief.md"
 
-    by_id = {t.id: t for t in topics}
-    lines = _brief_lines(plan, by_id)
-    brief.write_text("\n".join(lines), encoding="utf-8")
+    chosen = sorted(ranked, key=lambda r: r.final_score, reverse=True)[:profile.top_n]
+    by_source = _group_by_source(chosen)
 
-    members = [m for seg in plan.segments for m in by_id.get(seg.topic_id, Topic(id=seg.topic_id)).members]
+    brief.write_text(_brief_text(chosen, by_source, profile), encoding="utf-8")
 
     if make_audio:
         try:
-            asyncio.run(_generate_audio(plan, by_id, members, brief, audio))
+            asyncio.run(_generate_audio(chosen, brief, audio, profile))
         except Exception as e:
             print(f"      [warn] audio generation failed: {e}")
             print(f"      [warn] {audio.name} not produced; drop the brief into NotebookLM manually")
             audio = pathlib.Path("")
     else:
-        print("      skipping audio (generate(make_audio=False) or --no-audio)")
+        print("      skipping audio (--no-audio)")
 
     ep = Episode(
         audio_path=str(audio) if audio else "",
-        manifest=members,
+        manifest=chosen,
         created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
     )
     store.write("episode.json", {
@@ -53,110 +71,116 @@ def generate(plan: EpisodePlan, topics: list[Topic], make_audio: bool = True) ->
         "created_at": ep.created_at,
         "manifest": [r.__dict__ for r in ep.manifest],
     })
-    print(f"      wrote {brief.name} ({len(plan.segments)} topics)")
+    print(f"      wrote {brief.name} ({len(chosen)} items)")
     return ep
 
-# --- brief rendering ------------------------------------------------------
 
-def _brief_lines(plan: EpisodePlan, by_id: dict[str, Topic]) -> list[str]:
-    total = sum(s.minutes for s in plan.segments)
+# --- brief: a flat, source-grouped digest fed to NotebookLM as a source ----
+
+def _brief_text(chosen: list[RankedItem],
+                by_source: dict[str, list[RankedItem]],
+                profile: profile_mod.Profile) -> str:
     lines = [
-        f"# AI News Digest — {plan.date}",
+        f"# AI News Digest — {datetime.date.today().isoformat()}",
         "",
-        f"A pipeline-generated, topic-grouped overview of this week's AI work. "
-        f"~{total:.0f} min listen.",
-        "",
-        f"**Motif this week**: *{plan.motif or '(none)'}*",
-        "",
-        f"> Hook: {plan.hook or '(none)'}",
+        f"A pipeline-generated, source-grouped digest of this week's AI work. "
+        f"Audio: {profile.format} format, {profile.target_length} length, "
+        f"tone: {profile.tone}, audience: {profile.knowledge_level}.",
         "",
     ]
-    for i, seg in enumerate(plan.segments, 1):
-        t = by_id.get(seg.topic_id)
-        lines += _section_lines(i, seg, t)
-    lines += ["## Outro", "", plan.outro or "(none)", ""]
-    # Links appendix: every member URL once
-    lines += ["## Links", ""]
-    seen: set[str] = set()
-    for seg in plan.segments:
-        t = by_id.get(seg.topic_id)
-        if not t:
+    for source in ("arxiv", "hn"):
+        items = by_source.get(source, [])
+        if not items:
             continue
-        for m in t.members:
-            if m.url in seen:
-                continue
-            seen.add(m.url)
-            pdf = _paper_pdf_url(m)
-            label = m.title
-            link = f"- [{label}]({m.url})"
-            if pdf and pdf != m.url:
-                link += f" · [PDF]({pdf})"
-            lines.append(link)
-    return lines
-
-def _section_lines(i: int, seg, t: Topic | None) -> list[str]:
-    out = [f"## {i}. {t.title if t else seg.topic_id}  ({seg.minutes:.1f} min)", ""]
-    if t and t.why:
-        out.append(f"**Why it matters**: {t.why}")
-        out.append("")
-    if t and t.members:
-        for m in t.members:
+        label = "arXiv papers" if source == "arxiv" else "Hacker News stories"
+        lines += [f"## {label} ({len(items)})", ""]
+        for m in items:
             pdf = _paper_pdf_url(m)
             link = f"- [{m.title}]({m.url})"
             if pdf and pdf != m.url:
                 link += f" · [PDF]({pdf})"
-            link += f" — score {m.score:.2f}"
-            out.append(link)
-        out.append("")
-    if seg.signposts:
-        out.append("**Signposts:** " + "; ".join(seg.signposts))
-        out.append("")
+            link += f" — score {m.final_score:.2f}"
+            lines.append(link)
+            if m.body:
+                lines.append(f"  > {m.body[:500]}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _group_by_source(items: list[RankedItem]) -> dict[str, list[RankedItem]]:
+    out: dict[str, list[RankedItem]] = {}
+    for it in items:
+        out.setdefault(it.source, []).append(it)
     return out
+
 
 def _paper_pdf_url(item: RankedItem) -> str | None:
     if item.url.startswith(ARXIV_ABS):
         return item.url.replace(ARXIV_ABS, ARXIV_PDF, 1)
     return None
 
-# --- NotebookLM audio -----------------------------------------------------
 
-def _instructions(plan: EpisodePlan, by_id: dict[str, Topic]) -> str:
-    """Build a lean instruction scaffold from the plan. NotebookLM still writes
-    the actual spoken script; this steers motif, pacing, and topic allocation
-    without padding."""
-    seg_lines = []
-    for i, seg in enumerate(plan.segments, 1):
-        t = by_id.get(seg.topic_id)
-        title = t.title if t else seg.topic_id
-        parts = [f'{i}. "{title}" (~{seg.minutes:.0f} min)']
-        if seg.opening:
-            parts.append(f"Open: {seg.opening}")
-        if seg.signposts:
-            parts.append("Cues: " + "; ".join(seg.signposts))
-        if seg.transition_out:
-            parts.append(f"Bridge: {seg.transition_out}")
-        seg_lines.append(" · ".join(parts))
+# --- NotebookLM instructions: templated from the profile -------------------
+
+def _instructions(profile: profile_mod.Profile,
+                   chosen: list[RankedItem]) -> str:
+    """Build the instruction scaffold from the profile + this week's items.
+
+    NotebookLM still writes the spoken script; this steers format, tone,
+    audience level, and opening/closing style without padding. The style
+    knobs come from `profile.md`, not a frozen prompt.
+    """
+    intro_hint = {
+        "theme-first": "Open by naming the week's dominant theme, then lead into the first story.",
+        "biggest-story": "Open with the single biggest story of the week.",
+        "bullet": "Open with a short bullet list of the 2-3 biggest items, then dive in.",
+    }[profile.intro_style]
+    outro_hint = {
+        "links": "Close by pointing listeners to the source links for deeper reading.",
+        "recap": "Close with a one-sentence recap of the top 2 items.",
+        "teaser": "Close with a teaser for next week's likely themes.",
+    }[profile.outro_style]
+    transition_hint = {
+        "next": "Use simple 'Next:' transitions between topics.",
+        "bridge": "Use one bridge phrase between topics where it helps the flow.",
+        "motif": "Return to the week's motif in transitions between topics.",
+    }[profile.transition_style]
+    tone_hint = {
+        "dense": "Dense and information-rich: no filler, no restating the obvious, no template phrases.",
+        "conversational": "Conversational but efficient: a natural back-and-forth, no filler.",
+        "casual": "Casual and relaxed: two hosts chatting, keep it light but accurate.",
+    }[profile.tone]
+    level_hint = {
+        "undergrad": "Assume a CS undergraduate audience; explain jargon briefly.",
+        "researcher": "Assume the audience are AI researchers; skip basics.",
+        "expert": "Assume deep expertise; go straight to the substance.",
+    }[profile.knowledge_level]
+
+    titles = [f'{i+1}. "{m.title}"' for i, m in enumerate(chosen)]
     return (
-        f"A two-host AI news podcast for AI researchers. The audience's time "
-        f"is valuable.\n"
-        f"Core rule: for each topic, explain what happened, how it works, and "
-        f"why it matters. Nothing else. No filler, no restating the obvious, "
-        f"no template phrases.\n"
-        f"Episode motif: \"{plan.motif or '(decide naturally)'}\". "
-        f"Hook to open: {plan.hook or '(open with the biggest story)'}.\n"
-        f"Cover these topics in this order (do not exceed the minutes):\n"
-        + "\n".join(seg_lines)
-        + f"\n\nFor each topic: weave the paper(s) and the HN coverage together "
-        f"— they are the same story; cross-reference them, do not read items "
-        f"as a bullet list. Pacing: no single topic runs more than ~4 min "
-        f"straight. Close with: {plan.outro or '(point to the links)'}."
+        f"A two-host AI news podcast. {tone_hint} {level_hint}\n"
+        f"Cover these items in this order (do not omit any):\n"
+        + "\n".join(titles)
+        + f"\nFor each item: explain what happened, how it works, and why it matters. "
+        f"Cross-reference an arXiv paper and a HN story about the same event when both "
+        f"are present — they are the same story, do not read items as a bullet list. "
+        f"Pacing: no single item runs more than ~3 min straight.\n"
+        f"Open: {intro_hint}\n"
+        f"Transitions: {transition_hint}\n"
+        f"Close: {outro_hint}"
     )
 
-async def _generate_audio(plan: EpisodePlan, by_id: dict[str, Topic],
-                          members: list[RankedItem], brief: pathlib.Path, audio: pathlib.Path):
+
+# --- NotebookLM audio -----------------------------------------------------
+
+async def _generate_audio(chosen: list[RankedItem], brief: pathlib.Path,
+                          audio: pathlib.Path, profile: profile_mod.Profile):
     from notebooklm import NotebookLMClient, AudioFormat, AudioLength
     from notebooklm.artifacts import with_rate_limit_retry
     from notebooklm.exceptions import RateLimitError, SourceError, RPCError
+
+    audio_format = AudioFormat[_FORMAT_MAP[profile.format]]
+    audio_length = AudioLength[_LENGTH_MAP[profile.target_length]]
 
     async with NotebookLMClient.from_storage(profile="personal") as client:
         notebooks = await client.notebooks.list()
@@ -166,10 +190,10 @@ async def _generate_audio(plan: EpisodePlan, by_id: dict[str, Topic],
 
         await _clear_sources(client, nb.id)
 
-        for i, item in enumerate(members):
+        for i, item in enumerate(chosen):
             url = _paper_pdf_url(item) or item.url
             if _host(url) in UNFETCHABLE_HOSTS:
-                print(f"      [source {i+1}/{len(members)}] skipping unfetchable host {url}")
+                print(f"      [source {i+1}/{len(chosen)}] skipping unfetchable host {url}")
                 await _add_text_source(client, nb.id, item)
                 continue
             try:
@@ -177,11 +201,11 @@ async def _generate_audio(plan: EpisodePlan, by_id: dict[str, Topic],
                     lambda url=url: client.sources.add_url(nb.id, url, wait=True),
                     max_retries=3,
                 )
-                print(f"      [source {i+1}/{len(members)}] added {url}")
+                print(f"      [source {i+1}/{len(chosen)}] added {url}")
             except RateLimitError as e:
-                print(f"      [source {i+1}/{len(members)}] rate-limited adding {url}, skipped: {e}")
+                print(f"      [source {i+1}/{len(chosen)}] rate-limited adding {url}, skipped: {e}")
             except (SourceError, RPCError) as e:
-                print(f"      [source {i+1}/{len(members)}] url-add failed for {url}: {e}")
+                print(f"      [source {i+1}/{len(chosen)}] url-add failed for {url}: {e}")
                 await _add_text_source(client, nb.id, item)
             await asyncio.sleep(1)
 
@@ -195,17 +219,17 @@ async def _generate_audio(plan: EpisodePlan, by_id: dict[str, Topic],
             print(f"      [source] rate-limited adding {brief.name}, skipped")
 
         sources = await client.sources.list(nb.id)
-        print(f"      [sources] {len(sources)} sources now in notebook:")
+        print(f"      [sources] {len(sources)} sources now in notebook")
         for s in sources:
             print(f"        - {s.title or s.url}")
 
-        instructions = _instructions(plan, by_id)
+        instructions = _instructions(profile, chosen)
         print(f"      [instructions] {len(instructions)} chars")
         status = await client.artifacts.generate_audio(
             nb.id,
             instructions=instructions,
-            audio_format=AudioFormat.DEEP_DIVE,
-            audio_length=AudioLength.DEFAULT,
+            audio_format=audio_format,
+            audio_length=audio_length,
         )
         await client.artifacts.wait_for_completion(nb.id, status.task_id, timeout=1200)
         await client.artifacts.download_audio(nb.id, str(audio))

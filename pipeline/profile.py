@@ -1,10 +1,13 @@
 """Listener profile loader.
 
-Reads `profile.md` at the repo root: YAML frontmatter (`topics`, `anti_topics`)
-+ a free-text prose body passed verbatim to the personal-match prompt.
+Reads `profile.md` at the repo root: YAML frontmatter + a free-text prose
+body passed verbatim to the personal-match prompt.
 
-This is the *only* content the listener tunes (per the no-prompt-chasing rule).
-The personal-match prompt in `rank.py` is fixed; this file is the variable.
+Two kinds of frontmatter keys:
+  - Signal: `topics`, `anti_topics` (lists) — feed the personal-match pass.
+  - Style:  scalar knobs (see `STYLE_FIELDS`) — drive the NotebookLM
+    instruction template. Style replaces the deleted `plan` stage's frozen
+    narrative prompt; the listener tunes style here, not in code.
 """
 from __future__ import annotations
 
@@ -13,34 +16,51 @@ import pathlib
 
 PROFILE_PATH = pathlib.Path("profile.md")
 
+# Allowed values per style field. The first entry is the default.
+STYLE_FIELDS: dict[str, list[str]] = {
+    "knowledge_level":  ["researcher", "undergrad", "expert"],
+    "tone":             ["dense", "conversational", "casual"],
+    "format":           ["deep_dive", "brief", "critique", "debate"],
+    "target_length":    ["default", "short", "long"],
+    "intro_style":      ["theme-first", "biggest-story", "bullet"],
+    "outro_style":      ["links", "recap", "teaser"],
+    "transition_style": ["bridge", "next", "motif"],
+}
+DEFAULT_TOP_N = 20
+
 
 @dataclass
 class Profile:
+    # signal
     topics: list[str] = field(default_factory=list)
     anti_topics: list[str] = field(default_factory=list)
     body: str = ""
+    # style (defaults = first entry in STYLE_FIELDS)
+    knowledge_level: str = "researcher"
+    tone: str = "dense"
+    format: str = "deep_dive"
+    target_length: str = "default"
+    intro_style: str = "theme-first"
+    outro_style: str = "links"
+    transition_style: str = "bridge"
+    top_n: int = DEFAULT_TOP_N
 
 
 def load_profile(path: pathlib.Path | str | None = None) -> Profile:
     """Parse `profile.md` into a Profile. Returns an empty Profile if the
-    file is absent (personalization off — the personal pass gets no signal).
+    file is absent (personalization off — the personal pass gets no signal,
+    style falls back to defaults).
 
-    `path` defaults to the current module-level `PROFILE_PATH` (resolved at
-    call time so tests can monkeypatch it).
-
-    Frontmatter is a minimal hand-rolled parse: only `topics:` and
-    `anti_topics:` list keys, one list item per `- value` line until a blank
-    line or non-indented line. No external YAML dependency for two list keys.
+    Frontmatter is a minimal hand-rolled parse: list keys (`topics`,
+    `anti_topics`) take one `- value` line per item; scalar keys take
+    `key: value` inline. No external YAML dependency.
     """
     p = pathlib.Path(path) if path is not None else PROFILE_PATH
     if not p.exists():
         return Profile()
 
     text = p.read_text(encoding="utf-8")
-    # Strip leading `---` comment lines from the frontmatter block so the
-    # loader treats `#`-prefixed lines as comments, not list items.
     if text.startswith("---"):
-        # find the closing `---` on its own line
         rest = text[3:]
         end = rest.find("\n---")
         if end != -1:
@@ -53,6 +73,7 @@ def load_profile(path: pathlib.Path | str | None = None) -> Profile:
 
     topics: list[str] = []
     anti: list[str] = []
+    scalars: dict[str, str] = {}
     current: list[str] | None = None
     for raw in frontmatter.splitlines():
         line = raw.rstrip()
@@ -74,5 +95,34 @@ def load_profile(path: pathlib.Path | str | None = None) -> Profile:
                 current.append(stripped.lstrip("- ").strip())
         else:
             current = None
+            # scalar `key: value`
+            if ":" in stripped:
+                k, v = stripped.split(":", 1)
+                scalars[k.strip()] = v.strip().strip("\"'")
 
-    return Profile(topics=topics, anti_topics=anti, body=body.strip())
+    def _pick(field_name: str) -> str:
+        raw_val = scalars.get(field_name, "")
+        allowed = STYLE_FIELDS[field_name]
+        if raw_val and raw_val in allowed:
+            return raw_val
+        return allowed[0]
+
+    top_n = DEFAULT_TOP_N
+    try:
+        tn = int(scalars.get("top_n", DEFAULT_TOP_N))
+        if 1 <= tn <= 100:
+            top_n = tn
+    except ValueError:
+        pass
+
+    return Profile(
+        topics=topics, anti_topics=anti, body=body.strip(),
+        knowledge_level=_pick("knowledge_level"),
+        tone=_pick("tone"),
+        format=_pick("format"),
+        target_length=_pick("target_length"),
+        intro_style=_pick("intro_style"),
+        outro_style=_pick("outro_style"),
+        transition_style=_pick("transition_style"),
+        top_n=top_n,
+    )

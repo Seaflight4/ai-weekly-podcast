@@ -1,16 +1,14 @@
 # AI Weekly Podcast
 
 A small, on-demand pipeline that turns a week of AI research and community news
-into a podcast episode. Five stages, each a single Python module with a stable
+into a podcast episode. Three stages, each a single Python module with a stable
 contract, so any stage can be swapped without touching its neighbours.
 
 ```
 collect ──> HN (points>100, 7d, batched LLM relevance gate, per-URL body fetch)
-        ─-> arXiv (cs.AI, 7d, full abstracts, LLM relevance gate)
+         ─-> arXiv (cs.AI, 7d, full abstracts, LLM relevance gate)
 rank    ─-> unified rubric scores the whole pool; no fixed top-N slice
-cluster ─-> MiniLM embeddings group top-50 into topics; LLM labels + cross-merges
-plan    ─-> budget fill (~24-34 min) + narrative outline (hook, motif, signposts)
-generate ─> topic-grouped digestible brief + NotebookLM Audio Overview
+generate ─> top-N items fed to NotebookLM (format/length/tone from profile.md)
 ```
 
 ## Stages & contracts
@@ -19,24 +17,11 @@ generate ─> topic-grouped digestible brief + NotebookLM Audio Overview
 |-------|-------|--------|
 | `collect` | date (default: today) | `<data/DD-MM-YYYY>/collect.json` — every `Item`: title, url, date, body, source (`hn` or `arxiv`) |
 | `rank` | collect.json | `<data/DD-MM-YYYY>/rank.json` — the **full** scored pool (sorted desc, no top-N slice) |
-| `cluster` | rank.json | `<data/DD-MM-YYYY>/cluster.json` — `Topic[]` from the top-50 pool (MiniLM groups + LLM labels/merges) |
-| `plan` | cluster.json | `<data/DD-MM-YYYY>/episode_plan.json` — budget fill + narrative outline |
-| `generate` | episode_plan.json + cluster.json | `<data/DD-MM-YYYY>/podcast_brief.md` + `episode.json` manifest (+ `episode.mp3`) |
+| `generate` | rank.json + profile.md | `<data/DD-MM-YYYY>/podcast_brief.md` + `episode.json` manifest (+ `episode.mp3`) |
 
 Each run writes all of its outputs into a folder named `data/DD-MM-YYYY/` (local
 run date), so successive runs never overwrite each other. Running a single stage
 in isolation reads from the most recent folder's previous-stage file.
-
-Each stage also writes a human-reviewable `<stage>_report.md` next to its JSON
-(the quality gates: arXiv gate pass-rate, rubric A/B comparison, cluster table,
-merge diff, budget fill, narrative outline).
-
-**Two rubric arms** (`RUBRIC_MODE` env, default `unified`): `unified` scores the
-whole pool on one source-agnostic scale (major release ≈ must-study paper ≈
-0.85); `separated` is the legacy two-track (PAPER_RUBRIC for arxiv,
-NEWS_RUBRIC for hn). `--only rank --ab` runs both and writes a comparison
-report so you can see which surfaces more community signal without collapsing
-paper quality.
 
 **HN prefiltering** happens server-side at `points>100` (community signal), then
 a **batched LLM relevance gate** keeps only stories useful to AI researchers at
@@ -48,24 +33,27 @@ are used only to *select*, never emitted, so the judge weighs content, not hype.
 URL, hash-lookup against the collected arXiv set, and drop the HN twin (the arXiv
 entry already carries the full abstract). No quadratic similarity search.
 
-**Topic clustering** (`cluster`): `all-MiniLM-L6-v2` embeddings group the top-50
-scored items into candidate clusters by cosine similarity, then one LLM call
-per cluster labels it (title, why-it-matters, primary member) and one
-cross-cluster merge call fuses same-event clusters — so a model release and a
-paper about it can land in one mixed-source topic. The brief is grouped by
-these topics, not by source.
+**Personalization** (`rank`): if a `profile.md` exists and `ALPHA < 1.0`, a
+personal-match pass scores every item and
+`final_score = ALPHA*score + (1-ALPHA)*personal_score`. Otherwise
+`final_score = score` (Phase 1 behaviour). The profile carries both the
+personal signal (topics, anti-topics, body) and the narrative style knobs
+(format, length, tone, audience level, intro/outro/transition style) that
+`generate` templates into the NotebookLM instructions.
 
-**Dynamic length** (`plan`): the episode length is week-adaptive, not a fixed
-top-10. The score distribution's knee caps the cluster pool; a minute-budget
-knapsack fills topics to ~28–30 min (clamped to 24–34). A narrative planner then
-writes the outline (hook, segment order, signposts, motif, transitions, outro).
+**Audio generation** (`generate`): the top-N items (by `final_score`, N from
+`profile.md`) are fed to NotebookLM as URL/text sources plus a brief, and one
+`generate_audio` call produces the MP3. The `format`/`target_length` profile
+fields map directly to NotebookLM's `AudioFormat`/`AudioLength` knobs. NotebookLM
+writes the spoken script; the profile steers style without a per-run planner
+LLM call.
 
 ## Requirements
 
 - Python 3.11+
-- An OpenAI-compatible API key (used by the relevance gate + ranking judge + clustering/plan LLM calls)
+- An OpenAI-compatible API key (used by the relevance gate + ranking judge)
 - `trafilatura` (main-text extraction for HN URL bodies)
-- `sentence-transformers` (MiniLM embeddings for topic clustering)
+- A NotebookLM account (for the audio step; optional with `--no-audio`)
 
 ## Setup
 
@@ -79,25 +67,53 @@ cp .env.example .env    # then set SKAINET_API_KEY
 ## Usage
 
 ```bash
-# run all five stages (collect → rank → cluster → plan → generate)
+# run all three stages (collect -> rank -> generate)
 .venv/bin/python -m pipeline run
 
 # or re-run a single stage from the previous stage's file
 .venv/bin/python -m pipeline run --only collect
 .venv/bin/python -m pipeline run --only rank
-.venv/bin/python -m pipeline run --only cluster
-.venv/bin/python -m pipeline run --only plan
 .venv/bin/python -m pipeline run --only generate --no-audio
 
-# A/B test the rubric (runs both arms, writes rank_report.md)
-.venv/bin/python -m pipeline run --only rank --ab
+# re-run only the personal pass on a cached rank.json (fast iteration)
+.venv/bin/python -m pipeline run --only rank --from-cache data/21-08-2026/rank.json
+
+# mark an item as kept/skipped for the personal-match feedback loop
+.venv/bin/python -m pipeline mark <url> kept|skipped
 ```
 
-The final step is intentionally flexible: open the run's `podcast_brief.md` in
-Gemini Notebook, create an Audio Overview, and save the MP3 as
-`episode.mp3` in the run folder. The `--no-audio` flag skips the (optional,
-cred-gated) NotebookLM automation wrapper. Everything before that click is
-automated.
+The `--no-audio` flag skips the (cred-gated) NotebookLM automation wrapper and
+stops after writing `podcast_brief.md` + `episode.json`. Drop the brief into
+NotebookLM manually if you want audio without the automation.
+
+## Profile (`profile.md`)
+
+The listener tunes two things in one file: the **personal signal** (what the
+ranker blends into scores) and the **narrative style** (what `generate`
+templates into the NotebookLM instructions). Per the no-prompt-chasing rule,
+the prompts in the code are fixed; this file is the variable.
+
+```yaml
+---
+# Personal signal (feeds the ranker's personal-match pass)
+topics: [agent evals, inference cost]
+anti_topics: [pure scaling]
+
+# Narrative style (feeds the generate stage's NotebookLM instructions)
+knowledge_level: researcher     # undergrad | researcher | expert
+tone: dense                     # dense | conversational | casual
+format: deep_dive               # deep_dive | brief | critique | debate  -> AudioFormat
+target_length: default          # short | default | long               -> AudioLength
+intro_style: theme-first        # theme-first | biggest-story | bullet
+outro_style: links              # links | recap | teaser
+transition_style: bridge        # next | bridge | motif
+top_n: 20                       # how many ranked items to feed NotebookLM
+---
+What I'm working on this quarter: agent reliability, evals...
+```
+
+Invalid style values fall back to the default (first option listed) with no
+error; `top_n` is clamped to [1, 100].
 
 ## Validation
 
@@ -106,18 +122,13 @@ automated.
 .venv/bin/python -m pytest tests/ -q     # contract tests (no network, no LLM)
 ```
 
-Each stage also writes a `<stage>_report.md` next to its JSON output for
-human review (arXiv gate pass-rate, rubric A/B, cluster table, merge diff,
-budget fill, narrative outline).
-
 ## Configuration
 
 | Variable | Purpose |
 |----------|---------|
 | `SKAINET_API_KEY` | API key for the OpenAI-compatible judge backend (required) |
-| `RUBRIC_MODE` | `unified` (default, one source-agnostic rubric) or `separated` (legacy two-track) |
-| `JUDGE_MODEL` | Override the judge/cluster/plan model (`Qwen/Qwen3.8-27B` by default) |
+| `JUDGE_MODEL` | Override the judge/rank model (`Qwen/Qwen3.8-27B` by default) |
+| `ALPHA` | Blend weight: `1.0` = pure importance, `0.0` = pure personal (default `0.7`) |
 
-The relevance gate model (`pipeline/collect.py`), the cluster embedding model
-(`all-MiniLM-L6-v2`), the similarity threshold, and the budget envelope
-(`24–34 min`) are constants in their respective modules.
+The relevance gate model (`pipeline/collect.py`) and the batch sizes are
+constants in their respective modules.

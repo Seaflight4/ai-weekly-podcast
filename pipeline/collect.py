@@ -1,6 +1,6 @@
 from . import Item
 from . import store
-from .rank import _get_client, _parse_json
+from . import llm
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import json, urllib.request, urllib.parse, datetime, re
 import xml.etree.ElementTree as ET
@@ -268,7 +268,7 @@ def _gate(items: list[Item], prompt: str, model: str, batch_size: int,
         raw = _chat(payload, prompt, model)
         dt = (datetime.datetime.now(datetime.timezone.utc) - t0).total_seconds()
         try:
-            rel = _parse_json(raw).get("relevant") or []
+            rel = llm.parse_json(raw).get("relevant") or []
         except ValueError:
             print(f"      {label} relevance gate: bad response, keeping whole chunk ({len(chunk)})")
             rel = list(range(len(chunk)))
@@ -297,7 +297,7 @@ def _arxiv_relevant(items: list[Item]) -> list[Item]:
     return kept
 
 def _chat(payload, prompt: str, model: str) -> str:
-    resp = _get_client().chat.completions.create(
+    resp = llm.get_client().chat.completions.create(
         model=model,
         messages=[
             {"role": "system", "content": prompt},
