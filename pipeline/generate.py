@@ -30,23 +30,36 @@ _LENGTH_MAP = {
     "long": "LONG",
 }
 
+# Source-set selection: fixed score threshold + pace-controlled floor/cap.
+# All items with final_score >= THRESHOLD are "must include". Pace sets the
+# floor (pad with lower-scored items on a weak week) and cap (cut on a strong
+# week). This replaces the previous score-tier elbow algorithm, which did not
+# generalise across the two distribution shapes the judge produces.
+THRESHOLD = 0.80
+PACE_LIMITS = {
+    "deep_dive": (5, 10),
+    "brief":     (10, 20),
+}
+
 
 def generate(ranked: list[RankedItem], make_audio: bool = True,
-             profile: profile_mod.Profile | None = None) -> Episode:
-    """Feed the top-N ranked items to NotebookLM and produce audio.
+             profile: profile_mod.Profile | None = None,
+             date: str | None = None) -> Episode:
+    """Feed the week's top items to NotebookLM and produce audio.
 
-    The narrative style comes from `profile.md` (loaded if `profile` is None):
-    `format`/`target_length` reach NotebookLM's audio knobs; the rest template
-    into the `instructions` string that steers it. No per-run planner LLM call.
+    The source set is selected by a fixed score threshold (>= 0.8) with
+    pace-controlled floor/cap. The narrative style comes from `profile.md`:
+    `format`/`target_length` reach NotebookLM's audio knobs; `knowledge_level`
+    and `pace` template into the `instructions` string.
     """
     if profile is None:
         profile = profile_mod.load_profile()
 
-    run = store.run_dir()
+    run = store.run_dir(date)
     audio = run / "episode.mp3"
     brief = run / "podcast_brief.md"
 
-    chosen = sorted(ranked, key=lambda r: r.final_score, reverse=True)[:profile.top_n]
+    chosen = select_sources(ranked, profile.pace)
     by_source = _group_by_source(chosen)
 
     brief.write_text(_brief_text(chosen, by_source, profile), encoding="utf-8")
@@ -70,9 +83,46 @@ def generate(ranked: list[RankedItem], make_audio: bool = True,
         "audio_path": str(audio),
         "created_at": ep.created_at,
         "manifest": [r.__dict__ for r in ep.manifest],
-    })
+    }, date=date)
     print(f"      wrote {brief.name} ({len(chosen)} items)")
     return ep
+
+
+# --- source selection: threshold + pace floor/cap ------------------------
+
+def select_sources(ranked: list[RankedItem], pace: str) -> list[RankedItem]:
+    """Pick the source set for NotebookLM by score threshold + floor/cap.
+
+    All items with final_score >= THRESHOLD (0.8) are "must include". Pace
+    then sets a floor and cap:
+      - deep_dive: floor=5,  cap=10  (fewer items, each in depth)
+      - brief:     floor=10, cap=20  (more items, each briefly)
+
+    On a weak week (few items >= 0.8): pad with the next-highest-scored
+    items down to the floor. On a strong week (many items >= 0.8): cut at
+    the cap, keeping the top-scored. Otherwise: all items >= 0.8 qualify.
+    """
+    floor, cap = PACE_LIMITS.get(pace, PACE_LIMITS["deep_dive"])
+    sorted_items = sorted(ranked, key=lambda r: r.final_score, reverse=True)
+    if not sorted_items:
+        return []
+
+    above = [r for r in sorted_items if r.final_score >= THRESHOLD]
+    n = len(above)
+
+    if n >= cap:
+        chosen = sorted_items[:cap]
+        reason = f"cap (>=0.8: {n}, cut to {cap})"
+    elif n < floor:
+        chosen = sorted_items[:floor]
+        reason = f"floor (>=0.8: {n}, pad to {floor})"
+    else:
+        chosen = above
+        reason = f"threshold ({n} items >=0.8)"
+
+    print(f"      select: pace={pace}, {reason} -> {len(chosen)} items "
+          f"(score {chosen[0].final_score:.3f}..{chosen[-1].final_score:.3f})")
+    return chosen
 
 
 # --- brief: a flat, source-grouped digest fed to NotebookLM as a source ----
@@ -85,7 +135,7 @@ def _brief_text(chosen: list[RankedItem],
         "",
         f"A pipeline-generated, source-grouped digest of this week's AI work. "
         f"Audio: {profile.format} format, {profile.target_length} length, "
-        f"tone: {profile.tone}, audience: {profile.knowledge_level}.",
+        f"pace: {profile.pace}, audience: {profile.knowledge_level}.",
         "",
     ]
     for source in ("arxiv", "hn"):
@@ -126,48 +176,61 @@ def _instructions(profile: profile_mod.Profile,
                    chosen: list[RankedItem]) -> str:
     """Build the instruction scaffold from the profile + this week's items.
 
-    NotebookLM still writes the spoken script; this steers format, tone,
-    audience level, and opening/closing style without padding. The style
-    knobs come from `profile.md`, not a frozen prompt.
+    NotebookLM still writes the spoken script; this steers audience level,
+    pace, and opening/closing style. The knobs come from `profile.md`, not a
+    frozen prompt. `pace` is a soft instruction tested against the hard
+    `AudioFormat` knob — `pace=brief` asks for breadth while `format=deep_dive`
+    requests the Deep Dive format, to see which wins.
     """
-    intro_hint = {
-        "theme-first": "Open by naming the week's dominant theme, then lead into the first story.",
-        "biggest-story": "Open with the single biggest story of the week.",
-        "bullet": "Open with a short bullet list of the 2-3 biggest items, then dive in.",
-    }[profile.intro_style]
-    outro_hint = {
-        "links": "Close by pointing listeners to the source links for deeper reading.",
-        "recap": "Close with a one-sentence recap of the top 2 items.",
-        "teaser": "Close with a teaser for next week's likely themes.",
-    }[profile.outro_style]
-    transition_hint = {
-        "next": "Use simple 'Next:' transitions between topics.",
-        "bridge": "Use one bridge phrase between topics where it helps the flow.",
-        "motif": "Return to the week's motif in transitions between topics.",
-    }[profile.transition_style]
-    tone_hint = {
-        "dense": "Dense and information-rich: no filler, no restating the obvious, no template phrases.",
-        "conversational": "Conversational but efficient: a natural back-and-forth, no filler.",
-        "casual": "Casual and relaxed: two hosts chatting, keep it light but accurate.",
-    }[profile.tone]
     level_hint = {
-        "undergrad": "Assume a CS undergraduate audience; explain jargon briefly.",
-        "researcher": "Assume the audience are AI researchers; skip basics.",
-        "expert": "Assume deep expertise; go straight to the substance.",
+        "researcher": (
+            "Assume the audience are AI researchers. Don't explain basics — no "
+            "need to define what an attention mechanism is, only explain the new "
+            "architecture; no need to define RLHF, only explain the new result. "
+            "Skip prerequisites, go straight to the substance."
+        ),
+        "undergrad": (
+            "Assume a CS undergraduate audience. Briefly explain jargon the first "
+            "time it appears — define the attention mechanism in one sentence "
+            "before discussing the new architecture; explain what RLHF is before "
+            "quoting the result."
+        ),
     }[profile.knowledge_level]
 
-    titles = [f'{i+1}. "{m.title}"' for i, m in enumerate(chosen)]
+    pace_hint = {
+        "brief": (
+            "Cover more topics this episode — each explained briefly. For each "
+            "topic: what it is, why it matters, one concrete detail. Do not go "
+            "deep on any single topic."
+        ),
+        "deep_dive": (
+            "Cover fewer topics this episode, each in depth. For each: explain "
+            "how it works, walk through the method, and discuss implications. "
+            "Depth over breadth."
+        ),
+    }[profile.pace]
+
+    titles = [f'- "{m.title}"' for m in chosen]
     return (
-        f"A two-host AI news podcast. {tone_hint} {level_hint}\n"
-        f"Cover these items in this order (do not omit any):\n"
+        f"A two-host AI news podcast. {level_hint}\n"
+        f"Pace: {pace_hint}\n"
+        f"Cover these items (do not omit any). Group related items "
+        f"thematically where possible:\n"
         + "\n".join(titles)
-        + f"\nFor each item: explain what happened, how it works, and why it matters. "
-        f"Cross-reference an arXiv paper and a HN story about the same event when both "
-        f"are present — they are the same story, do not read items as a bullet list. "
-        f"Pacing: no single item runs more than ~3 min straight.\n"
-        f"Open: {intro_hint}\n"
-        f"Transitions: {transition_hint}\n"
-        f"Close: {outro_hint}"
+        + f"\nFor each item: explain what happened, how it works, and why it "
+        f"matters. Cross-reference an arXiv paper and a HN story about the same "
+        f"event when both are present — they are the same story, do not read "
+        f"items as a bullet list.\n"
+        f"Open with an overview: summarize each topic in one sentence, grouped "
+        f"by common themes where they exist. Example shape: \"In today's "
+        f"episode, we'll cover two major model releases — X which achieves Y, "
+        f"and Z which uses a new architecture. We'll also discuss industry news "
+        f"including W. Let's begin.\"\n"
+        f"Use clear transitions between topics. Either a brief (~2 second) "
+        f"pause of silence, or an explicit transitional sentence such as: "
+        f"\"Now let's jump to the next topic, which is ...\". Do not blend "
+        f"topics together without a break.\n"
+        f"Close with a summary of the topics covered in this episode."
     )
 
 

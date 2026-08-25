@@ -2,7 +2,7 @@ from . import Item
 from . import store
 from . import llm
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import json, urllib.request, urllib.parse, datetime, re
+import json, urllib.request, urllib.parse, datetime, re, time
 import xml.etree.ElementTree as ET
 import trafilatura
 
@@ -103,20 +103,21 @@ def collect(date: str | None = None) -> list[Item]:
     if not items:
         raise SystemExit("collect: no items from any source — refusing to write an empty file")
 
-    store.write("collect.json", [i.__dict__ for i in items])
+    store.write("collect.json", [i.__dict__ for i in items], date=date)
     return items
 
 # --- source: Hacker News (Algolia JSON): points>100 candidates, title+URL only ---
 def _hn(date: str) -> list[Item]:
     day = datetime.datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=datetime.timezone.utc)
     cutoff = int((day - datetime.timedelta(days=7)).timestamp())
+    day_ts = int(day.timestamp())
     hits: list[dict] = []
     page = 0
     per_page = 100
     nb_pages = None
     while True:
         query = {"tags": "story", "hitsPerPage": per_page, "page": page,
-                 "numericFilters": f"points>100,created_at_i>{cutoff}"}
+                 "numericFilters": f"points>100,created_at_i>{cutoff},created_at_i<{day_ts}"}
         url = f"{HN_API}?{urllib.parse.urlencode(query)}"
         print(f"      fetching {url}")
         raw = _get_json(url)
@@ -169,13 +170,18 @@ def _hn(date: str) -> list[Item]:
 def _arxiv(date: str) -> list[Item]:
     day = datetime.date.fromisoformat(date)
     cutoff = day - datetime.timedelta(days=7)
+    # Query the specific date range directly so we don't page through months of
+    # newer entries when collecting a past week. arXiv's submittedDate filter
+    # uses [from TO to] (inclusive, format YYYYMMDDHHMM).
+    date_range = f"submittedDate:[{cutoff.strftime('%Y%m%d0000')} TO {day.strftime('%Y%m%d2359')}]"
     entries: list[Item] = []
     seen_ids: set[str] = set()
     start = 0
     max_results = 100
     while True:
-        params = {"search_query": "cat:cs.AI", "sortBy": "submittedDate",
-                  "sortOrder": "descending", "start": start, "max_results": max_results}
+        params = {"search_query": f"cat:cs.AI AND {date_range}",
+                   "sortBy": "submittedDate", "sortOrder": "descending",
+                   "start": start, "max_results": max_results}
         url = f"{ARXIV_API}?{urllib.parse.urlencode(params)}"
         print(f"      fetching {url}")
         xml = _get(url)
@@ -200,12 +206,10 @@ def _arxiv(date: str) -> list[Item]:
         total = feed.findtext("{http://a9.com/-/spec/opensearch/1.1/}totalResults")
         if start + len(page) >= int(total or 0):
             break
-        oldest_on_page = page[-1].findtext("{http://www.w3.org/2005/Atom}published") or ""
-        if oldest_on_page[:10] and oldest_on_page[:10] < cutoff.isoformat():
-            break  # fully past the window; no more to page
         start += len(page)
         if start > 2000:
             raise SystemExit("collect: arXiv paging exceeded 2000 entries — window too wide?")
+        time.sleep(5)  # be polite to the arXiv API; avoids 429s
     return entries
 
 def _withdrawn(entry: ET.Element) -> bool:
@@ -338,7 +342,7 @@ def _get(url: str, max_bytes: int | None = None) -> str:
         url,
         headers={"User-Agent": "ai-weekly-podcast-poc/0.1"},
     )
-    with urllib.request.urlopen(req, timeout=30) as r:
+    with urllib.request.urlopen(req, timeout=60) as r:
         data = r.read(max_bytes) if max_bytes else r.read()
     return data.decode("utf-8", "replace")
 

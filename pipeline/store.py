@@ -4,10 +4,23 @@ ROOT = pathlib.Path("data")
 DATE_FORMAT = "%d-%m-%Y"
 
 
+def _normalize_date(date: str) -> str:
+    """Accept ISO (YYYY-MM-DD) or DD-MM-YYYY; return DD-MM-YYYY (folder format)."""
+    for fmt in ("%Y-%m-%d", DATE_FORMAT):
+        try:
+            return datetime.datetime.strptime(date, fmt).strftime(DATE_FORMAT)
+        except ValueError:
+            continue
+    raise SystemExit(f"bad date {date!r} — expected YYYY-MM-DD or DD-MM-YYYY")
+
+
 def run_dir(date: str | None = None) -> pathlib.Path:
-    """The output folder for a run, named 'DD-MM-YYYY' (defaults to today)."""
+    """The output folder for a run, named 'DD-MM-YYYY' (defaults to today).
+    Accepts ISO (YYYY-MM-DD) or DD-MM-YYYY."""
     if date is None:
         date = datetime.date.today().strftime(DATE_FORMAT)
+    else:
+        date = _normalize_date(date)
     d = ROOT / date
     d.mkdir(parents=True, exist_ok=True)
     return d
