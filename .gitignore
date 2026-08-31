@@ -5,9 +5,14 @@ __pycache__/
 *.egg-info/
 
 # --- Runtime data ---
-# Example run output IS tracked (e.g. data/31-08-2026/), but per-run caches and
-# podcastfy's default output dirs are regenerable, so keep them out.
+# Example run output IS tracked (e.g. data/default/<Friday>/), but per-run
+# caches, the service's job logs + scheduler config + the personalized
+# library, and podcastfy's default output dirs are regenerable, so keep them
+# out.
 data/**/.podcastfy-cache/
+data/.jobs/
+data/.schedule.json
+data/personalized/
 output/
 
 # --- Secrets ---

@@ -1,0 +1,25 @@
+# Build context exclusions — keep the image lean.
+.venv/
+.git/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Tests + teaching workspace aren't needed in the runtime image.
+tests/
+docs/
+.scratch/
+.agents/
+skills-lock.json
+AGENTS.md
+MISSION.md
+NOTES.md
+RESOURCES.md
+
+# Runtime state lives in the mounted data volume, not the image.
+data/.jobs/
+data/.schedule.json
+output/

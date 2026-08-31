@@ -27,6 +27,11 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest>=8.0.0"]
+serve = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "apscheduler>=3.10",
+]
 
 [project.scripts]
 ai-podcast = "pipeline.__main__:main"
@@ -38,6 +43,7 @@ packages = [
     "pipeline.podcastfy.tts",
     "pipeline.podcastfy.tts.providers",
     "pipeline.podcastfy.utils",
+    "service",
 ]
 
 [tool.setuptools.package-data]

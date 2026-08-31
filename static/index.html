@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Weekly Podcast</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <h1>AI Weekly Podcast</h1>
+    <div class="header-right">
+      <span id="schedule-info" class="muted">schedule: …</span>
+      <label class="switch" title="Toggle the weekly auto-run">
+        <input type="checkbox" id="schedule-toggle">
+        <span class="slider"></span>
+      </label>
+      <button id="btn-new" title="Run collect → rank → generate now">Generate new episode</button>
+    </div>
+  </header>
+
+  <main>
+    <aside id="episode-list">
+      <div class="list-tabs">
+        <button data-tab="default" class="active">Default</button>
+        <button data-tab="personalized">Personalized</button>
+      </div>
+      <ul id="episodes"></ul>
+    </aside>
+
+    <section id="detail">
+      <p class="muted">Select an episode on the left.</p>
+    </section>
+  </main>
+
+  <div id="run-panel" class="hidden">
+    <div class="run-panel-head">
+      <h3 id="run-title">Run in progress</h3>
+      <button id="run-close" class="link">close</button>
+    </div>
+    <div class="progress">
+      <div class="progress-bar"><div id="progress-fill" class="progress-fill"></div></div>
+      <div id="progress-meta" class="progress-meta">starting…</div>
+    </div>
+    <pre id="run-log"></pre>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

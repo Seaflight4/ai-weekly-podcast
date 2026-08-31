@@ -22,13 +22,15 @@ stage is a no-op.
 
 | Stage | Input | Output |
 |-------|-------|--------|
-| `collect` | date (default: today) | `<data/DD-MM-YYYY>/collect.json` — every `Item`: title, url, date, body, source (`hn` or `arxiv`) |
-| `rank` | collect.json | `<data/DD-MM-YYYY>/rank.json` — the **full** scored pool (sorted desc, no top-N slice) |
-| `generate` | rank.json | `<data/DD-MM-YYYY>/podcast_brief.md` + `episode.json` manifest + `episode.mp3` + `transcript.md` |
+| `collect` | date (default: today) | `<data/default/DD-MM-YYYY>/collect.json` — every `Item`: title, url, date, body, source (`hn` or `arxiv`) |
+| `rank` | collect.json | `<data/default/DD-MM-YYYY>/rank.json` — the **full** scored pool (sorted desc, no top-N slice) |
+| `generate` | rank.json | `<data/default/DD-MM-YYYY>/podcast_brief.md` + `episode.json` manifest + `episode.mp3` + `transcript.md` |
 
-Each run writes all of its outputs into a folder named `data/DD-MM-YYYY/` (local
-run date), so successive runs never overwrite each other. Running a single stage
-in isolation reads from the most recent folder's previous-stage file.
+Each run writes all of its outputs into a folder named
+`data/default/DD-MM-YYYY/` (local run date), so successive runs never overwrite
+each other. Running a single stage in isolation reads from the most recent
+folder's previous-stage file. Personalized renders are written to
+`data/personalized/DD-MM-YYYY/`.
 
 **HN prefiltering** happens server-side at `points>100` (community signal), then
 a **batched LLM relevance gate** keeps only stories useful to AI researchers at
@@ -87,16 +89,43 @@ cp .env.example .env    # then set SKAINET_API_KEY
 .venv/bin/python -m pipeline run --only generate --no-audio
 
 # re-run rank from a cached rank.json (fast iteration)
-.venv/bin/python -m pipeline run --only rank --from-cache data/21-08-2026/rank.json
+.venv/bin/python -m pipeline run --only rank --from-cache data/default/21-08-2026/rank.json
 
 # regenerate audio from a cached transcript (skip the LLM step)
-.venv/bin/python -m pipeline run --only generate --transcript-in data/31-08-2026/transcript.md
+.venv/bin/python -m pipeline run --only generate --transcript-in data/default/31-08-2026/transcript.md
 ```
 
 The `--no-audio` flag skips the audio backend and stops after writing
 `podcast_brief.md` + `episode.json`. The `--transcript-in` flag reuses a cached
 transcript and goes straight to TTS — useful for retrying audio after a
 transient TTS outage without paying the multi-minute LLM cost again.
+
+## Local testing (for colleagues)
+
+The fastest way to run the app locally is Docker, which bundles `ffmpeg` and
+all Python deps. The service serves a single-page UI on port 8000.
+
+```bash
+git clone <repo> && cd learn-ai-podcast-pipeline
+cp .env.example .env          # then set SKAINET_API_KEY
+docker compose up              # http://localhost:8000
+```
+
+What you get on first open:
+- **2 default Friday episodes** are committed under `data/default/` and show
+  up immediately — no generation needed to see the app in action.
+- The **weekly scheduler is off by default** (`SCHEDULE_ENABLED=false` in
+  `.env.example`), so your machine won't auto-run a fresh episode every
+  Friday. Toggle it on in the UI (top-right switch) or set
+  `SCHEDULE_ENABLED=true` in `.env` if you want it.
+- **Generate new episode** runs collect → rank → generate for today; the run
+  panel shows a **progress bar with ETA** (fixed estimates: collect ~2m,
+  rank ~1.5m, generate ~5m) plus the live log tail.
+- **Personalize** (button on a default episode) lets you delete items from
+  the brief and re-render audio into `data/personalized/<date>/`.
+
+Local data (episodes, personalized renders, job logs) persists in the
+`./data` volume mount.
 
 ## Validation
 
@@ -112,6 +141,8 @@ transient TTS outage without paying the multi-minute LLM cost again.
 | `JUDGE_MODEL` | Override the judge/rank model (`Qwen/Qwen3.8-27B` by default) |
 | `LLM_API_BASE` | OpenAI-compatible LLM endpoint for the podcastfy transcript LLM |
 | `LLM_MODEL` | LLM model name for the podcastfy transcript LLM |
+| `SCHEDULE_ENABLED` | `false` to start with the weekly scheduler disabled (default `true`); toggle at runtime via the UI switch |
+| `SCHEDULE_CRON` | 5-field cron for the weekly auto-run (default `0 9 * * fri`) |
 
 The relevance gate model (`pipeline/collect.py`) and the batch sizes are
 constants in their respective modules.

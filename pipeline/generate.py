@@ -6,13 +6,21 @@ import pathlib, datetime
 
 def generate(ranked: list[RankedItem], make_audio: bool = True,
              date: str | None = None,
-             transcript_in: str | None = None) -> Episode:
+             transcript_in: str | None = None,
+             brief_in: str | None = None) -> Episode:
     """Feed the week's top items to the podcastfy audio backend and produce audio.
 
-    The source set is selected by a fixed score threshold (>= 0.8) with a
-    fixed floor/cap of 10–20 items. The brief is a flat, source-grouped digest
-    aimed at an AI-researcher audience; the vendored podcastfy stack uses its
-    own tuned defaults for transcript + TTS styling.
+    By default the source set is selected by a fixed score threshold (>= 0.8)
+    with a fixed floor/cap of 10–20 items, then written to ``podcast_brief.md``.
+    The brief is a flat, source-grouped digest aimed at an AI-researcher
+    audience; the vendored podcastfy stack uses its own tuned defaults for
+    transcript + TTS styling.
+
+    ``brief_in`` overrides the brief with an existing markdown file (e.g. one
+    the user edited in the service UI to drop items). When set, selection is
+    skipped and the episode manifest is reconstructed by matching the brief's
+    URLs against ``ranked``; ``episode.json`` records ``selection_source:
+    "personalized"`` so the UI can show that the user curated the set.
 
     ``transcript_in`` reuses a cached transcript file and skips the LLM step,
     going straight to TTS — useful for retrying audio after a transient TTS
@@ -21,10 +29,24 @@ def generate(ranked: list[RankedItem], make_audio: bool = True,
     run = store.run_dir(date)
     brief = run / "podcast_brief.md"
 
-    chosen = select_sources(ranked)
-    by_source = _group_by_source(chosen)
+    if brief_in is not None:
+        src_brief = pathlib.Path(brief_in)
+        if not src_brief.exists():
+            raise SystemExit(f"--brief-in: {src_brief} not found")
+        chosen = _chosen_from_brief(ranked, src_brief.read_text(encoding="utf-8"))
+        selection_source = "personalized"
+        # Canonicalize the edited brief into the run dir so the run always
+        # carries the brief that produced this audio (and the UI reads it
+        # from one place). When the service passes --brief-in pointing at the
+        # run-dir brief it already wrote, this is a same-content overwrite.
+        brief.write_text(src_brief.read_text(encoding="utf-8"), encoding="utf-8")
+        print(f"      using edited brief {src_brief.name} ({len(chosen)} items)")
+    else:
+        chosen = select_sources(ranked)
+        selection_source = "auto"
+        brief.write_text(_brief_text(chosen, _group_by_source(chosen)), encoding="utf-8")
 
-    brief.write_text(_brief_text(chosen, by_source), encoding="utf-8")
+    by_source = _group_by_source(chosen)
 
     transcript_source = "whisper"
     transcript_path: pathlib.Path | None = None
@@ -59,9 +81,30 @@ def generate(ranked: list[RankedItem], make_audio: bool = True,
         "manifest": [r.__dict__ for r in ep.manifest],
         "transcript_source": transcript_source,
         "backend": backend_name,
+        "selection_source": selection_source,
     }, date=date)
     print(f"      wrote {brief.name} ({len(chosen)} items)")
     return ep
+
+
+def _chosen_from_brief(ranked: list[RankedItem], brief_text: str) -> list[RankedItem]:
+    """Reconstruct the chosen items from an edited brief by URL-matching.
+
+    The brief format is fixed (see ``_brief_text``): each source is a markdown
+    bullet ``- [Title](url)``. We extract the URLs in order and keep the
+    matching ``RankedItem`` from the pool, preserving the brief's order so the
+    manifest reflects what the user curated. URLs absent from the pool (e.g.
+    a hand-pasted extra) are skipped silently.
+    """
+    import re
+    by_url = {(r.url or "").strip().rstrip("/").lower(): r for r in ranked}
+    chosen: list[RankedItem] = []
+    for m in re.finditer(r"^- \[[^\]]+\]\(([^)]+)\)", brief_text, re.MULTILINE):
+        url = m.group(1).strip().rstrip("/").lower()
+        r = by_url.get(url)
+        if r is not None:
+            chosen.append(r)
+    return chosen
 
 
 # --- source selection: threshold + floor/cap -------------------------------

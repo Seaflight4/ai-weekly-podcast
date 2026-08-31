@@ -1,6 +1,6 @@
-import datetime, json, pathlib
+import datetime, json, os, pathlib
 
-ROOT = pathlib.Path("data")
+ROOT = pathlib.Path(os.environ.get("PIPELINE_DATA_ROOT", "data/default"))
 DATE_FORMAT = "%d-%m-%Y"
 
 

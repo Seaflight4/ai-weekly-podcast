@@ -93,6 +93,26 @@ def test_latest_dir_raises_when_no_run_folders(tmp_path, monkeypatch):
         store.latest_dir()
 
 
+def test_store_root_from_env(tmp_path, monkeypatch):
+    """PIPELINE_DATA_ROOT redirects the pipeline's data root, so a
+    personalized render can write to a per-user library dir without touching
+    the default data/ tree. Read at module import time (per-subprocess)."""
+    import importlib, os
+    monkeypatch.setenv("PIPELINE_DATA_ROOT", str(tmp_path))
+    # store reads the env at import; reload so the new value takes effect.
+    import pipeline.store as s
+    importlib.reload(s)
+    try:
+        assert s.ROOT == tmp_path
+        d = s.run_dir("2026-08-31")
+        assert d == tmp_path / "31-08-2026"
+        assert d.is_dir()
+    finally:
+        # Restore the module so other tests aren't affected.
+        monkeypatch.delenv("PIPELINE_DATA_ROOT", raising=False)
+        importlib.reload(s)
+
+
 # --- generate: source selection by threshold + floor/cap ----------------
 
 def test_select_sources_threshold_within_range():
@@ -322,6 +342,70 @@ def test_generate_no_audio_records_no_backend(tmp_path, monkeypatch):
     manifest = json.loads((tmp_path / "episode.json").read_text())
     assert manifest["transcript_source"] == "whisper"
     assert manifest["backend"] is None
+
+
+def test_generate_brief_in_skips_selection_and_uses_edited_brief(tmp_path, monkeypatch):
+    """With brief_in set, generate skips select_sources, does NOT overwrite
+    the brief, and reconstructs the manifest by URL-matching against ranked."""
+    ranked = [
+        RankedItem(title="Paper A", url="https://arxiv.org/abs/2601.00001",
+                   date="d", body="b", source="arxiv", score=0.9),
+        RankedItem(title="Paper B", url="https://arxiv.org/abs/2601.00002",
+                   date="d", body="b", source="arxiv", score=0.5),
+    ]
+    # An edited brief that drops Paper B.
+    brief_path = tmp_path / "edited_brief.md"
+    edited = ("# AI News Digest\n\n"
+              "## arXiv papers (1)\n\n"
+              "- [Paper A](https://arxiv.org/abs/2601.00001) · "
+              "[PDF](https://arxiv.org/pdf/2601.00001) — score 0.90\n")
+    brief_path.write_text(edited, encoding="utf-8")
+
+    monkeypatch.setattr(store, "run_dir", lambda date=None: tmp_path)
+    monkeypatch.setattr(generate.store, "run_dir", lambda date=None: tmp_path)
+
+    seen_brief = {}
+    class FakeBackend:
+        name = "podcastfy"
+        def generate(self, brief, run_dir, chosen, transcript_in=None):
+            seen_brief["path"] = brief
+            seen_brief["chosen"] = list(chosen)
+            return generate.audio_mod.AudioResult(
+                audio_path=tmp_path / "episode.mp3",
+                transcript_path=tmp_path / "transcript.md",
+                backend="podcastfy",
+            )
+    monkeypatch.setattr(generate.audio_mod, "PodcastfyBackend", lambda: FakeBackend())
+
+    # The run-dir brief must NOT pre-exist (so we can prove we don't write it).
+    assert not (tmp_path / "podcast_brief.md").exists()
+    ep = generate.generate(ranked, make_audio=True, brief_in=str(brief_path))
+    # The audio backend was pointed at the edited brief path (not overwritten).
+    assert seen_brief["path"] == tmp_path / "podcast_brief.md"
+    assert (tmp_path / "podcast_brief.md").read_text() == edited
+    # Manifest reconstructed from the brief: only Paper A.
+    assert [r.url for r in ep.manifest] == ["https://arxiv.org/abs/2601.00001"]
+    manifest = json.loads((tmp_path / "episode.json").read_text())
+    assert manifest["selection_source"] == "personalized"
+    assert len(manifest["manifest"]) == 1
+
+
+def test_generate_no_brief_in_records_auto_selection_source(tmp_path, monkeypatch):
+    ranked = [
+        RankedItem(title="t", url="u", date="d", body="b", source="arxiv", score=0.9)
+    ]
+    monkeypatch.setattr(store, "run_dir", lambda date=None: tmp_path)
+    monkeypatch.setattr(generate.store, "run_dir", lambda date=None: tmp_path)
+    class FakeBackend:
+        name = "podcastfy"
+        def generate(self, brief, run_dir, chosen, transcript_in=None):
+            return generate.audio_mod.AudioResult(
+                audio_path=tmp_path / "episode.mp3",
+                transcript_path=tmp_path / "transcript.md", backend="podcastfy")
+    monkeypatch.setattr(generate.audio_mod, "PodcastfyBackend", lambda: FakeBackend())
+    generate.generate(ranked, make_audio=True)
+    manifest = json.loads((tmp_path / "episode.json").read_text())
+    assert manifest["selection_source"] == "auto"
 
 
 # --- transcribe: no-op when transcript already generated ------------------

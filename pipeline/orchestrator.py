@@ -38,7 +38,7 @@ STAGES = ("collect", "rank", "generate", "transcribe")
 
 def run(only: str | None = None, no_audio: bool = False,
         from_cache: str | None = None, date: str | None = None,
-        transcript_in: str | None = None):
+        transcript_in: str | None = None, brief_in: str | None = None):
     if only is None:
         print("[1/3] collecting...")
         items = _timed("collect", collect.collect, date)
@@ -51,7 +51,7 @@ def run(only: str | None = None, no_audio: bool = False,
         print("[3/3] generating...")
         episode = _timed("generate", generate.generate, ranked,
                          make_audio=not no_audio, date=date,
-                         transcript_in=transcript_in)
+                         transcript_in=transcript_in, brief_in=brief_in)
         print(f"      audio -> {episode.audio_path}")
         print(f"      manifest has {len(episode.manifest)} items")
         return
@@ -80,7 +80,7 @@ def run(only: str | None = None, no_audio: bool = False,
               f"(audio={'yes' if make_audio else 'no'})...")
         episode = _timed("generate", generate.generate, ranked,
                          make_audio=make_audio, date=date,
-                         transcript_in=transcript_in)
+                         transcript_in=transcript_in, brief_in=brief_in)
         print(f"      audio -> {episode.audio_path}")
         print(f"      manifest has {len(episode.manifest)} items")
         return

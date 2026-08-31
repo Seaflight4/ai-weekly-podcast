@@ -2,8 +2,8 @@ import sys
 from .orchestrator import run
 
 USAGE = ("usage: python -m pipeline run [--only collect|rank|generate|transcribe] "
-         "[--no-audio] [--transcript-in <path>] [--from-cache <rank.json>] "
-         "[--date YYYY-MM-DD]")
+         "[--no-audio] [--transcript-in <path>] [--brief-in <path>] "
+         "[--from-cache <rank.json>] [--date YYYY-MM-DD]")
 STAGES = ("collect", "rank", "generate", "transcribe")
 
 def main(argv: list[str]) -> None:
@@ -15,6 +15,7 @@ def main(argv: list[str]) -> None:
     only = None
     no_audio = False
     transcript_in = None
+    brief_in = None
     from_cache = None
     date = None
     rest = []
@@ -26,6 +27,10 @@ def main(argv: list[str]) -> None:
             if not args:
                 raise SystemExit(f"{USAGE}\n(error: `--transcript-in` needs a path)")
             transcript_in = args.pop(0)
+        elif a == "--brief-in":
+            if not args:
+                raise SystemExit(f"{USAGE}\n(error: `--brief-in` needs a path)")
+            brief_in = args.pop(0)
         elif a == "--from-cache":
             if not args:
                 raise SystemExit(f"{USAGE}\n(error: `--from-cache` needs a path)")
@@ -46,7 +51,8 @@ def main(argv: list[str]) -> None:
     if rest:
         raise SystemExit(f"{USAGE}\n(error: unexpected argument {rest[0]!r})")
     run(only=only, no_audio=no_audio,
-        from_cache=from_cache, date=date, transcript_in=transcript_in)
+        from_cache=from_cache, date=date, transcript_in=transcript_in,
+        brief_in=brief_in)
 
 if __name__ == "__main__":
     main(sys.argv[1:])
