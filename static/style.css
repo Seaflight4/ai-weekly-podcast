@@ -92,6 +92,20 @@ audio { width: 100%; margin: 12px 0 20px; }
   color: #555; font-size: 13px; background: #fafafa;
 }
 
+/* transcript */
+.tab-body.markdown .trn.turn {
+  display: flex; gap: 12px; align-items: flex-start;
+  padding: 6px 0; border-bottom: 1px dashed #ececec;
+}
+.tab-body.markdown .trn.turn:last-child { border-bottom: none; }
+.tab-body.markdown .trn-speaker {
+  flex: 0 0 64px; font-size: 11px; font-weight: 700; text-align: center;
+  padding: 3px 0; border-radius: 10px; color: #fff; letter-spacing: 0.03em;
+}
+.tab-body.markdown .trn-Person1 { background: #2563eb; }
+.tab-body.markdown .trn-Person2 { background: #7c3aed; }
+.tab-body.markdown .trn-text { flex: 1; line-height: 1.55; }
+
 /* personalization */
 .perso-list { max-width: 800px; }
 .perso-item {

@@ -127,6 +127,9 @@ function renderDetail(run) {
   // Personalized renders can be deleted; default episodes are shared, so no delete.
   const deleteBtn = activeTab === "personalized"
     ? '<button id="btn-delete" class="danger">Delete</button>' : "";
+  // Brief / Transcript tabs. The transcript tab is only shown when one exists.
+  const transcriptTab = run.has_transcript
+    ? `<button data-dtab="transcript">Transcript</button>` : "";
   sec.innerHTML = `
     <div class="detail-head">
       <h2>${run.date}</h2>
@@ -135,10 +138,54 @@ function renderDetail(run) {
       ${deleteBtn}
     </div>
     ${audio}
-    <div class="tab-body markdown" id="brief"></div>`;
+    <div class="tabs" id="detail-tabs">
+      <button data-dtab="brief" class="active">Brief</button>
+      ${transcriptTab}
+    </div>
+    <div class="tab-body markdown" id="brief"></div>
+    <div class="tab-body markdown hidden" id="transcript"></div>`;
   $("#brief").innerHTML = renderMarkdown(run.brief || "(no brief)");
+  if (run.has_transcript) {
+    $("#transcript").innerHTML = renderTranscript(run.transcript || "(no transcript)");
+  }
+  document.querySelectorAll("#detail-tabs button").forEach((b) =>
+    b.onclick = () => switchDetailTab(b.dataset.dtab));
   if ($("#btn-personalize")) $("#btn-personalize").onclick = () => openPersonalize(run);
   if ($("#btn-delete")) $("#btn-delete").onclick = () => deletePersonalized(run.date);
+}
+
+function switchDetailTab(tab) {
+  document.querySelectorAll("#detail-tabs button").forEach((b) =>
+    b.classList.toggle("active", b.dataset.dtab === tab));
+  $("#brief").classList.toggle("hidden", tab !== "brief");
+  const tr = $("#transcript");
+  if (tr) tr.classList.toggle("hidden", tab !== "transcript");
+}
+
+// Render a podcast transcript into a dialogue. Lines look like:
+//   <Person1>...</Person1>  or  <Person2>...</Person2>
+// Each speaker turn becomes a row with a labelled badge. Non-matching lines
+// (blank, headings, etc.) are passed through renderMarkdown so prose
+// intros/outros still render readably.
+function renderTranscript(md) {
+  const lines = md.split("\n");
+  let html = "";
+  const flushPara = (buf) => { if (buf.length) html += `<p>${esc(buf.join(" "))}</p>`; buf.length = 0; };
+  const para = [];
+  for (let line of lines) {
+    const m = line.match(/^\s*<(Person\d+)>\s*(.*?)\s*<\/\1>\s*$/);
+    if (m) {
+      flushPara(para);
+      const [, who, text] = m;
+      html += `<div class="trn turn"><span class="trn-speaker trn-${who}">${esc(who)}</span><span class="trn-text">${esc(text)}</span></div>`;
+      continue;
+    }
+    if (line.trim() === "") { flushPara(para); continue; }
+    if (/^#{1,6}\s/.test(line)) { flushPara(para); html += renderMarkdown(line); continue; }
+    para.push(line);
+  }
+  flushPara(para);
+  return html;
 }
 
 async function deletePersonalized(date) {
