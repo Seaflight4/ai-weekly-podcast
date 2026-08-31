@@ -124,16 +124,34 @@ function renderDetail(run) {
   // already curated; re-personalizing from a personalized render is out of scope).
   const personalizeBtn = activeTab === "default"
     ? '<button id="btn-personalize" class="primary">Personalize</button>' : "";
+  // Personalized renders can be deleted; default episodes are shared, so no delete.
+  const deleteBtn = activeTab === "personalized"
+    ? '<button id="btn-delete" class="danger">Delete</button>' : "";
   sec.innerHTML = `
     <div class="detail-head">
       <h2>${run.date}</h2>
       <span class="muted">${run.items} items · ${run.selection_source || "auto"}</span>
       ${personalizeBtn}
+      ${deleteBtn}
     </div>
     ${audio}
     <div class="tab-body markdown" id="brief"></div>`;
   $("#brief").innerHTML = renderMarkdown(run.brief || "(no brief)");
   if ($("#btn-personalize")) $("#btn-personalize").onclick = () => openPersonalize(run);
+  if ($("#btn-delete")) $("#btn-delete").onclick = () => deletePersonalized(run.date);
+}
+
+async function deletePersonalized(date) {
+  if (!confirm(`Delete the personalized render for ${date}? This cannot be undone.`)) return;
+  const res = await fetch(`/api/personalized/${date}`, { method: "DELETE" });
+  if (!res.ok) {
+    if (res.status === 404) { alert("Already gone."); }
+    else { alert("Delete failed: " + (await res.text())); }
+    return;
+  }
+  activeDate = null;
+  loadEpisodes();
+  $("#detail").innerHTML = '<p class="muted">Select an episode on the left.</p>';
 }
 
 // Minimal, safe-enough markdown renderer for the brief.

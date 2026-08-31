@@ -66,3 +66,18 @@ def prepare_render(date: str, brief_markdown: str) -> pathlib.Path:
         shutil.copy2(default_rank, folder / "rank.json")
     (folder / "podcast_brief.md").write_text(brief_markdown, encoding="utf-8")
     return folder
+
+
+def delete_run(date: str) -> bool:
+    """Delete the personalized render folder for ``date``.
+
+    Returns True if a folder existed and was removed, False if there was
+    nothing to delete. Only the per-date run folder is removed — the
+    ``data/personalized/`` root is preserved.
+    """
+    import shutil
+    folder = PERSONALIZED_ROOT / _normalize_date(date)
+    if not folder.is_dir():
+        return False
+    shutil.rmtree(folder)
+    return True

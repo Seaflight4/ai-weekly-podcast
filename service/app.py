@@ -190,6 +190,19 @@ def get_personalized_transcript(date: str):
     return PlainTextResponse(p.read_text(encoding="utf-8"), media_type="text/markdown")
 
 
+@app.delete("/api/personalized/{date}")
+def delete_personalized(date: str):
+    """Delete a personalized render. The default episode for the same date
+    is never affected."""
+    try:
+        removed = personalized.delete_run(date)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    if not removed:
+        raise HTTPException(404, f"no render for {date}")
+    return {"deleted": date}
+
+
 # --- schedule --------------------------------------------------------------
 
 @app.get("/api/schedule")

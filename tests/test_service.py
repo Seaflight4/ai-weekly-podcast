@@ -176,6 +176,23 @@ def test_personalized_empty_when_none(pers_data):
     assert personalized.list_runs() == []
 
 
+def test_personalized_delete_run_removes_folder(pers_data):
+    personalized.prepare_render("2026-08-31", "# brief\n")
+    folder = pers_data / "personalized" / "31-08-2026"
+    assert folder.is_dir()
+    assert personalized.delete_run("2026-08-31") is True
+    assert not folder.exists()
+    # second delete returns False (nothing to remove)
+    assert personalized.delete_run("2026-08-31") is False
+    # default run untouched
+    assert (pers_data / "31-08-2026" / "rank.json").exists()
+
+
+def test_personalized_delete_run_bad_date_raises(pers_data):
+    with pytest.raises(ValueError):
+        personalized.delete_run("not-a-date")
+
+
 # --- jobs: env threading ---------------------------------------------------
 
 def test_jobs_submit_passes_env_to_subprocess(tmp_path, reset_jobs):
