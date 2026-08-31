@@ -91,10 +91,8 @@ async function loadEpisodes() {
     li.dataset.date = ep.date;
     if (ep.date === activeDate) li.classList.add("active");
     const badge = ep.status === "ready" ? "ready" : ep.status === "draft" ? "draft" : "empty";
-    const pers = ep.selection_source === "personalized"
-      ? ' <span class="badge badge-personalized">personalized</span>' : "";
     li.innerHTML = `
-      <div class="ep-date">${ep.date} <span class="badge badge-${badge}">${ep.status}</span>${pers}</div>
+      <div class="ep-date">${ep.date} <span class="badge badge-${badge}">${ep.status}</span></div>
       <div class="ep-meta">${ep.items} items${ep.has_audio ? " · audio" : ""}${ep.has_transcript ? " · transcript" : ""}</div>`;
     li.onclick = () => selectEpisode(ep.date);
     ul.appendChild(li);
