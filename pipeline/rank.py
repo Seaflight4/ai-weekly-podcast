@@ -53,27 +53,28 @@ once. No prose before or after. No markdown fences.
 def rank(items: list[Item], date: str | None = None) -> list[RankedItem]:
     """Score every item and return the full ranked pool (sorted desc).
 
-    `final_score = score` (pure importance; no personal pass).
+    Pure importance ranking — there is no personalization pass.
     """
     items = _dedup_by_url(items)
     print(f"      rank: {len(items)} items")
 
     ranked = _rank_pool(items, UNIFIED_RUBRIC)
-    for r in ranked:
-        r.final_score = r.score
-
-    ranked.sort(key=lambda r: r.final_score, reverse=True)
+    ranked.sort(key=lambda r: r.score, reverse=True)
     store.write("rank.json", [r.__dict__ for r in ranked], date=date)
     return ranked
 
 
 def rank_from_cache(cache_path: str, date: str | None = None) -> list[RankedItem]:
-    """Load a saved rank.json, set final_score = score, sort, and re-write.
+    """Load a saved rank.json, sort by score, and re-write.
+
+    Tolerant of extra/legacy keys: only fields declared on ``RankedItem`` are
+    passed to its constructor, so older caches (e.g. ones carrying the removed
+    ``personal_score``/``final_score`` fields) don't break re-runs.
 
     Staleness guard: warns if the cache predates rank.py's mtime, since a
     rubric change invalidates the cached importance scores.
     """
-    import pathlib, json
+    import pathlib, json, dataclasses
     cache = pathlib.Path(cache_path)
     if not cache.exists():
         raise SystemExit(f"--from-cache: {cache} not found")
@@ -85,11 +86,10 @@ def rank_from_cache(cache_path: str, date: str | None = None) -> list[RankedItem
               f"to refresh.")
 
     raw = json.loads(cache.read_text())
-    ranked = [RankedItem(**r) for r in raw]
-    for r in ranked:
-        r.final_score = r.score
+    known = {f.name for f in dataclasses.fields(RankedItem)}
+    ranked = [RankedItem(**{k: v for k, v in r.items() if k in known}) for r in raw]
+    ranked.sort(key=lambda r: r.score, reverse=True)
     print(f"      rank_from_cache: loaded {len(ranked)} items from {cache.name}")
-    ranked.sort(key=lambda r: r.final_score, reverse=True)
     store.write("rank.json", [r.__dict__ for r in ranked], date=date)
     return ranked
 
@@ -174,5 +174,4 @@ def _to_ranked(item: Item, score: float, reason: str) -> RankedItem:
     return RankedItem(
         **item.__dict__,
         score=score, judge_reason=reason,
-        final_score=score,
     )

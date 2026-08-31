@@ -1,0 +1,16 @@
+output_directories:
+  transcripts: output/transcripts
+  audio: output/audio
+text_to_speech:
+  audio_format: mp3
+  ending_message: ''
+  temp_audio_dir: data/audio/tmp/
+  max_workers: 4
+  tng:
+    model: qwen3
+    instructions: Speak at a natural pace. Keep the delivery lively and conversational.
+    speed: '1.05'
+    temperature: '0.75'
+    reference_voices:
+      person1: reference/host_m.wav
+      person2: reference/host_f.wav

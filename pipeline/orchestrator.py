@@ -1,6 +1,6 @@
-from . import Item, RankedItem, collect, rank, generate
-from . import store, profile as profile_mod
-import os, pathlib, time
+from . import Item, RankedItem, collect, rank, generate, transcribe
+from . import store
+import dataclasses, os, pathlib, time
 
 def _load_env():
     env = pathlib.Path(".env")
@@ -15,7 +15,16 @@ def _load_env():
 _load_env()
 
 def _load(name: str, cls, date: str | None = None) -> list:
+    """Load a stage's JSON into a list of dataclass instances.
+
+    Tolerant of extra/legacy keys: only fields declared on the dataclass are
+    passed to its constructor, so older run files (e.g. a stale ``kind`` field
+    from a prior schema) don't break re-runs.
+    """
     raw = store.read(f"{name}.json", date=date)
+    if dataclasses.is_dataclass(cls):
+        known = {f.name for f in dataclasses.fields(cls)}
+        return [cls(**{k: v for k, v in i.items() if k in known}) for i in raw]
     return [cls(**i) for i in raw]
 
 def _timed(label: str, fn, *args, **kwargs):
@@ -25,10 +34,11 @@ def _timed(label: str, fn, *args, **kwargs):
     print(f"      [{label} took {dt:.1f}s]")
     return result
 
-STAGES = ("collect", "rank", "generate")
+STAGES = ("collect", "rank", "generate", "transcribe")
 
 def run(only: str | None = None, no_audio: bool = False,
-        from_cache: str | None = None, date: str | None = None):
+        from_cache: str | None = None, date: str | None = None,
+        transcript_in: str | None = None):
     if only is None:
         print("[1/3] collecting...")
         items = _timed("collect", collect.collect, date)
@@ -39,9 +49,9 @@ def run(only: str | None = None, no_audio: bool = False,
         print(f"      scored {len(ranked)} items")
 
         print("[3/3] generating...")
-        profile = profile_mod.load_profile()
         episode = _timed("generate", generate.generate, ranked,
-                         make_audio=not no_audio, profile=profile, date=date)
+                         make_audio=not no_audio, date=date,
+                         transcript_in=transcript_in)
         print(f"      audio -> {episode.audio_path}")
         print(f"      manifest has {len(episode.manifest)} items")
         return
@@ -66,13 +76,19 @@ def run(only: str | None = None, no_audio: bool = False,
     if only == "generate":
         ranked = _load("rank", RankedItem, date=date)
         make_audio = not no_audio
-        profile = profile_mod.load_profile()
         print(f"[3/3] generating from {len(ranked)} ranked items "
-              f"(audio={'yes' if make_audio else 'no'}, pace={profile.pace})...")
+              f"(audio={'yes' if make_audio else 'no'})...")
         episode = _timed("generate", generate.generate, ranked,
-                         make_audio=make_audio, profile=profile, date=date)
+                         make_audio=make_audio, date=date,
+                         transcript_in=transcript_in)
         print(f"      audio -> {episode.audio_path}")
         print(f"      manifest has {len(episode.manifest)} items")
+        return
+
+    if only == "transcribe":
+        print("[transcribe] transcribing episode...")
+        out = _timed("transcribe", transcribe.transcribe, date=date)
+        print(f"      transcript -> {out}")
         return
 
     raise SystemExit(f"unknown stage: {only!r} (expected {', '.join(STAGES)})")

@@ -12,6 +12,17 @@ license = { text = "MIT" }
 dependencies = [
     "openai>=1.0.0",
     "trafilatura>=2.2.0",
+    # The podcastfy audio backend: vendored DeepSeek transcript + TNG qwen3
+    # TTS. Shares SKAINET_API_KEY with the core pipeline. Needs ffmpeg on PATH
+    # for pydub MP3 encoding.
+    "langchain>=0.3,<1",
+    "langchain-core>=0.3,<1",
+    "langchain-openai>=0.3,<1",
+    "pymupdf",
+    "pydub",
+    "audioop-lts; python_version >= '3.13'",
+    "python-dotenv",
+    "PyYAML",
 ]
 
 [project.optional-dependencies]
@@ -21,4 +32,13 @@ test = ["pytest>=8.0.0"]
 ai-podcast = "pipeline.__main__:main"
 
 [tool.setuptools]
-packages = ["pipeline"]
+packages = [
+    "pipeline",
+    "pipeline.podcastfy",
+    "pipeline.podcastfy.tts",
+    "pipeline.podcastfy.tts.providers",
+    "pipeline.podcastfy.utils",
+]
+
+[tool.setuptools.package-data]
+"pipeline.podcastfy" = ["config.yaml", "reference/*.wav"]

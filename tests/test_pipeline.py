@@ -2,87 +2,38 @@
 
 No network, no LLM. The judge is monkeypatched; store is isolated to a tmp dir.
 """
-import json, pathlib
+import json, pathlib, sys, types
 import pytest
 
-import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from pipeline import Item, RankedItem
-from pipeline import rank, store, generate, profile as profile_mod
-
-
-# --- Profile ---------------------------------------------------------------
-
-def test_profile_parses_frontmatter(tmp_path):
-    p = tmp_path / "profile.md"
-    p.write_text(
-        "---\n"
-        "knowledge_level: undergrad\n"
-        "pace: brief\n"
-        "format: brief\n"
-        "target_length: short\n"
-        "---\n",
-        encoding="utf-8",
-    )
-    prof = profile_mod.load_profile(p)
-    assert prof.knowledge_level == "undergrad"
-    assert prof.pace == "brief"
-    assert prof.format == "brief"
-    assert prof.target_length == "short"
-
-
-def test_profile_style_defaults_when_absent(tmp_path):
-    p = tmp_path / "profile.md"
-    p.write_text("---\n---\n")
-    prof = profile_mod.load_profile(p)
-    assert prof.knowledge_level == "researcher"
-    assert prof.pace == "deep_dive"
-    assert prof.format == "deep_dive"
-    assert prof.target_length == "default"
-
-
-def test_profile_rejects_invalid_style_falls_back(tmp_path):
-    p = tmp_path / "profile.md"
-    p.write_text(
-        "---\n"
-        "pace: bogus\n"
-        "knowledge_level: expert\n"
-        "---\n",
-        encoding="utf-8",
-    )
-    prof = profile_mod.load_profile(p)
-    assert prof.pace == "deep_dive"               # fallback to default
-    assert prof.knowledge_level == "researcher"  # 'expert' not valid
-
-
-def test_profile_missing_returns_defaults(tmp_path):
-    prof = profile_mod.load_profile(tmp_path / "nonexistent.md")
-    assert prof.pace == "deep_dive"
-    assert prof.knowledge_level == "researcher"
+from pipeline import rank, store, generate, transcribe
 
 
 # --- RankedItem -----------------------------------------------------------
 
 def test_rankeditem_round_trips():
     r = RankedItem(title="t", url="u", date="d", body="b", source="arxiv",
-                   score=0.8, judge_reason="imp",
-                   personal_score=0.6, personal_reason="match",
-                   alpha=0.7, final_score=0.74)
+                   score=0.8, judge_reason="imp")
     d = r.__dict__
     r2 = RankedItem(**d)
-    assert r2.personal_score == 0.6
-    assert r2.alpha == 0.7
-    assert r2.final_score == 0.74
+    assert r2.score == 0.8
+    assert r2.judge_reason == "imp"
 
 
-def test_rankeditem_legacy_load_uses_defaults():
+def test_rankeditem_legacy_load_ignores_unknown_keys():
+    # Old caches may carry removed Phase-2 fields (personal_score, final_score,
+    # alpha). The tolerant loaders filter to known dataclass fields.
     legacy = {"title": "t", "url": "u", "date": "d", "body": "b",
-              "source": "arxiv", "score": 0.8, "judge_reason": "r"}
-    r = RankedItem(**legacy)
-    assert r.personal_score == 0.0
-    assert r.alpha == 1.0
-    assert r.final_score == 0.0
+              "source": "arxiv", "score": 0.8, "judge_reason": "r",
+              "personal_score": 0.6, "alpha": 0.7, "final_score": 0.74}
+    import dataclasses
+    known = {f.name for f in dataclasses.fields(RankedItem)}
+    r = RankedItem(**{k: v for k, v in legacy.items() if k in known})
+    assert r.score == 0.8
+    assert not hasattr(r, "personal_score")
+    assert not hasattr(r, "final_score")
 
 
 # --- rank writes the full scored pool, sorted -----------------------------
@@ -99,11 +50,11 @@ def test_rank_returns_full_pool_sorted(tmp_path, monkeypatch):
     scores = [r.score for r in out]
     assert scores == sorted(scores, reverse=True)
     assert all(0.0 <= r.score <= 1.0 for r in out)
-    # final_score == score (pure importance, no personal pass)
-    assert all(r.final_score == r.score for r in out)
 
 
-def test_rank_from_cache_sets_final_score(tmp_path, monkeypatch):
+def test_rank_from_cache_loads_legacy_keys(tmp_path, monkeypatch):
+    # A saved rank.json with removed Phase-2 fields still loads via the
+    # tolerant key filter; items sort by score.
     cache = tmp_path / "rank.json"
     cache.write_text(json.dumps([
         {"title": "a", "url": "u1", "date": "d", "body": "b", "source": "arxiv",
@@ -116,8 +67,8 @@ def test_rank_from_cache_sets_final_score(tmp_path, monkeypatch):
     monkeypatch.setattr(rank.store, "run_dir", lambda date=None: tmp_path)
     out = rank.rank_from_cache(str(cache))
     assert len(out) == 2
-    assert out[0].final_score == 0.8
-    assert out[1].final_score == 0.5
+    assert out[0].score == 0.8
+    assert out[1].score == 0.5
     assert out[0].url == "u1"  # higher score first
 
 
@@ -145,175 +96,284 @@ def test_latest_dir_raises_when_no_run_folders(tmp_path, monkeypatch):
 # --- generate: source selection by threshold + floor/cap ----------------
 
 def test_select_sources_threshold_within_range():
-    # 7 items >= 0.8, deep_dive floor=5 cap=10 -> all 7 qualify.
+    # 15 items >= 0.8 (within floor=10, cap=20) -> all 15 qualify.
     ranked = [
         RankedItem(title=f"t{i}", url=f"u{i}", date="d", body="b", source="arxiv",
-                   score=0.88 - i * 0.01, final_score=0.88 - i * 0.01)
-        for i in range(7)
+                   score=0.90 - i * 0.005)
+        for i in range(15)
     ] + [
         RankedItem(title=f"low{i}", url=f"l{i}", date="d", body="b", source="arxiv",
-                   score=0.5, final_score=0.5)
+                   score=0.5)
         for i in range(5)
     ]
-    chosen = generate.select_sources(ranked, "deep_dive")
-    assert len(chosen) == 7
-    assert all(c.final_score >= 0.8 for c in chosen)
+    chosen = generate.select_sources(ranked)
+    assert len(chosen) == 15
+    assert all(c.score >= 0.8 for c in chosen)
 
 
 def test_select_sources_cap_on_strong_week():
-    # 15 items >= 0.8, deep_dive cap=10 -> cut to 10 (top-scored).
+    # 25 items >= 0.8, cap=20 -> cut to 20 (top-scored).
     ranked = [
         RankedItem(title=f"t{i}", url=f"u{i}", date="d", body="b", source="arxiv",
-                   score=0.95 - i * 0.01, final_score=0.95 - i * 0.01)
-        for i in range(15)
+                   score=0.95 - i * 0.005)
+        for i in range(25)
     ] + [
         RankedItem(title=f"low{i}", url=f"l{i}", date="d", body="b", source="arxiv",
-                   score=0.5, final_score=0.5)
+                   score=0.5)
         for i in range(5)
     ]
-    chosen = generate.select_sources(ranked, "deep_dive")
-    assert len(chosen) == 10
-    assert chosen[0].final_score == 0.95
-    assert chosen[-1].final_score == 0.86
+    chosen = generate.select_sources(ranked)
+    assert len(chosen) == 20
+    assert chosen[0].score == 0.95
+    assert chosen[-1].score == 0.95 - 19 * 0.005
 
 
 def test_select_sources_floor_on_weak_week():
-    # Only 2 items >= 0.8, deep_dive floor=5 -> pad to 5 with next-highest.
+    # Only 2 items >= 0.8, floor=10 -> pad to 10 with next-highest.
     ranked = [
         RankedItem(title="a", url="u1", date="d", body="b", source="arxiv",
-                   score=0.9, final_score=0.9),
+                   score=0.9),
         RankedItem(title="b", url="u2", date="d", body="b", source="arxiv",
-                   score=0.82, final_score=0.82),
-        RankedItem(title="c", url="u3", date="d", body="b", source="arxiv",
-                   score=0.6, final_score=0.6),
-        RankedItem(title="d", url="u4", date="d", body="b", source="arxiv",
-                   score=0.5, final_score=0.5),
-        RankedItem(title="e", url="u5", date="d", body="b", source="arxiv",
-                   score=0.4, final_score=0.4),
-    ]
-    chosen = generate.select_sources(ranked, "deep_dive")
-    assert len(chosen) == 5
-    assert chosen[0].final_score == 0.9
-    assert chosen[-1].final_score == 0.4
-
-
-def test_select_sources_brief_has_larger_cap():
-    # 15 items >= 0.8, brief cap=20 -> all 15 qualify (within floor=10, cap=20).
-    ranked = [
-        RankedItem(title=f"t{i}", url=f"u{i}", date="d", body="b", source="arxiv",
-                   score=0.85 - i * 0.001, final_score=0.85 - i * 0.001)
-        for i in range(15)
+                   score=0.82),
     ] + [
-        RankedItem(title=f"low{i}", url=f"l{i}", date="d", body="b", source="arxiv",
-                   score=0.5, final_score=0.5)
-        for i in range(5)
-    ]
-    chosen = generate.select_sources(ranked, "brief")
-    assert len(chosen) == 15
-    assert all(c.final_score >= 0.8 for c in chosen)
-
-
-def test_select_sources_brief_floor():
-    # Only 3 items >= 0.8, brief floor=10 -> pad to 10.
-    ranked = [
-        RankedItem(title=f"hi{i}", url=f"h{i}", date="d", body="b", source="arxiv",
-                   score=0.85, final_score=0.85)
-        for i in range(3)
-    ] + [
-        RankedItem(title=f"mid{i}", url=f"m{i}", date="d", body="b", source="arxiv",
-                   score=0.5, final_score=0.5)
+        RankedItem(title=f"low{i}", url=f"l{i}", date="d", body="b",
+                   source="arxiv", score=0.5 - i * 0.05)
         for i in range(20)
     ]
-    chosen = generate.select_sources(ranked, "brief")
+    chosen = generate.select_sources(ranked)
     assert len(chosen) == 10
-    assert chosen[0].final_score == 0.85
+    assert chosen[0].score == 0.9
+    assert chosen[-1].score < 0.8  # padded from below threshold
 
 
 def test_select_sources_empty_pool():
-    assert generate.select_sources([], "deep_dive") == []
+    assert generate.select_sources([]) == []
 
 
 def test_select_sources_small_pool_below_floor():
-    # Only 3 items total, all below 0.8; floor=5 but pool=3 -> return all 3.
+    # Only 3 items total, all below 0.8; floor=10 but pool=3 -> return all 3.
     ranked = [
         RankedItem(title=f"t{i}", url=f"u{i}", date="d", body="b", source="arxiv",
-                   score=0.5, final_score=0.5)
+                   score=0.5)
         for i in range(3)
     ]
-    chosen = generate.select_sources(ranked, "deep_dive")
+    chosen = generate.select_sources(ranked)
     assert len(chosen) == 3
-
-
-# --- generate: instruction templating --------------------------------------
-
-def test_generate_instructions_templates_profile():
-    prof = profile_mod.Profile(
-        knowledge_level="undergrad", pace="brief",
-    )
-    chosen = [RankedItem(title="Paper A", url="u1", date="d", body="b",
-                         source="arxiv", score=0.9, final_score=0.9)]
-    text = generate._instructions(prof, chosen)
-    # knowledge_level: undergrad -> explains jargon
-    assert "attention mechanism in one sentence" in text
-    # pace: brief -> cover more topics briefly
-    assert "briefly" in text
-    # fixed intro: overview with example
-    assert "overview" in text
-    assert "In today's" in text
-    # fixed outro: summary
-    assert "summary" in text
-    # fixed transition: pause or explicit sentence
-    assert "pause" in text
-    assert "Now let's jump to the next topic" in text
-    # item title included
-    assert "Paper A" in text
-
-
-def test_generate_instructions_researcher_skips_basics():
-    prof = profile_mod.Profile(knowledge_level="researcher", pace="deep_dive")
-    chosen = []
-    text = generate._instructions(prof, chosen)
-    assert "no need to define" in text
-    assert "go straight to the substance" in text
-    assert "Depth over breadth" in text
 
 
 def test_generate_brief_groups_by_source(tmp_path, monkeypatch):
     chosen = [
         RankedItem(title="Paper A", url="https://arxiv.org/abs/2601.00001",
-                   date="d", body="abstract", source="arxiv",
-                   score=0.9, final_score=0.9),
+                   date="d", body="abstract", source="arxiv", score=0.9),
         RankedItem(title="HN Story", url="https://hn.example/x",
-                   date="d", body="body", source="hn",
-                   score=0.8, final_score=0.8),
+                   date="d", body="body", source="hn", score=0.8),
     ]
     by_source = generate._group_by_source(chosen)
     assert {s: [i.title for i in items] for s, items in by_source.items()} == {
         "arxiv": ["Paper A"],
         "hn": ["HN Story"],
     }
-    text = generate._brief_text(chosen, by_source, profile_mod.Profile())
+    text = generate._brief_text(chosen, by_source)
     assert "arXiv papers" in text
     assert "Hacker News stories" in text
     assert "https://arxiv.org/pdf/2601.00001" in text
 
 
 def test_generate_writes_episode(tmp_path, monkeypatch):
-    # 3 items >= 0.8, rest below. deep_dive floor=5 cap=10 -> 3 qualify,
-    # padded to floor=5.
+    # 3 items >= 0.8, rest below. floor=10 -> 3 qualify, padded to 10.
     ranked = [
         RankedItem(title=f"top{i}", url=f"u{i}", date="d", body="b", source="arxiv",
-                   score=0.9, final_score=0.9)
+                   score=0.9)
         for i in range(3)
     ] + [
         RankedItem(title=f"low{i}", url=f"l{i}", date="d", body="b", source="arxiv",
-                   score=0.5, final_score=0.5)
-        for i in range(10)
+                   score=0.5)
+        for i in range(20)
     ]
-    prof = profile_mod.Profile(pace="deep_dive")
     monkeypatch.setattr(store, "run_dir", lambda date=None: tmp_path)
     monkeypatch.setattr(generate.store, "run_dir", lambda date=None: tmp_path)
-    ep = generate.generate(ranked, make_audio=False, profile=prof)
-    assert len(ep.manifest) == 5
-    assert ep.manifest[0].final_score == 0.9
-    assert ep.manifest[-1].final_score == 0.5
+    ep = generate.generate(ranked, make_audio=False)
+    assert len(ep.manifest) == 10
+    assert ep.manifest[0].score == 0.9
+    assert ep.manifest[-1].score < 0.8
+
+
+# --- audio result ----------------------------------------------------------
+
+def test_audio_result_dataclass():
+    from pipeline import audio
+    r = audio.AudioResult(
+        audio_path=pathlib.Path("a.mp3"),
+        transcript_path=pathlib.Path("t.md"),
+        backend="podcastfy",
+    )
+    assert r.backend == "podcastfy"
+    assert r.transcript_path is not None
+
+
+def test_podcastfy_backend_generate_writes_audio_and_transcript(tmp_path, monkeypatch):
+    """PodcastfyBackend.generate drives SimplePodcastGenerator (mocked) and
+    writes episode.mp3 + transcript.md into the run dir, returning a result
+    with transcript_path set so the transcribe stage can skip Whisper."""
+    from pipeline import audio
+
+    # Fake SimplePodcastGenerator that avoids the langchain/openai deps.
+    class FakeGenerator:
+        def __init__(self, papers_dir=None, web_dir=None, **kw):
+            self.papers_dir = papers_dir
+            self.web_dir = web_dir
+        def load_brief_and_sources(self, brief_path):
+            return "=== INTRO ===\n=== END INTRO ==="
+        def generate_transcript(self, combined):
+            return "<Person1>hello</Person1>\n<Person2>world</Person2>"
+        def generate_audio(self, transcript, output_path, temp_audio_dir=None):
+            pathlib.Path(output_path).write_bytes(b"FAKE_MP3")
+
+    # Inject a fake pipeline.podcastfy.generator module so the lazy import
+    # inside PodcastfyBackend.generate picks up FakeGenerator without needing
+    # the langchain/openai optional deps installed.
+    fake_mod = types.ModuleType("pipeline.podcastfy.generator")
+    fake_mod.SimplePodcastGenerator = FakeGenerator
+    monkeypatch.setitem(sys.modules, "pipeline.podcastfy.generator", fake_mod)
+
+    brief = tmp_path / "podcast_brief.md"
+    brief.write_text("# AI News Digest")
+    chosen = [RankedItem(title="t", url="u", date="d", body="b", source="arxiv",
+                         score=0.9)]
+
+    result = audio.PodcastfyBackend().generate(
+        brief=brief, run_dir=tmp_path, chosen=chosen,
+    )
+    assert result.backend == "podcastfy"
+    assert result.audio_path == tmp_path / "episode.mp3"
+    assert result.audio_path.read_bytes() == b"FAKE_MP3"
+    assert result.transcript_path == tmp_path / "transcript.md"
+    assert "<Person1>hello</Person1>" in result.transcript_path.read_text()
+    # Per-run cache dirs were created under the run dir.
+    assert (tmp_path / ".podcastfy-cache").is_dir()
+
+
+def test_podcastfy_backend_failure_returns_empty_audio(tmp_path, monkeypatch):
+    """On exception, the backend returns an empty audio_path (brief is the
+    guaranteed product) and any partial transcript."""
+    from pipeline import audio
+
+    class FakeGenerator:
+        def __init__(self, papers_dir=None, web_dir=None, **kw):
+            pass
+        def load_brief_and_sources(self, brief_path):
+            raise RuntimeError("boom")
+
+    fake_mod = types.ModuleType("pipeline.podcastfy.generator")
+    fake_mod.SimplePodcastGenerator = FakeGenerator
+    monkeypatch.setitem(sys.modules, "pipeline.podcastfy.generator", fake_mod)
+
+    brief = tmp_path / "podcast_brief.md"
+    brief.write_text("# AI News Digest")
+    chosen = [RankedItem(title="t", url="u", date="d", body="b", source="arxiv",
+                         score=0.9)]
+
+    result = audio.PodcastfyBackend().generate(
+        brief=brief, run_dir=tmp_path, chosen=chosen,
+    )
+    assert str(result.audio_path) == "."
+    assert result.backend == "podcastfy"
+
+
+# --- generate: backend wiring + episode.json transcript_source ------------
+
+def test_generate_writes_transcript_source_for_podcastfy(tmp_path, monkeypatch):
+    """generate() threads the chosen backend through and records
+    transcript_source in episode.json."""
+    ranked = [
+        RankedItem(title="t", url="u", date="d", body="b", source="arxiv",
+                   score=0.9)
+    ]
+    monkeypatch.setattr(store, "run_dir", lambda date=None: tmp_path)
+    monkeypatch.setattr(generate.store, "run_dir", lambda date=None: tmp_path)
+
+    fake_result = generate.audio_mod.AudioResult(
+        audio_path=tmp_path / "episode.mp3",
+        transcript_path=tmp_path / "transcript.md",
+        backend="podcastfy",
+    )
+    class FakeBackend:
+        name = "podcastfy"
+        def generate(self, brief, run_dir, chosen, transcript_in=None):
+            return fake_result
+    monkeypatch.setattr(generate.audio_mod, "PodcastfyBackend", lambda: FakeBackend())
+
+    ep = generate.generate(ranked, make_audio=True)
+    assert ep.audio_path == str(tmp_path / "episode.mp3")
+    manifest = json.loads((tmp_path / "episode.json").read_text())
+    assert manifest["transcript_source"] == "generated"
+    assert manifest["backend"] == "podcastfy"
+
+
+def test_generate_no_audio_records_no_backend(tmp_path, monkeypatch):
+    ranked = [
+        RankedItem(title="t", url="u", date="d", body="b", source="arxiv",
+                   score=0.9)
+    ]
+    monkeypatch.setattr(store, "run_dir", lambda date=None: tmp_path)
+    monkeypatch.setattr(generate.store, "run_dir", lambda date=None: tmp_path)
+
+    ep = generate.generate(ranked, make_audio=False)
+    manifest = json.loads((tmp_path / "episode.json").read_text())
+    assert manifest["transcript_source"] == "whisper"
+    assert manifest["backend"] is None
+
+
+# --- transcribe: no-op when transcript already generated ------------------
+
+def test_transcribe_noop_when_transcript_generated(tmp_path, monkeypatch):
+    """When episode.json has transcript_source=generated and transcript.md
+    exists, transcribe returns it without importing faster-whisper."""
+    (tmp_path / "episode.json").write_text(json.dumps({
+        "audio_path": str(tmp_path / "episode.mp3"),
+        "transcript_source": "generated",
+        "backend": "podcastfy",
+    }))
+    (tmp_path / "transcript.md").write_text("<Person1>hi</Person1>")
+    monkeypatch.setattr(store, "run_dir", lambda date=None: tmp_path)
+    monkeypatch.setattr(transcribe.store, "run_dir", lambda date=None: tmp_path)
+
+    out = transcribe.transcribe(date="2026-08-31")
+    assert out == tmp_path / "transcript.md"
+    assert "hi" in out.read_text()
+
+
+def test_transcribe_noop_missing_transcript_falls_through(tmp_path, monkeypatch):
+    """When transcript_source != "generated", transcribe proceeds to load
+    Whisper (mocked here) instead of short-circuiting."""
+    # audio_path points to a real (empty) file so _resolve_audio is happy.
+    audio_file = tmp_path / "episode.mp3"
+    audio_file.write_bytes(b"")
+    (tmp_path / "episode.json").write_text(json.dumps({
+        "audio_path": str(audio_file),
+        "transcript_source": "whisper",
+        "backend": "podcastfy",
+    }))
+    monkeypatch.setattr(store, "run_dir", lambda date=None: tmp_path)
+    monkeypatch.setattr(transcribe.store, "run_dir", lambda date=None: tmp_path)
+
+    # Inject a fake faster_whisper so transcribe runs without a GPU/codec.
+    class FakeSegments:
+        def __iter__(self):
+            return iter([])
+    class FakeInfo:
+        language = "en"
+        language_probability = 0.99
+        duration = 0.0
+    class FakeModel:
+        def __init__(self, *a, **kw):
+            pass
+        def transcribe(self, *a, **kw):
+            return FakeSegments(), FakeInfo()
+    fake_fw = types.ModuleType("faster_whisper")
+    fake_fw.WhisperModel = FakeModel
+    monkeypatch.setitem(sys.modules, "faster_whisper", fake_fw)
+
+    out = transcribe.transcribe(date="2026-08-31")
+    assert out == tmp_path / "transcript.md"
+    assert "Transcript" in out.read_text()

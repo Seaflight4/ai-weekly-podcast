@@ -2,26 +2,24 @@
 .venv/
 __pycache__/
 *.pyc
+*.egg-info/
 
 # --- Runtime data ---
-data/
+# Example run output IS tracked (e.g. data/31-08-2026/), but per-run caches and
+# podcastfy's default output dirs are regenerable, so keep them out.
+data/**/.podcastfy-cache/
+output/
 
 # --- Secrets ---
 .env
 
 # --- Teaching workspace (kept locally, excluded from the public repo) ---
-lessons/
-reference/
-assets/
-learning-records/
-MISSION.md
-NOTES.md
-RESOURCES.md
+# Anchored to repo root so they don't match vendored package data.
 AGENTS.md
 skills-lock.json
-.agents/
-docs/
-.scratch/
+/.agents/
+/docs/
+/.scratch/
 
 # --- Editors / OS ---
 .idea/
