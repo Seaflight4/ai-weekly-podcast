@@ -38,14 +38,16 @@ STAGES = ("collect", "rank", "generate", "transcribe")
 
 def run(only: str | None = None, no_audio: bool = False,
         from_cache: str | None = None, date: str | None = None,
-        transcript_in: str | None = None, brief_in: str | None = None):
+        transcript_in: str | None = None, brief_in: str | None = None,
+        top_k: int | None = None, score_floor: float | None = None):
     if only is None:
         print("[1/3] collecting...")
         items = _timed("collect", collect.collect, date)
         print(f"      {len(items)} items")
 
         print("[2/3] ranking...")
-        ranked = _timed("rank", rank.rank, items, date=date)
+        ranked = _timed("rank", rank.rank, items, date=date,
+                        top_k=top_k, score_floor=score_floor)
         print(f"      scored {len(ranked)} items")
 
         print("[3/3] generating...")
@@ -69,7 +71,8 @@ def run(only: str | None = None, no_audio: bool = False,
             return
         items = _load("collect", Item, date=date)
         print(f"[2/3] ranking {len(items)} cached items...")
-        ranked = _timed("rank", rank.rank, items, date=date)
+        ranked = _timed("rank", rank.rank, items, date=date,
+                        top_k=top_k, score_floor=score_floor)
         print(f"      scored {len(ranked)} items")
         return
 

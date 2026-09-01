@@ -394,12 +394,15 @@ class SimplePodcastGenerator:
             if name not in params:
                 raise KeyError(f"Missing prompt parameter: {name}")
 
-    def generate_transcript(self, markdown_content: str) -> str:
+    def generate_transcript(self, markdown_content: str, on_part=None) -> str:
         """
         Generate podcast transcript from markdown.
 
         Args:
             markdown_content: Full markdown file content
+            on_part: Optional callback ``on_part(idx, text)`` fired after each
+                part is cleaned, enabling pipeline overlap (e.g. starting TTS
+                for a part while later parts are still generating).
 
         Returns:
             Transcript with <Person1> and <Person2> tags
@@ -422,7 +425,7 @@ class SimplePodcastGenerator:
         }
 
         # Generate using long-form strategy
-        transcript = self.strategy.generate(chain, markdown_content, prompt_params)
+        transcript = self.strategy.generate(chain, markdown_content, prompt_params, on_part=on_part)
 
         # Clean output
         transcript = self.strategy.clean(transcript, self.content_generator_config)

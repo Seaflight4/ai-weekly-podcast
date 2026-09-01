@@ -15,6 +15,9 @@ data/.schedule.json
 data/personalized/
 output/
 
+# --- Whisper model cache (one-off ASR verifier) ---
+/.hf-cache/
+
 # --- Secrets ---
 .env
 

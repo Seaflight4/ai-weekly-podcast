@@ -8,10 +8,14 @@ class Item:
     date: str            # ISO 8601, e.g. "2026-08-17"
     body: str
     source: str          # e.g. "hn", "arxiv"
+    # Relevance score (0.0-1.0) from the collect-stage small-model gate
+    # (Mistral-Small). Used by the rank stage to prefilter the big-LLM input.
+    # 0.0 when the item predates the score field or the gate did not score it.
+    gate_score: float = 0.0
 
 @dataclass
 class RankedItem(Item):
-    score: float         # 0.0 - 1.0, judge's rubric score (importance)
+    score: float = 0.0      # 0.0 - 1.0, judge's rubric score (importance)
     judge_reason: str = ""
 
 @dataclass

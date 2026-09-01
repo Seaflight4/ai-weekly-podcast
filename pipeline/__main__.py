@@ -3,7 +3,8 @@ from .orchestrator import run
 
 USAGE = ("usage: python -m pipeline run [--only collect|rank|generate|transcribe] "
          "[--no-audio] [--transcript-in <path>] [--brief-in <path>] "
-         "[--from-cache <rank.json>] [--date YYYY-MM-DD]")
+         "[--from-cache <rank.json>] [--date YYYY-MM-DD] "
+         "[--top-k N] [--score-floor F]")
 STAGES = ("collect", "rank", "generate", "transcribe")
 
 def main(argv: list[str]) -> None:
@@ -18,6 +19,8 @@ def main(argv: list[str]) -> None:
     brief_in = None
     from_cache = None
     date = None
+    top_k = None
+    score_floor = None
     rest = []
     while args:
         a = args.pop(0)
@@ -46,13 +49,21 @@ def main(argv: list[str]) -> None:
             if only not in STAGES:
                 stage_list = "|".join(STAGES)
                 raise SystemExit(f"unknown stage: {only!r} (expected {stage_list})")
+        elif a == "--top-k":
+            if not args:
+                raise SystemExit(f"{USAGE}\n(error: `--top-k` needs an int)")
+            top_k = int(args.pop(0))
+        elif a == "--score-floor":
+            if not args:
+                raise SystemExit(f"{USAGE}\n(error: `--score-floor` needs a float)")
+            score_floor = float(args.pop(0))
         else:
             rest.append(a)
     if rest:
         raise SystemExit(f"{USAGE}\n(error: unexpected argument {rest[0]!r})")
     run(only=only, no_audio=no_audio,
         from_cache=from_cache, date=date, transcript_in=transcript_in,
-        brief_in=brief_in)
+        brief_in=brief_in, top_k=top_k, score_floor=score_floor)
 
 if __name__ == "__main__":
     main(sys.argv[1:])

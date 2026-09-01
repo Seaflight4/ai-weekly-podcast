@@ -48,6 +48,15 @@ def generate(ranked: list[RankedItem], make_audio: bool = True,
 
     by_source = _group_by_source(chosen)
 
+    # Forward monitor: surface low gate_score among aired items. A recurring
+    # low-score-but-aired item signals the small-model gate is misaligned with
+    # the big-LLM judge and the prefilter floor should be relaxed.
+    scored = [c.gate_score for c in chosen if c.gate_score]
+    if scored:
+        print(f"      monitor: chosen gate_score min={min(scored):.2f} "
+              f"median={sorted(scored)[len(scored)//2]:.2f} max={max(scored):.2f} "
+              f"({len(scored)}/{len(chosen)} scored)")
+
     transcript_source = "whisper"
     transcript_path: pathlib.Path | None = None
     backend_name: str | None = None

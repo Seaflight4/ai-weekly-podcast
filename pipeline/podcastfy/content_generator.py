@@ -304,7 +304,8 @@ class LongFormContentGenerator:
     def generate_long_form(
         self, 
         input_content: str, 
-        prompt_params: Dict
+        prompt_params: Dict,
+        on_part=None,
     ) -> str:
         """
         Generate a complete long-form conversation using chunked content.
@@ -312,6 +313,9 @@ class LongFormContentGenerator:
         Args:
             input_content (str): Input text for conversation
             prompt_params (Dict): Base prompt parameters
+            on_part (callable): Optional callback ``on_part(idx, text)`` fired
+                after each part is cleaned, enabling pipeline overlap (e.g.
+                starting TTS for a part while later parts are still generating).
             
         Returns:
             str: Generated long-form conversation
@@ -345,6 +349,8 @@ class LongFormContentGenerator:
                 min_turns=min_turns,
             )
             response = ContentCleanerMixin._strip_preamble(response)
+            if on_part is not None:
+                on_part(i, response)
             if i == 0:
                 chat_context = response
             else:
@@ -631,7 +637,8 @@ class LongFormContentStrategy(ContentGenerationStrategy, ContentCleanerMixin):
         generator = LongFormContentGenerator(chain, self.llm, self.config_conversation)
         return generator.generate_long_form(
             input_texts,
-            prompt_params
+            prompt_params,
+            on_part=kwargs.get("on_part"),
         )
         
     def clean(self, 

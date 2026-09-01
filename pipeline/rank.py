@@ -6,7 +6,7 @@ import time
 
 BATCH_SIZE = 25            # stories per batch-judge request (empirically fastest)
 MAX_JUDGE_TRIES = 3       # retries per batch before giving up on malformed JSON
-JUDGE_WORKERS = 4         # concurrent batch-judge calls to the SkAInet backend
+JUDGE_WORKERS = 8         # concurrent batch-judge calls to the SkAInet backend
 
 UNIFIED_RUBRIC = """You are a senior practitioner at a software consulting firm choosing which
 items from this week's AI news and research deserve airtime on the internal AI
@@ -35,6 +35,16 @@ directly comparable:
 - A typical niche or incremental paper ≈ 0.45.
 - A typical low-signal HN post ≈ 0.3.
 
+Worked per-source anchors (the two sources are judged together, but the pool
+is often lopsided — arXiv may far outnumber HN or vice versa. Do NOT let the
+majority source inflate its scores; rate each item against the anchors below,
+never against the other items in the batch):
+- arXiv: a groundbreaking method paper adopted industry-wide within weeks = 0.9;
+  a routine ablation or engineering trick = 0.4; a weak/tangential abstract = 0.3.
+- HN: a frontier model release, major incident, or pricing shock announced via
+  blog = 0.9; a well-argued engineering writeup with real numbers = 0.7;
+  a cool demo with no method transfer = 0.35; a gossip/pro-tip post = 0.3.
+
 Thin-evidence rule: if an item NAMES a major event but has a thin or empty
 body (e.g. a launch post whose fetch failed), score it on the EVENT's
 importance, not the text length. An empty body never earns credit on its own,
@@ -50,18 +60,55 @@ once. No prose before or after. No markdown fences.
 """
 
 
-def rank(items: list[Item], date: str | None = None) -> list[RankedItem]:
+def rank(items: list[Item], date: str | None = None,
+         top_k: int | None = None, score_floor: float | None = None) -> list[RankedItem]:
     """Score every item and return the full ranked pool (sorted desc).
 
     Pure importance ranking — there is no personalization pass.
+
+    Optional prefilter (``top_k`` / ``score_floor``) shrinks the big-LLM input
+    using the small-model ``gate_score`` set by the collect stage, per source
+    (HN and arXiv gate scores come from different prompts and are not on a
+    common scale, so the cut is applied within each source). ``top_k`` is a
+    total budget split proportionally across sources; ``score_floor`` drops
+    items below the floor first. Both None = score everything (legacy).
     """
     items = _dedup_by_url(items)
     print(f"      rank: {len(items)} items")
+    if top_k is not None or score_floor is not None:
+        before = len(items)
+        items = _prefilter_by_gate(items, top_k=top_k, score_floor=score_floor)
+        print(f"      rank: prefilter {before} -> {len(items)} by gate_score "
+              f"(top_k={top_k}, floor={score_floor})")
 
     ranked = _rank_pool(items, UNIFIED_RUBRIC)
     ranked.sort(key=lambda r: r.score, reverse=True)
     store.write("rank.json", [r.__dict__ for r in ranked], date=date)
     return ranked
+
+
+def _prefilter_by_gate(items: list[Item], top_k: int | None,
+                       score_floor: float | None) -> list[Item]:
+    """Per-source gate_score cut. ``top_k`` is a total budget split across
+    sources in proportion to their share of the pool (min 10 each). Returns
+    items surviving the cut, in gate_score-descending order within source.
+    """
+    if not items:
+        return items
+    by_src: dict[str, list[Item]] = {}
+    for it in items:
+        by_src.setdefault(it.source, []).append(it)
+    kept: list[Item] = []
+    total = len(items)
+    for src, group in by_src.items():
+        group.sort(key=lambda i: i.gate_score, reverse=True)
+        if score_floor is not None:
+            group = [i for i in group if i.gate_score >= score_floor]
+        if top_k is not None:
+            quota = max(10, int(round(top_k * len(group) / total)))
+            group = group[:quota]
+        kept.extend(group)
+    return kept
 
 
 def rank_from_cache(cache_path: str, date: str | None = None) -> list[RankedItem]:
