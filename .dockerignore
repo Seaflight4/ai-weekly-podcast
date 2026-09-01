@@ -20,6 +20,6 @@ NOTES.md
 RESOURCES.md
 
 # Runtime state lives in the mounted data volume, not the image.
-data/.jobs/
-data/.schedule.json
+# Exclude the entire data/ dir from build context (mp3s, caches, jobs).
+data/
 output/

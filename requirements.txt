@@ -1,0 +1,16 @@
+# Runtime dependencies for the podcast pipeline + serve extras.
+# Keep in sync with pyproject.toml [project.dependencies] + [serve] extra.
+# Regenerate with: pip-compile pyproject.toml --extra serve --output-file requirements.txt
+openai>=1.0.0
+trafilatura>=2.2.0
+langchain>=0.3,<1
+langchain-core>=0.3,<1
+langchain-openai>=0.3,<1
+pymupdf
+pydub
+audioop-lts; python_version >= '3.13'
+python-dotenv
+PyYAML
+fastapi>=0.110
+uvicorn[standard]>=0.27
+apscheduler>=3.10
