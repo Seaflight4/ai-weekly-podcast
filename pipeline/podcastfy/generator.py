@@ -26,7 +26,7 @@ from .sources import parse_brief, download_arxiv_pdfs, fetch_web_content
 logger = logging.getLogger(__name__)
 
 SKAINET_BASE = "https://chat.model.tngtech.com/v1"
-DEFAULT_MODEL = "deepseek-ai/DeepSeek-V4-Pro-0813"
+DEFAULT_MODEL = "deepseek-ai/DeepSeek-V4-Flash-0731"
 
 
 # Self-contained long-form podcast prompt (modelled on the souzatharsis
@@ -42,7 +42,7 @@ Audience: AI researchers at a leading software consulting firm. They know ML fun
 
 Podcast: {podcast_name} - {podcast_tagline}
 Language: {output_language}
-Roles: {roles_person1} (Person1) and {roles_person2} (Person2)
+Roles: {host1_name} — {roles_person1} (Person1) and {host2_name} — {roles_person2} (Person2). Hosts introduce themselves by name and address each other by name; never refer to yourselves as "Person 1" or "Person 2".
 
 SPEAKER DYNAMIC:
 - Two knowledgeable AI researchers co-hosting. They take turns leading topics and react to each other naturally. Genuine curiosity, surprise, or occasional skepticism when a claim truly warrants it.
@@ -81,11 +81,18 @@ INPUT:
 
 def _extract_balanced_json(text: str):
     """
-    Return the first balanced JSON object substring parsed to Python, or None.
+    Return the best balanced JSON object substring parsed to Python, or None.
 
-    Tries every '{' position as a potential object start (so stray leading
-    junk like a duplicated '{"' before the real object is simply skipped).
+    Scans every '{' position as a potential object start. When the model
+    emits chain-of-thought reasoning before the JSON answer (common with
+    reasoning models when response_format is not set), the reasoning may
+    contain example JSON fragments. To avoid grabbing a reasoning artifact
+    instead of the real answer, we prefer candidates that parse to a dict
+    with a "dialogue" or "turns" key (the expected schema). If none qualify,
+    fall back to the last successfully-parsed balanced object.
     """
+    best_schema_match = None
+    last_parsed = None
     for start_idx, ch in enumerate(text):
         if ch != "{":
             continue
@@ -111,10 +118,15 @@ def _extract_balanced_json(text: str):
                 if depth == 0:
                     candidate = text[start_idx:i + 1]
                     try:
-                        return json.loads(candidate)
+                        parsed = json.loads(candidate)
                     except Exception:
                         break
-    return None
+                    last_parsed = parsed
+                    if (isinstance(parsed, dict)
+                            and ("dialogue" in parsed or "turns" in parsed)):
+                        best_schema_match = parsed
+                    break
+    return best_schema_match if best_schema_match is not None else last_parsed
 
 
 def parse_dialogue_json(raw: str) -> str:
@@ -269,10 +281,10 @@ class SimplePodcastGenerator:
         self.papers_dir = papers_dir or "papers"
         self.web_dir = web_dir or "web"
 
-        # Cap per-part output. DeepSeek-V4-Pro is a reasoning model, so the
-        # thinking preamble counts toward the output token budget. 16000 gives
-        # reasoning + JSON response enough room even with complex prompts
-        # (conversational interplay, signposts, delta-first numbers, etc.).
+        # Cap per-part output. DeepSeek-V4-Flash is a lighter-reasoning model,
+        # so the thinking preamble is shorter than Pro's. 16000 still gives
+        # reasoning + JSON response ample room; Flash will simply finish
+        # faster when less reasoning is needed.
         self.content_generator_config = {
             "max_output_tokens": 16000,
         }
@@ -312,6 +324,8 @@ class SimplePodcastGenerator:
             "podcast_name": "AI News Weekly",
             "podcast_tagline": "Latest AI research and news",
             "conversation_style": ["informative", "engaging", "punchy"],
+            "host1_name": "Brian",
+            "host2_name": "Tina",
             "roles_person1": "AI researcher",
             "roles_person2": "AI researcher",
             "dialogue_structure": ["conversation", "exchange"],
@@ -358,9 +372,8 @@ class SimplePodcastGenerator:
             ],
             temperature=0.7,
             max_tokens=self._max_output_tokens,
-            response_format={"type": "json_object"},
-            presence_penalty=0.75,
-            frequency_penalty=0.75,
+            presence_penalty=0.1,
+            frequency_penalty=0.1,
         )
         content = resp.choices[0].message.content or ""
         tagged = parse_dialogue_json(content)
@@ -401,6 +414,8 @@ class SimplePodcastGenerator:
         prompt_params = {
             "roles_person1": self.config_conversation["roles_person1"],
             "roles_person2": self.config_conversation["roles_person2"],
+            "host1_name": self.config_conversation["host1_name"],
+            "host2_name": self.config_conversation["host2_name"],
             "podcast_name": self.config_conversation["podcast_name"],
             "podcast_tagline": self.config_conversation["podcast_tagline"],
             "output_language": self.config_conversation["output_language"],

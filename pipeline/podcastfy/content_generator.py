@@ -52,8 +52,8 @@ class LLMBackend:
 
         common_params = {
             "temperature": temperature,
-            "presence_penalty": 0.75,  # Encourage diverse content
-            "frequency_penalty": 0.75,  # Avoid repetition
+            "presence_penalty": 0.1,  # Encourage diverse content
+            "frequency_penalty": 0.1,  # Avoid repetition
         }
 
         if is_local:
@@ -240,6 +240,9 @@ class LongFormContentGenerator:
         # Initialize part_instructions with chat context
         enhanced_params["context"] = chat_context
 
+        host1 = prompt_params.get("host1_name", "Person1")
+        host2 = prompt_params.get("host2_name", "Person2")
+
         # Dynamic turn/word budget for mid-parts (based on chunk length).
         turn_range, word_range, _ = self._turn_budget(chunk_len)
         
@@ -261,7 +264,7 @@ class LongFormContentGenerator:
             enhanced_params["instruction"] = f"""
             You are generating the INTRODUCTION of the podcast.
             Do NOT explain any topic yet. Instead:
-            1. BOTH hosts greet the audience. Person1 says one welcoming sentence, then Person2 says one welcoming sentence. Make it warm and conversational, not a rushed "Hey there!".
+            1. BOTH hosts greet the audience by name. Person1 ({host1}) says one welcoming sentence introducing himself, then Person2 ({host2}) says one welcoming sentence introducing herself and greeting {host1}. Make it warm and conversational, not a rushed "Hey there!".
             2. Give a themed overview: group the topics into 2-3 themes. Weave them together conversationally. Do NOT label themes explicitly ("first theme," "second theme," "third theme"). Use natural connective phrases like "We'll also dive into," "Then we'll cover," "Finally, we'll discuss." For each topic, use a relative clause or flowing sentence that says what it does, not a standalone fragment. Integrate a brief "why it matters" into the theme, not as a separate label. Interleave genuine reactions between themes. One host reacts to the previous theme, the other continues to the next. Do NOT explain mechanisms, cite numbers, or describe how things work. Save those for the topic discussions.
                Example: "In today's episode, we'll cover three major model releases. A, which achieves unprecedented generation speeds. B, which brings multimodal capabilities to a compact architecture. And C, which uses an end-to-end self-improvement loop." [Reaction: "And those are pushing boundaries we didn't think possible a year ago."] "We'll also dive into agent frameworks, covering D's breakthrough in harness scaling and E's flexible navigation. Because raw intelligence doesn't mean much without a reliable environment to operate within." "Right. Finally, we'll discuss major industry news, including F's big acquisition and a shocking audit revealing benchmark cheating."
             3. End with "Let's begin!" or similar.
@@ -275,7 +278,7 @@ class LongFormContentGenerator:
             Do NOT re-explain any topic in depth. Instead:
             1. Synthesize the episode's arc: group the topics into 2-3 themes and summarize what each theme revealed. Show the through-line, not just a list.
             2. Connect the themes: show how they relate and build on each other (e.g. "We started with speed, then saw how reliability matters just as much, and finally learned that even our benchmarks can't be trusted").
-            3. End with a provocative question for the audience, then Person1 says a brief goodbye ("Until next time, keep digging...").
+            3. End with a provocative question for the audience, then Person1 ({host1}) says a brief goodbye addressing {host2} ("Until next time, keep digging...").
             Keep it to 9 to 11 turns, ~280 words. This is a recap with synthesis, not a new discussion. No per-topic analogy needed here.
             """
         else:
