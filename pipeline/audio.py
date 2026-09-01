@@ -66,6 +66,7 @@ class PodcastfyBackend:
         run_dir: pathlib.Path,
         chosen: list[RankedItem],
         transcript_in: pathlib.Path | None = None,
+        config: dict | None = None,
     ) -> AudioResult:
         from .podcastfy.generator import SimplePodcastGenerator
 
@@ -81,6 +82,7 @@ class PodcastfyBackend:
         gen = SimplePodcastGenerator(
             papers_dir=str(papers_dir),
             web_dir=str(web_dir),
+            **(config or {}),
         )
         try:
             # Source fetching only happens when we need the LLM (i.e. no cached

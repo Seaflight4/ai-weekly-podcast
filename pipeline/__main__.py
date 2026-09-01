@@ -4,7 +4,9 @@ from .orchestrator import run
 USAGE = ("usage: python -m pipeline run [--only collect|rank|generate|transcribe] "
          "[--no-audio] [--transcript-in <path>] [--brief-in <path>] "
          "[--from-cache <rank.json>] [--date YYYY-MM-DD] "
-         "[--top-k N] [--score-floor F]")
+         "[--top-k N] [--score-floor F] "
+         "[--config <config.yaml>] [--window-start D] [--window-end D] "
+         "[--audience LEVEL] [--familiar S] [--length X] [--depth Y]")
 STAGES = ("collect", "rank", "generate", "transcribe")
 
 def main(argv: list[str]) -> None:
@@ -21,6 +23,13 @@ def main(argv: list[str]) -> None:
     date = None
     top_k = None
     score_floor = None
+    config_path = None
+    window_start = None
+    window_end = None
+    audience_level = None
+    familiar_topics = None
+    length = None
+    depth = None
     rest = []
     while args:
         a = args.pop(0)
@@ -57,13 +66,44 @@ def main(argv: list[str]) -> None:
             if not args:
                 raise SystemExit(f"{USAGE}\n(error: `--score-floor` needs a float)")
             score_floor = float(args.pop(0))
+        elif a == "--config":
+            if not args:
+                raise SystemExit(f"{USAGE}\n(error: `--config` needs a path)")
+            config_path = args.pop(0)
+        elif a == "--window-start":
+            if not args:
+                raise SystemExit(f"{USAGE}\n(error: `--window-start` needs a YYYY-MM-DD date)")
+            window_start = args.pop(0)
+        elif a == "--window-end":
+            if not args:
+                raise SystemExit(f"{USAGE}\n(error: `--window-end` needs a YYYY-MM-DD date)")
+            window_end = args.pop(0)
+        elif a == "--audience":
+            if not args:
+                raise SystemExit(f"{USAGE}\n(error: `--audience` needs a level)")
+            audience_level = args.pop(0)
+        elif a == "--familiar":
+            if not args:
+                raise SystemExit(f"{USAGE}\n(error: `--familiar` needs a comma-separated list)")
+            familiar_topics = [t.strip() for t in args.pop(0).split(",") if t.strip()]
+        elif a == "--length":
+            if not args:
+                raise SystemExit(f"{USAGE}\n(error: `--length` needs short|medium|long)")
+            length = args.pop(0)
+        elif a == "--depth":
+            if not args:
+                raise SystemExit(f"{USAGE}\n(error: `--depth` needs brief|deep-dive)")
+            depth = args.pop(0)
         else:
             rest.append(a)
     if rest:
         raise SystemExit(f"{USAGE}\n(error: unexpected argument {rest[0]!r})")
     run(only=only, no_audio=no_audio,
         from_cache=from_cache, date=date, transcript_in=transcript_in,
-        brief_in=brief_in, top_k=top_k, score_floor=score_floor)
+        brief_in=brief_in, top_k=top_k, score_floor=score_floor,
+        config_path=config_path, window_start=window_start, window_end=window_end,
+        audience_level=audience_level, familiar_topics=familiar_topics,
+        length=length, depth=depth)
 
 if __name__ == "__main__":
     main(sys.argv[1:])

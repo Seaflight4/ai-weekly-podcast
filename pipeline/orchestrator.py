@@ -1,5 +1,6 @@
 from . import Item, RankedItem, collect, rank, generate, transcribe
 from . import store
+from . import config as config_mod
 import dataclasses, os, pathlib, time
 
 def _load_env():
@@ -39,10 +40,25 @@ STAGES = ("collect", "rank", "generate", "transcribe")
 def run(only: str | None = None, no_audio: bool = False,
         from_cache: str | None = None, date: str | None = None,
         transcript_in: str | None = None, brief_in: str | None = None,
-        top_k: int | None = None, score_floor: float | None = None):
+        top_k: int | None = None, score_floor: float | None = None,
+        config_path: str | None = None,
+        window_start: str | None = None, window_end: str | None = None,
+        audience_level: str | None = None,
+        familiar_topics: list[str] | None = None,
+        length: str | None = None, depth: str | None = None):
+    """Resolve the run config (defaults < config file < CLI overrides), then
+    dispatch to the requested stage(s). ``date`` is the window end / anchor
+    (back-compat with ``--date``)."""
+    cfg = config_mod.resolve(
+        config_path, date=date, window_start=window_start, window_end=window_end,
+        audience_level=audience_level, familiar_topics=familiar_topics,
+        length=length, depth=depth,
+    )
+    if cfg is not None and cfg.window_end is not None and date is None:
+        date = cfg.window_end
     if only is None:
         print("[1/3] collecting...")
-        items = _timed("collect", collect.collect, date)
+        items = _timed("collect", collect.collect, cfg.window_end, window_start=cfg.window_start)
         print(f"      {len(items)} items")
 
         print("[2/3] ranking...")
@@ -53,14 +69,15 @@ def run(only: str | None = None, no_audio: bool = False,
         print("[3/3] generating...")
         episode = _timed("generate", generate.generate, ranked,
                          make_audio=not no_audio, date=date,
-                         transcript_in=transcript_in, brief_in=brief_in)
+                         transcript_in=transcript_in, brief_in=brief_in,
+                         config=cfg)
         print(f"      audio -> {episode.audio_path}")
         print(f"      manifest has {len(episode.manifest)} items")
         return
 
     if only == "collect":
         print("[1/3] collecting...")
-        collect.collect(date)
+        collect.collect(cfg.window_end, window_start=cfg.window_start)
         return
 
     if only == "rank":
@@ -83,7 +100,8 @@ def run(only: str | None = None, no_audio: bool = False,
               f"(audio={'yes' if make_audio else 'no'})...")
         episode = _timed("generate", generate.generate, ranked,
                          make_audio=make_audio, date=date,
-                         transcript_in=transcript_in, brief_in=brief_in)
+                         transcript_in=transcript_in, brief_in=brief_in,
+                         config=cfg)
         print(f"      audio -> {episode.audio_path}")
         print(f"      manifest has {len(episode.manifest)} items")
         return

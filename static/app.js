@@ -367,11 +367,37 @@ function renderProgress(p) {
 }
 $("#run-close").onclick = () => { $("#run-panel").classList.add("hidden"); if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } };
 
-// --- new episode button -----------------------------------------------------
+// --- new episode button + config form --------------------------------------
+
+const CFG_LENGTH_MIN = { short: 10, medium: 17.5, long: 30 };
+const CFG_DEPTH_MIN = { brief: 1.0, "deep-dive": 2.0 };
+
+function readConfig() {
+  const cfg = {};
+  if ($("#cfg-window-start").value) cfg.window_start = $("#cfg-window-start").value;
+  if ($("#cfg-window-end").value) cfg.window_end = $("#cfg-window-end").value;
+  cfg.audience_level = $("#cfg-audience").value;
+  const familiar = $("#cfg-familiar").value.split(",").map((s) => s.trim()).filter(Boolean);
+  if (familiar.length) cfg.familiar_topics = familiar;
+  cfg.length = $("#cfg-length").value;
+  cfg.depth = $("#cfg-depth").value;
+  return cfg;
+}
+
+function updateCfgMeta() {
+  const n = Math.round(CFG_LENGTH_MIN[$("#cfg-length").value] / CFG_DEPTH_MIN[$("#cfg-depth").value]);
+  const sources = Math.max(4, Math.min(30, n));
+  $("#cfg-sources").textContent = sources;
+  $("#cfg-minutes").textContent = Math.round(
+    CFG_LENGTH_MIN[$("#cfg-length").value]);
+}
+["cfg-length", "cfg-depth"].forEach((id) =>
+  $("#" + id).addEventListener("change", updateCfgMeta));
+updateCfgMeta();
 
 $("#btn-new").onclick = async () => {
   if (!confirm("Run collect → rank → generate now? This takes several minutes.")) return;
-  const res = await fetch("/api/runs", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+  const res = await fetch("/api/runs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ config: readConfig() }) });
   if (res.status === 409) { alert("A run is already active."); return; }
   if (!res.ok) { alert("Failed to start: " + (await res.text())); return; }
   const job = await res.json();

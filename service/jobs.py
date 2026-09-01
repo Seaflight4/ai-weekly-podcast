@@ -211,12 +211,33 @@ def _now() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
-def full_run_cmd(date: str | None = None, no_audio: bool = False) -> list[str]:
+def full_run_cmd(date: str | None = None, no_audio: bool = False,
+                 config: dict | None = None,
+                 config_path: str | None = None) -> list[str]:
+    """Build the CLI argv for a full run.
+
+    ``config`` is a dict of user-facing knobs (keys: window_start, window_end,
+    audience_level, familiar_topics, length, depth) turned into CLI flags; an
+    explicit ``config_path`` (a resolved config.yaml) is appended as --config.
+    """
     cmd = [sys.executable, "-m", "pipeline", "run"]
     if date:
         cmd += ["--date", date]
     if no_audio:
         cmd += ["--no-audio"]
+    if config_path:
+        cmd += ["--config", str(config_path)]
+    for key, flag in (("window_start", "--window-start"),
+                      ("window_end", "--window-end"),
+                      ("audience_level", "--audience"),
+                      ("length", "--length"),
+                      ("depth", "--depth")):
+        value = (config or {}).get(key)
+        if value:
+            cmd += [flag, str(value)]
+    familiar = (config or {}).get("familiar_topics")
+    if familiar:
+        cmd += ["--familiar", ",".join(str(t) for t in familiar)]
     return cmd
 
 

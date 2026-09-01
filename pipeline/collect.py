@@ -139,9 +139,9 @@ If none pass, return {"relevant": [], "scores": [{"index": 0, "score": 0.0}, ...
 No prose before or after. No markdown fences.
 """
 
-def _collect_hn(date: str) -> list[Item]:
+def _collect_hn(date: str, start: datetime.date) -> list[Item]:
     """HN branch: fetch -> relevance gate (title-only, cheap) -> body fetch (slow, parallel)."""
-    fetched = _hn(date)
+    fetched = _hn(date, start)
     print(f"      hn: {len(fetched)} raw items")
     hn_items = [i for i in fetched if i.source == "hn"]
     if not hn_items:
@@ -167,7 +167,7 @@ def _collect_hn(date: str) -> list[Item]:
     return kept
 
 
-def _collect_arxiv(date: str) -> list[Item]:
+def _collect_arxiv(date: str, start: datetime.date) -> list[Item]:
     """arXiv branch: streamed fetch + coarse title-only relevance gate.
 
     Pages are fetched one at a time (arXiv throttles to ~1 req/3s + 5s sleep)
@@ -177,7 +177,7 @@ def _collect_arxiv(date: str) -> list[Item]:
     n_raw = 0
     def items():
         nonlocal n_raw
-        for page in _arxiv_pages(date):
+        for page in _arxiv_pages(date, start):
             n_raw += len(page)
             yield from page
     kept = _arxiv_relevant_titles(items())
@@ -185,19 +185,24 @@ def _collect_arxiv(date: str) -> list[Item]:
     return kept
 
 
-def collect(date: str | None = None) -> list[Item]:
+def collect(date: str | None = None, window_start: str | None = None) -> list[Item]:
     """Fetch the week's AI news from HN and arXiv, running the two source
     pipelines concurrently (their inputs are disjoint, their gates are shared
     small-model LLM calls, and their outputs only need a single join): HN goes
     fetch -> title gate -> body fetch; arXiv goes fetch -> coarse title gate.
+
+    ``date`` is the window end / run anchor (ISO date, defaults to today);
+    ``window_start`` (ISO date) overrides the default 7-day-back cutoff.
     """
     if date is None:
         date = datetime.date.today().isoformat()
+    end = datetime.date.fromisoformat(date)
+    start = datetime.date.fromisoformat(window_start) if window_start else end - datetime.timedelta(days=7)
 
     print("      collect: running hn and arxiv branches in parallel...")
     with ThreadPoolExecutor(max_workers=2) as ex:
-        hn_fut = ex.submit(_collect_hn, date)
-        arxiv_fut = ex.submit(_collect_arxiv, date)
+        hn_fut = ex.submit(_collect_hn, date, start)
+        arxiv_fut = ex.submit(_collect_arxiv, date, start)
         hn_items = hn_fut.result()
         arxiv_items = arxiv_fut.result()
 
@@ -215,9 +220,9 @@ def collect(date: str | None = None) -> list[Item]:
     return items
 
 # --- source: Hacker News (Algolia JSON): points>100 candidates, title+URL only ---
-def _hn(date: str) -> list[Item]:
+def _hn(date: str, start: datetime.date) -> list[Item]:
     day = datetime.datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=datetime.timezone.utc)
-    cutoff = int((day - datetime.timedelta(days=7)).timestamp())
+    cutoff = int(datetime.datetime.combine(start, datetime.time.min, tzinfo=datetime.timezone.utc).timestamp())
     day_ts = int(day.timestamp())
     hits: list[dict] = []
     page = 0
@@ -274,8 +279,8 @@ def _hn(date: str) -> list[Item]:
         ))
     return out
 
-# --- source: arXiv (official Atom API): cat:cs.AI, 7-day window, latest version ---
-def _arxiv_pages(date: str):
+# --- source: arXiv (official Atom API): cat:cs.AI, window, latest version ---
+def _arxiv_pages(date: str, start: datetime.date):
     """Yield arXiv items page-by-page (a list per page), streaming.
 
     A generator so the caller can start gating page N while page N+1 is still
@@ -283,7 +288,7 @@ def _arxiv_pages(date: str):
     relevance gate instead of blocking collection.
     """
     day = datetime.date.fromisoformat(date)
-    cutoff = day - datetime.timedelta(days=7)
+    cutoff = start
     # Query the specific date range directly so we don't page through months of
     # newer entries when collecting a past week. arXiv's submittedDate filter
     # uses [from TO to] (inclusive, format YYYYMMDDHHMM).
@@ -306,7 +311,7 @@ def _arxiv_pages(date: str):
         for e in page:
             published = (e.findtext("{http://www.w3.org/2005/Atom}published") or "").strip()
             pub_date = published[:10]
-            if _is_recent(pub_date, day):
+            if _is_recent(pub_date, start, day):
                 base_id = _arxiv_id(e.findtext("{http://www.w3.org/2005/Atom}id") or "")
                 if base_id and base_id not in seen_ids and not _withdrawn(e):
                     seen_ids.add(base_id)
@@ -557,10 +562,10 @@ def _fetch_body(url: str) -> str:
 def _strip_tags(text: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", text or "")).strip()
 
-def _is_recent(pub: str, day: datetime.date) -> bool:
+def _is_recent(pub: str, start: datetime.date, end: datetime.date) -> bool:
     try:
         dt = datetime.date.fromisoformat(pub)
-        return day - datetime.timedelta(days=7) <= dt <= day
+        return start <= dt <= end
     except ValueError:
         return False
 

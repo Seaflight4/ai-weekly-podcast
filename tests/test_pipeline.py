@@ -113,10 +113,11 @@ def test_store_root_from_env(tmp_path, monkeypatch):
         importlib.reload(s)
 
 
-# --- generate: source selection by threshold + floor/cap ----------------
+# --- generate: source selection by top-N above a quality floor ------------
 
-def test_select_sources_threshold_within_range():
-    # 15 items >= 0.8 (within floor=10, cap=20) -> all 15 qualify.
+def test_select_sources_top_n_default():
+    # Default target (medium + deep-dive config) = 9. 15 items >= 0.8 + 5 lows
+    # -> top 9 by score all clear the floor.
     ranked = [
         RankedItem(title=f"t{i}", url=f"u{i}", date="d", body="b", source="arxiv",
                    score=0.90 - i * 0.005)
@@ -127,12 +128,13 @@ def test_select_sources_threshold_within_range():
         for i in range(5)
     ]
     chosen = generate.select_sources(ranked)
-    assert len(chosen) == 15
-    assert all(c.score >= 0.8 for c in chosen)
+    assert len(chosen) == 9
+    assert chosen[0].score == 0.90
+    assert all(c.score >= generate.MIN_SCORE_FLOOR for c in chosen)
 
 
-def test_select_sources_cap_on_strong_week():
-    # 25 items >= 0.8, cap=20 -> cut to 20 (top-scored).
+def test_select_sources_respects_target_n():
+    # Explicitly requested top-4 out of a strong pool.
     ranked = [
         RankedItem(title=f"t{i}", url=f"u{i}", date="d", body="b", source="arxiv",
                    score=0.95 - i * 0.005)
@@ -142,14 +144,15 @@ def test_select_sources_cap_on_strong_week():
                    score=0.5)
         for i in range(5)
     ]
-    chosen = generate.select_sources(ranked)
-    assert len(chosen) == 20
+    chosen = generate.select_sources(ranked, target_n=4)
+    assert len(chosen) == 4
     assert chosen[0].score == 0.95
-    assert chosen[-1].score == 0.95 - 19 * 0.005
+    assert chosen[-1].score == 0.95 - 3 * 0.005
 
 
-def test_select_sources_floor_on_weak_week():
-    # Only 2 items >= 0.8, floor=10 -> pad to 10 with next-highest.
+def test_select_sources_no_padding_on_weak_week():
+    # Only 2 items >= 0.8 plus a handful at/above the floor: top-N never pads
+    # with sub-floor junk to reach the target.
     ranked = [
         RankedItem(title="a", url="u1", date="d", body="b", source="arxiv",
                    score=0.9),
@@ -157,27 +160,30 @@ def test_select_sources_floor_on_weak_week():
                    score=0.82),
     ] + [
         RankedItem(title=f"low{i}", url=f"l{i}", date="d", body="b",
-                   source="arxiv", score=0.5 - i * 0.05)
-        for i in range(20)
+                   source="arxiv", score=0.5)
+        for i in range(5)
+    ] + [
+        RankedItem(title=f"junk{i}", url=f"j{i}", date="d", body="b",
+                   source="arxiv", score=0.3 - i * 0.05)
+        for i in range(5)
     ]
-    chosen = generate.select_sources(ranked)
-    assert len(chosen) == 10
-    assert chosen[0].score == 0.9
-    assert chosen[-1].score < 0.8  # padded from below threshold
+    chosen = generate.select_sources(ranked, target_n=9)
+    assert len(chosen) == 7  # 0.9, 0.82 + 5 at 0.5; sub-floor junk excluded
+    assert all(c.score >= generate.MIN_SCORE_FLOOR for c in chosen)
 
 
 def test_select_sources_empty_pool():
     assert generate.select_sources([]) == []
 
 
-def test_select_sources_small_pool_below_floor():
-    # Only 3 items total, all below 0.8; floor=10 but pool=3 -> return all 3.
+def test_select_sources_small_pool_all_above_floor():
+    # Only 3 items total, all at the floor -> return all 3 (no pad, no cut).
     ranked = [
         RankedItem(title=f"t{i}", url=f"u{i}", date="d", body="b", source="arxiv",
                    score=0.5)
         for i in range(3)
     ]
-    chosen = generate.select_sources(ranked)
+    chosen = generate.select_sources(ranked, target_n=9)
     assert len(chosen) == 3
 
 
@@ -200,7 +206,8 @@ def test_generate_brief_groups_by_source(tmp_path, monkeypatch):
 
 
 def test_generate_writes_episode(tmp_path, monkeypatch):
-    # 3 items >= 0.8, rest below. floor=10 -> 3 qualify, padded to 10.
+    # 3 items at 0.9 + 20 at the floor. Default target (medium+deep) = 9:
+    # top 9 by score above the 0.5 floor -> 3 x 0.9 + 6 x 0.5, no padding.
     ranked = [
         RankedItem(title=f"top{i}", url=f"u{i}", date="d", body="b", source="arxiv",
                    score=0.9)
@@ -213,9 +220,9 @@ def test_generate_writes_episode(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "run_dir", lambda date=None: tmp_path)
     monkeypatch.setattr(generate.store, "run_dir", lambda date=None: tmp_path)
     ep = generate.generate(ranked, make_audio=False)
-    assert len(ep.manifest) == 10
+    assert len(ep.manifest) == 9
     assert ep.manifest[0].score == 0.9
-    assert ep.manifest[-1].score < 0.8
+    assert ep.manifest[-1].score == 0.5
 
 
 # --- audio result ----------------------------------------------------------
@@ -242,9 +249,10 @@ def test_podcastfy_backend_generate_writes_audio_and_transcript(tmp_path, monkey
         def __init__(self, papers_dir=None, web_dir=None, **kw):
             self.papers_dir = papers_dir
             self.web_dir = web_dir
+            self.tts_model = kw.get("tts_model", "tng")
         def load_brief_and_sources(self, brief_path):
             return "=== INTRO ===\n=== END INTRO ==="
-        def generate_transcript(self, combined):
+        def generate_transcript(self, combined, on_part=None):
             return "<Person1>hello</Person1>\n<Person2>world</Person2>"
         def generate_audio(self, transcript, output_path, temp_audio_dir=None):
             pathlib.Path(output_path).write_bytes(b"FAKE_MP3")
@@ -266,7 +274,7 @@ def test_podcastfy_backend_generate_writes_audio_and_transcript(tmp_path, monkey
     )
     assert result.backend == "podcastfy"
     assert result.audio_path == tmp_path / "episode.mp3"
-    assert result.audio_path.read_bytes() == b"FAKE_MP3"
+    assert result.audio_path.exists() and result.audio_path.read_bytes()
     assert result.transcript_path == tmp_path / "transcript.md"
     assert "<Person1>hello</Person1>" in result.transcript_path.read_text()
     # Per-run cache dirs were created under the run dir.
@@ -319,7 +327,7 @@ def test_generate_writes_transcript_source_for_podcastfy(tmp_path, monkeypatch):
     )
     class FakeBackend:
         name = "podcastfy"
-        def generate(self, brief, run_dir, chosen, transcript_in=None):
+        def generate(self, brief, run_dir, chosen, transcript_in=None, config=None):
             return fake_result
     monkeypatch.setattr(generate.audio_mod, "PodcastfyBackend", lambda: FakeBackend())
 
@@ -367,7 +375,7 @@ def test_generate_brief_in_skips_selection_and_uses_edited_brief(tmp_path, monke
     seen_brief = {}
     class FakeBackend:
         name = "podcastfy"
-        def generate(self, brief, run_dir, chosen, transcript_in=None):
+        def generate(self, brief, run_dir, chosen, transcript_in=None, config=None):
             seen_brief["path"] = brief
             seen_brief["chosen"] = list(chosen)
             return generate.audio_mod.AudioResult(
@@ -386,7 +394,7 @@ def test_generate_brief_in_skips_selection_and_uses_edited_brief(tmp_path, monke
     # Manifest reconstructed from the brief: only Paper A.
     assert [r.url for r in ep.manifest] == ["https://arxiv.org/abs/2601.00001"]
     manifest = json.loads((tmp_path / "episode.json").read_text())
-    assert manifest["selection_source"] == "personalized"
+    assert manifest["selection_source"] == "customized"
     assert len(manifest["manifest"]) == 1
 
 
@@ -398,7 +406,7 @@ def test_generate_no_brief_in_records_auto_selection_source(tmp_path, monkeypatc
     monkeypatch.setattr(generate.store, "run_dir", lambda date=None: tmp_path)
     class FakeBackend:
         name = "podcastfy"
-        def generate(self, brief, run_dir, chosen, transcript_in=None):
+        def generate(self, brief, run_dir, chosen, transcript_in=None, config=None):
             return generate.audio_mod.AudioResult(
                 audio_path=tmp_path / "episode.mp3",
                 transcript_path=tmp_path / "transcript.md", backend="podcastfy")

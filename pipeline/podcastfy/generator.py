@@ -38,7 +38,9 @@ DEFAULT_MODEL = "deepseek-ai/DeepSeek-V4-Flash-0731"
 # parse back into <PersonN>...</PersonN> tagged lines.
 LONGFORM_PROMPT = """You are producing a part of a two-host podcast that gives a high-level overview of recent AI research and industry news.
 
-Audience: AI researchers at a leading software consulting firm. They know ML fundamentals (RL, transformers, MoE, quantization, diffusion, autoregressive decoding, tokenization). Explain ONLY what is novel to each paper. Do not define basics they already know.
+Audience: {audience}
+
+Familiar topics the listener already knows and needs NO explanation of: {familiar_topics}
 
 Podcast: {podcast_name} - {podcast_tagline}
 Language: {output_language}
@@ -259,6 +261,10 @@ class SimplePodcastGenerator:
         tts_model: str = "tng",
         papers_dir: Optional[str] = None,
         web_dir: Optional[str] = None,
+        depth_factor: float = 1.0,
+        max_num_chunks: int = 10,
+        audience_prompt: str | None = None,
+        familiar_clause: str = "none",
     ):
         """
         Minimal setup: LLM + strategy + TTS.
@@ -319,7 +325,11 @@ class SimplePodcastGenerator:
                 max_retries=2,
             )
 
-        # Minimal config (replace with your values)
+        # Minimal config (replace with your values); the run config overrides
+        # per-source input depth and the per-source transcript budget.
+        self.depth_factor = depth_factor
+        self.audience_prompt = audience_prompt
+        self.familiar_clause = familiar_clause
         self.config_conversation = {
             "podcast_name": "AI News Weekly",
             "podcast_tagline": "Latest AI research and news",
@@ -331,12 +341,14 @@ class SimplePodcastGenerator:
             "dialogue_structure": ["conversation", "exchange"],
             "output_language": "English",
             "engagement_techniques": ["analogies", "examples", "specific numbers"],
-            # Overview episode: ~10 concise parts (~2000 words total)
-            "max_num_chunks": 10,
+            "max_num_chunks": max(2, min(30, int(max_num_chunks))),
             "min_chunk_size": 4000,
-            "per_paper_chars": 10000,      # abstract + intro per paper
-            "per_paper_tail_chars": 3000,  # conclusion tail per paper
-            "per_web_chars": 22000,        # full text fetched for blog sources
+            # Per-source input context scales with depth: brief feeds less so
+            # the LLM stays concise, deep-dive feeds more so it can go deeper.
+            "per_paper_chars": round(10000 * depth_factor),      # abstract + intro per paper
+            "per_paper_tail_chars": round(3000 * depth_factor),  # conclusion tail per paper
+            "per_web_chars": round(22000 * depth_factor),        # full text fetched for blog sources
+            "depth_factor": depth_factor,
         }
 
         # Strategy (only long-form for you)
@@ -414,6 +426,12 @@ class SimplePodcastGenerator:
         chain = RunnableLambda(self._call_llm_json)
 
         # Prepare parameters
+        audience = (self.audience_prompt or (
+            "AI researchers at a leading software consulting firm. They know ML "
+            "fundamentals (RL, transformers, MoE, quantization, diffusion, "
+            "autoregressive decoding, tokenization). Explain ONLY what is novel "
+            "to each item. Do not define basics they already know."
+        ))
         prompt_params = {
             "roles_person1": self.config_conversation["roles_person1"],
             "roles_person2": self.config_conversation["roles_person2"],
@@ -422,6 +440,8 @@ class SimplePodcastGenerator:
             "podcast_name": self.config_conversation["podcast_name"],
             "podcast_tagline": self.config_conversation["podcast_tagline"],
             "output_language": self.config_conversation["output_language"],
+            "audience": audience,
+            "familiar_topics": self.familiar_clause or "none",
         }
 
         # Generate using long-form strategy

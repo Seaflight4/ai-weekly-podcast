@@ -19,6 +19,42 @@
     </div>
   </header>
 
+  <details id="customize-box" class="customize-box">
+    <summary>Customize episode</summary>
+    <div class="cfg-grid">
+      <label>Window start
+        <input type="date" id="cfg-window-start">
+      </label>
+      <label>Window end
+        <input type="date" id="cfg-window-end">
+      </label>
+      <label>Audience
+        <select id="cfg-audience">
+          <option value="researcher" selected>Researcher</option>
+          <option value="intermediate">Intermediate</option>
+          <option value="beginner">Beginner</option>
+        </select>
+      </label>
+      <label>Familiar topics (comma-separated)
+        <input type="text" id="cfg-familiar" placeholder="e.g. transformers, RLHF">
+      </label>
+      <label>Podcast length
+        <select id="cfg-length">
+          <option value="short">Short (~10 min)</option>
+          <option value="medium" selected>Medium (15–20 min)</option>
+          <option value="long">Long (~30 min)</option>
+        </select>
+      </label>
+      <label>Topic depth
+        <select id="cfg-depth">
+          <option value="brief">Brief (~1 min/source)</option>
+          <option value="deep-dive" selected>Deep-dive (~2 min/source)</option>
+        </select>
+      </label>
+    </div>
+    <p class="muted">Derived sources: <span id="cfg-sources">9</span> · est. <span id="cfg-minutes">18</span> min</p>
+  </details>
+
   <main>
     <aside id="episode-list">
       <div class="list-tabs">

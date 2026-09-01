@@ -94,7 +94,8 @@ def list_runs():
 def submit_run(payload: dict = Body(default={})):
     date = payload.get("date")
     no_audio = bool(payload.get("no_audio", False))
-    cmd = jobs.full_run_cmd(date=date, no_audio=no_audio)
+    config = payload.get("config") or {}
+    cmd = jobs.full_run_cmd(date=date, no_audio=no_audio, config=config)
     env = {"PIPELINE_DATA_ROOT": str(episodes.DATA_ROOT)}
     job, err = jobs.submit("full", cmd, date=date, env=env)
     if err == "busy":

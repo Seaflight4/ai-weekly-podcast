@@ -1,5 +1,5 @@
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 @dataclass
 class Item:
@@ -23,3 +23,6 @@ class Episode:
     audio_path: str      # path to the generated .mp3
     manifest: list[RankedItem]
     created_at: str       # ISO 8601 timestamp
+    # Resolved RunConfig (dict form) that produced this episode, for
+    # reproducibility. Empty dict when the run used all defaults.
+    config: dict = field(default_factory=dict)

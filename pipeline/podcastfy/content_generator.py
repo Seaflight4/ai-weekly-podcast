@@ -109,6 +109,8 @@ class LongFormContentGenerator:
         self.llm = llm
         self.max_num_chunks = config_conversation.get("max_num_chunks", 10)  # Default if not in config
         self.min_chunk_size = config_conversation.get("min_chunk_size", 200)  # Default if not in config
+        # Per-source transcript budget multiplier (brief < 1.0 < deep-dive).
+        self.depth_factor = float(config_conversation.get("depth_factor", 1.0))
 
     def __calculate_chunk_size(self, input_content: str) -> int:
         """
@@ -201,21 +203,26 @@ class LongFormContentGenerator:
         # No markers found: fall back to single chunk.
         return [input_content] if input_content.strip() else []
 
-    @staticmethod
-    def _turn_budget(chunk_len: int):
+    def _turn_budget(self, chunk_len: int):
         """
-        Return (turn_range_str, word_range_str, min_turns) based on chunk length.
+        Return (turn_range_str, word_range_str, min_turns) based on chunk length,
+        scaled by ``self.depth_factor`` (the run config's per-topic depth).
 
+        Baseline bands (depth_factor=1.0, ≈1.25 min/source):
         chunk_len < 3000  ->  3-5 turns,  80-120 words, min 3
         chunk_len < 10000 ->  5-7 turns, 120-150 words, min 5
         chunk_len >= 10000 -> 6-9 turns, 150-180 words, min 6
         """
+        df = self.depth_factor
         if chunk_len < 3000:
-            return ("3 to 5 turns", "80-120 words", 3)
+            t_lo, t_hi, w_lo, w_hi, m = 3, 5, 80, 120, 3
         elif chunk_len < 10000:
-            return ("5 to 7 turns", "120-150 words", 5)
+            t_lo, t_hi, w_lo, w_hi, m = 5, 7, 120, 150, 5
         else:
-            return ("6 to 9 turns", "150-180 words", 6)
+            t_lo, t_hi, w_lo, w_hi, m = 6, 9, 150, 180, 6
+        return (f"{round(t_lo * df)} to {round(t_hi * df)} turns",
+                f"{round(w_lo * df)}-{round(w_hi * df)} words",
+                max(1, round(m * df)))
 
     def enhance_prompt_params(self, prompt_params: Dict,
                               part_idx: int,
@@ -239,6 +246,7 @@ class LongFormContentGenerator:
         enhanced_params = prompt_params.copy()
         # Initialize part_instructions with chat context
         enhanced_params["context"] = chat_context
+        df = self.depth_factor
 
         host1 = prompt_params.get("host1_name", "Person1")
         host2 = prompt_params.get("host2_name", "Person2")
@@ -268,7 +276,7 @@ class LongFormContentGenerator:
             2. Give a themed overview: group the topics into 2-3 themes. Weave them together conversationally. Do NOT label themes explicitly ("first theme," "second theme," "third theme"). Use natural connective phrases like "We'll also dive into," "Then we'll cover," "Finally, we'll discuss." For each topic, use a relative clause or flowing sentence that says what it does, not a standalone fragment. Integrate a brief "why it matters" into the theme, not as a separate label. Interleave genuine reactions between themes. One host reacts to the previous theme, the other continues to the next. Do NOT explain mechanisms, cite numbers, or describe how things work. Save those for the topic discussions.
                Example: "In today's episode, we'll cover three major model releases. A, which achieves unprecedented generation speeds. B, which brings multimodal capabilities to a compact architecture. And C, which uses an end-to-end self-improvement loop." [Reaction: "And those are pushing boundaries we didn't think possible a year ago."] "We'll also dive into agent frameworks, covering D's breakthrough in harness scaling and E's flexible navigation. Because raw intelligence doesn't mean much without a reliable environment to operate within." "Right. Finally, we'll discuss major industry news, including F's big acquisition and a shocking audit revealing benchmark cheating."
             3. End with "Let's begin!" or similar.
-            Keep it to 5 to 7 turns total, ~200 words. The overview should tease topics by name and significance, woven into flowing sentences, not listed as fragments. No analogy or numbers in the intro.
+            Keep it to {round(5 * df)} to {round(7 * df)} turns total, ~{round(200 * df)} words. The overview should tease topics by name and significance, woven into flowing sentences, not listed as fragments. No analogy or numbers in the intro.
             """
         elif part_idx == total_parts - 1:
             enhanced_params["instruction"] = f"""
@@ -279,7 +287,7 @@ class LongFormContentGenerator:
             1. Synthesize the episode's arc: group the topics into 2-3 themes and summarize what each theme revealed. Show the through-line, not just a list.
             2. Connect the themes: show how they relate and build on each other (e.g. "We started with speed, then saw how reliability matters just as much, and finally learned that even our benchmarks can't be trusted").
             3. End with a provocative question for the audience, then Person1 ({host1}) says a brief goodbye addressing {host2} ("Until next time, keep digging...").
-            Keep it to 9 to 11 turns, ~280 words. This is a recap with synthesis, not a new discussion. No per-topic analogy needed here.
+            Keep it to {round(9 * df)} to {round(11 * df)} turns, ~{round(280 * df)} words. This is a recap with synthesis, not a new discussion. No per-topic analogy needed here.
             """
         else:
             enhanced_params["instruction"] = f"""
@@ -330,10 +338,11 @@ class LongFormContentGenerator:
         print(f"Generating {num_parts} parts")
         
         for i, chunk in enumerate(chunks):
+            df = self.depth_factor
             if i == 0:
-                min_turns = 5  # intro: target 5-7 turns
+                min_turns = max(3, round(5 * df))  # intro
             elif i == num_parts - 1:
-                min_turns = 7  # recap: target 9-11, floor at 7
+                min_turns = max(4, round(7 * df))  # recap
             else:
                 _, _, min_turns = self._turn_budget(len(chunk))
             enhanced_params = self.enhance_prompt_params(
