@@ -1,9 +1,11 @@
 services:
   podcast:
     build: .
-    # Run as the host user so bind-mounted files in ./data are never
-    # root-owned (root-owned leftovers break host-side pipeline runs).
-    user: "${UID:-1000}:${GID:-1000}"
+    # Runs as root (image default) so the ./data bind mount is writable on
+    # every machine (rootful/rootless Linux, Docker Desktop) without setup.
+    # Episodes/config/logs land root-owned under ./data — fine for
+    # container-only use. If you ever run the pipeline on the host instead,
+    # point PIPELINE_DATA_ROOT at a separate directory.
     ports:
       - "8000:8000"
     volumes:

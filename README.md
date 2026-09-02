@@ -143,8 +143,15 @@ all Python deps. The service serves a single-page UI on port 8000.
 ```bash
 git clone <repo> && cd learn-ai-podcast-pipeline
 cp .env.example .env          # then set SKAINET_API_KEY
-docker compose up              # http://localhost:8000
+docker compose up             # then open http://localhost:8000 in your browser
 ```
+
+The container runs as root on purpose (so the `./data` bind mount is writable
+on any machine — Linux rootful/rootless, macOS/Windows Docker Desktop — with
+zero setup). Episodes, config and job logs land as root-owned files under
+`./data`, which is fine because everything happens inside the container. Note:
+`0.0.0.0:8000` in the container logs is the server's bind address — you browse
+to `http://localhost:8000`.
 
 On first open the app shows a **Set up your podcast** dialog, pre-filled with
 defaults (past 7 days, Researcher, no familiar topics, Medium 15–20 min,
@@ -175,8 +182,12 @@ Then, all in the browser:
 
 Your episode history, config and job logs all persist locally in the `./data`
 volume mount. `data/` is gitignored — history is per-machine, nothing is
-committed. There is no scheduled auto-run: episodes are generated explicitly
-(from the UI or the CLI above).
+committed (only `data/.gitkeep`, so the bind mount always has a directory).
+There is no scheduled auto-run: episodes are generated explicitly (from the
+UI or the CLI). Because the container writes `data/` as root, run the pipeline
+on the host (`.venv/bin/python -m pipeline run`) only against a **separate**
+`PIPELINE_DATA_ROOT` — a host run sharing the container's `data/` would hit
+root-owned files.
 
 ## Validation
 

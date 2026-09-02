@@ -7,8 +7,10 @@ __pycache__/
 # --- Runtime data ---
 # Everything under data/ is per-machine runtime state (episode history,
 # persisted podcast config, job logs, caches) served through the ./data bind
-# mount — it stays local, nothing under data/ is tracked.
-/data/
+# mount — it stays local. Only data/.gitkeep is tracked (so a fresh clone has
+# a real directory for the container's bind mount).
+/data/*
+!/data/.gitkeep
 output/
 
 # --- Whisper model cache (one-off ASR verifier) ---
