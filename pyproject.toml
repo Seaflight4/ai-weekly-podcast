@@ -30,7 +30,6 @@ test = ["pytest>=8.0.0"]
 serve = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.27",
-    "apscheduler>=3.10",
 ]
 
 [project.scripts]

@@ -2,43 +2,22 @@
 
 Serves the episode history (read from data/history/), lets a user trigger a
 full run or a brief-edit re-render (which replaces a date's episode in
-place), manages the persistent podcast config (data/podcast_config.yaml),
-and exposes the scheduler config. The static frontend is served at /.
+place), and manages the persistent podcast config (data/podcast_config.yaml).
+The static frontend is served at /.
 """
 from __future__ import annotations
 
-import collections
 import pathlib
-import json
-from typing import Any
 
 from fastapi import FastAPI, HTTPException, Body
 from fastapi.responses import FileResponse, PlainTextResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import episodes, jobs, podcast_config, scheduler
+from . import episodes, jobs, podcast_config
 
 STATIC_DIR = pathlib.Path(__file__).resolve().parent.parent / "static"
 
-# Recent broadcast events (scheduler skips, etc.). Bounded deque.
-_events: collections.deque = collections.deque(maxlen=100)
-
-
-def broadcast(event: dict) -> None:
-    _events.append(event)
-
-
 app = FastAPI(title="AI Weekly Podcast")
-
-
-@app.on_event("startup")
-def _startup():
-    scheduler.start()
-
-
-@app.on_event("shutdown")
-def _shutdown():
-    scheduler.shutdown()
 
 
 # --- episodes ---------------------------------------------------------------
@@ -200,30 +179,6 @@ def get_run(job_id: str):
         if j["id"] == job_id:
             return j
     raise HTTPException(404, "no such job")
-
-
-# --- schedule --------------------------------------------------------------
-
-@app.get("/api/schedule")
-def get_schedule():
-    return scheduler.state()
-
-
-@app.post("/api/schedule")
-def set_schedule(payload: dict = Body(default={})):
-    enabled = payload.get("enabled")
-    cron = payload.get("cron")
-    try:
-        return scheduler.configure(enabled=enabled, cron=cron)
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-
-
-# --- events (scheduler broadcasts) -----------------------------------------
-
-@app.get("/api/events")
-def get_events():
-    return list(_events)
 
 
 # --- static frontend --------------------------------------------------------

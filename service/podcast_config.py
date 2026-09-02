@@ -3,10 +3,11 @@
 A single config file with two sections:
 
 ``user``     — who the podcast is for. Applies to EVERY generation:
-               knowledge level, familiar topics. Used by manual runs,
-               re-renders, and scheduled auto-runs alike.
-``podcast``  — episode-shape defaults. Used verbatim by auto-runs and as the
-               pre-filled defaults of the "Generate new episode" dialog.
+               knowledge level, familiar topics. Used by manual runs and
+               brief-edit re-renders alike.
+``podcast``  — episode-shape defaults. These are the pre-filled defaults of
+               the "Generate new episode" dialog (which the user confirms
+               per run); they are not written back when a run is started.
 
   user:
     audience: researcher          # researcher | intermediate | beginner
@@ -103,8 +104,8 @@ def resolved_run_config(podcast: dict | None = None) -> dict:
     flat knob dict ``jobs.full_run_cmd`` understands.
 
     ``podcast`` (from the generate dialog) keys: window_start, window_end,
-    length, depth. Any missing key falls back to the config file. Without
-    overrides (auto-run) the rolling window resolves at fire time:
+    length, depth. Any missing key falls back to the config file; without
+    overrides the rolling window resolves at call time:
     end = today, start = today - window_days.
 
     The merged result is run through ``pipeline.config.resolve`` so dates,

@@ -15,8 +15,4 @@ services:
       JUDGE_MODEL: ${JUDGE_MODEL:-Qwen/Qwen3.8-27B}
       LLM_API_BASE: ${LLM_API_BASE:-https://chat.model.tngtech.com/v1}
       LLM_MODEL: ${LLM_MODEL:-deepseek-ai/DeepSeek-V4-Flash-0731}
-      # Scheduler: off by default for local testing (toggle via the UI switch).
-      SCHEDULE_ENABLED: ${SCHEDULE_ENABLED:-false}
-      # Scheduler cron (5-field: min hour day month day-of-week). Default: Fri 09:00.
-      SCHEDULE_CRON: ${SCHEDULE_CRON:-0 9 * * fri}
     restart: unless-stopped

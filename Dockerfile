@@ -23,9 +23,9 @@ COPY static ./static
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -e . --no-deps
 
-# data/ is mounted as a volume at runtime; episodes + job logs + schedule
-# config persist there. Seeds (default episode.mp3s) come from the host
-# bind mount (docker-compose.yml), not the image.
+# data/ is mounted as a volume at runtime; episodes + job logs + the
+# podcast config persist there. Seeds (default episode.mp3s) come from the
+# host bind mount (docker-compose.yml), not the image.
 VOLUME ["/app/data"]
 
 EXPOSE 8000

@@ -13,4 +13,3 @@ python-dotenv
 PyYAML
 fastapi>=0.110
 uvicorn[standard]>=0.27
-apscheduler>=3.10
