@@ -135,6 +135,8 @@ def resolved_run_config(podcast: dict | None = None) -> dict:
         "familiar_topics": list(run.familiar_topics),
         "length": run.length,
         "depth": run.depth,
+        "window_days": (run.resolve_window()[1] - run.resolve_window()[0]).days,
+        "num_sources": run.num_sources(),
     }
 
 

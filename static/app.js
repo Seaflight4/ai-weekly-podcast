@@ -143,7 +143,7 @@ function renderDetail(run) {
   showDetailBody();
   const body = $("#detail-body");
   const audio = run.has_audio
-    ? `<audio controls preload="metadata" src="/api/episodes/${run.date}/audio"></audio>`
+    ? `<audio controls preload="metadata" src="/api/episodes/${run.date}/audio?t=${Date.now()}"></audio>`
     : '<p class="muted">No audio for this run.</p>';
   const dur = fmtClock(run.duration_sec);
   const durChip = dur ? `<span class="chip" title="Measured duration">${dur}</span>` : "";
@@ -386,7 +386,6 @@ async function openRunPanel(job) {
   const panel = $("#run-panel");
   panel.classList.remove("hidden");
   $("#run-title").textContent = `${job.kind} run ${job.id} — ${job.status}`;
-  $("#run-log").textContent = "";
   renderStages(job, 0);
   if (pollTimer) clearInterval(pollTimer);
   const poll = async () => {
@@ -396,18 +395,22 @@ async function openRunPanel(job) {
     $("#run-title").textContent = `${j.kind} run ${j.id} — ${j.status}`;
     renderProgress(j.progress);
     renderStages(j, j.progress.stage_index);
-    $("#run-log").textContent = j.log_tail || "";
-    const log = $("#run-log");
-    log.scrollTop = log.scrollHeight;
     if (j.status === "done" || j.status === "failed") {
       clearInterval(pollTimer); pollTimer = null;
       $("#run-panel").classList.add(j.status === "done" ? "done" : "failed");
       loadEpisodes();
+      if (j.status === "failed") showRunError(j);
       if (j.date) selectEpisode(j.date);
     }
   };
   poll();
   pollTimer = setInterval(poll, 1500);
+}
+
+function showRunError(job) {
+  const tail = (job.log_tail || "").split("\n").slice(-30).join("\n").trim();
+  $("#error-message").textContent = tail || "[no log output]";
+  openModal("modal-error");
 }
 
 function renderStages(j, current) {
@@ -470,6 +473,7 @@ document.addEventListener("keydown", (e) => {
 
 $("#btn-confirm-cancel").onclick = () => settleConfirm(false);
 $("#btn-confirm-ok").onclick = () => settleConfirm(true);
+$("#btn-error-ok").onclick = () => closeModals();
 
 // --- persistent config (setup on first run, Settings afterwards) ------------
 

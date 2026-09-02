@@ -118,6 +118,25 @@ def test_jobs_command_builder():
     assert cmd[cmd.index("--depth") + 1] == "brief"
 
 
+def test_jobs_estimate_stages_scales_with_config():
+    # Full run: bigger window (collect/rank) and more sources (generate) both
+    # push the total up monotonically.
+    small = jobs.estimate_stages("full", num_sources=4, window_days=1)
+    big_window = jobs.estimate_stages("full", num_sources=4, window_days=7)
+    many_sources = jobs.estimate_stages("full", num_sources=12, window_days=1)
+    assert sum(small) < sum(big_window) < sum(many_sources)
+    assert len(small) == jobs.STAGE_COUNT + 1 and small[0] == 0.0
+    # sanity: medium run (7 sources, 1d window) lands in the measured ~5 min
+    # range (medium+1d benchmark ~298s).
+    med = jobs.estimate_stages("full", num_sources=7, window_days=1)
+    assert 240 <= sum(med) <= 480
+    # Re-render only runs the generate stage: collect/rank are zeroed.
+    gen = jobs.estimate_stages("generate", num_sources=7, window_days=7)
+    assert gen[:3] == [0.0, 0.0, 0.0]
+    assert gen[3] > 0
+    assert sum(gen) < sum(med)
+
+
 # --- podcast_config: persistent data/podcast_config.yaml --------------------
 
 def test_podcast_config_load_defaults_when_missing(tmp_path, monkeypatch):

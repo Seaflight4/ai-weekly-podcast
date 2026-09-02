@@ -13,6 +13,8 @@ from fastapi import FastAPI, HTTPException, Body
 from fastapi.responses import FileResponse, PlainTextResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from pipeline import config as config_mod
+
 from . import episodes, jobs, podcast_config
 
 STATIC_DIR = pathlib.Path(__file__).resolve().parent.parent / "static"
@@ -116,9 +118,20 @@ def submit_run(payload: dict = Body(default={})):
         config = podcast_config.resolved_run_config(payload.get("podcast"))
     except ValueError as e:
         raise HTTPException(400, str(e))
+    # The run anchors on the resolved window end (its data/history folder
+    # date); fall back to it when the body omits an explicit `date` so the
+    # job always knows which episode it produced (the UI auto-selects it on
+    # completion).
+    date = date or config["window_end"]
     cmd = jobs.full_run_cmd(date=date, no_audio=no_audio, config=config)
     env = {"PIPELINE_DATA_ROOT": str(episodes.DATA_ROOT)}
-    job, err = jobs.submit("full", cmd, date=date, env=env)
+    stage_estimates = jobs.estimate_stages(
+        "full",
+        num_sources=int(config["num_sources"]),
+        window_days=int(config["window_days"]),
+    )
+    job, err = jobs.submit("full", cmd, date=date, env=env,
+                           stage_estimates=stage_estimates)
     if err == "busy":
         active = jobs.active_job()
         return JSONResponse(
@@ -158,8 +171,23 @@ def submit_generate(date: str, payload: dict = Body(default={})):
                 "familiar_topics": user["familiar_topics"]},
         config_path=run_cfg if run_cfg.exists() else None,
     )
+    # Scale the ETA to this episode's generate-only work: restore its
+    # length/depth from the stored run config (fall back to the persistent
+    # config). collect/rank don't run, so window_days is 0.
+    est_cfg = None
+    if run_cfg.exists():
+        try:
+            est_cfg = config_mod.resolve(config_path=str(run_cfg))
+        except (ValueError, FileNotFoundError):
+            est_cfg = None
+    if est_cfg is None:
+        pc = podcast_config.load()["podcast"]
+        est_cfg = config_mod.RunConfig(length=pc["length"], depth=pc["depth"])
+    stage_estimates = jobs.estimate_stages(
+        "generate", num_sources=est_cfg.num_sources(), window_days=0)
     env = {"PIPELINE_DATA_ROOT": str(episodes.DATA_ROOT)}
-    job, err = jobs.submit("generate", cmd, date=date, env=env)
+    job, err = jobs.submit("generate", cmd, date=date, env=env,
+                           stage_estimates=stage_estimates)
     if err == "busy":
         active = jobs.active_job()
         return JSONResponse(

@@ -421,11 +421,12 @@ audio { width: 100%; margin: 4px 0 12px; height: 40px; }
 }
 .progress-meta { margin-top: 7px; font-size: 12px; color: var(--muted); }
 
-#run-log {
-  margin: 0; padding: 12px 16px; max-height: 220px; overflow-y: auto;
+.error-message {
+  margin: 0; padding: 10px 12px; max-height: 240px; overflow-y: auto;
   font-family: var(--mono); font-size: 12px; line-height: 1.45;
-  white-space: pre-wrap; background: #171b26; color: #d8dce8;
-  border-radius: 0 0 0 0;
+  white-space: pre-wrap; background: var(--surface-2);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  color: var(--danger);
 }
 
 /* --- toasts --------------------------------------------------------------- */

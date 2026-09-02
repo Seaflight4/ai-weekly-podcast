@@ -34,12 +34,34 @@ import uuid
 LOG_DIR = pathlib.Path("data/.jobs")
 LOG_TAIL_LINES = 200
 
-# Fixed per-stage duration estimates (seconds), 1-indexed. No
-# self-calibration: these are static references used for the progress ETA.
+# Default per-stage duration estimates (seconds), 1-indexed. Jobs get
+# config-scaled estimates via estimate_stages() at submit time (based on
+# source count and window size); these static values are a sane fallback.
 STAGE_ESTIMATES = [0.0, 120.0, 90.0, 300.0]
 STAGE_LABELS = ["", "collecting", "ranking", "generating"]
 STAGE_COUNT = 3
 _TOTAL_ESTIMATE = sum(STAGE_ESTIMATES)
+
+
+def estimate_stages(kind: str, *, num_sources: int,
+                    window_days: int = 0) -> list[float]:
+    """Per-stage duration estimates scaled by this episode's config.
+
+    ``num_sources`` is the derived source count (length/depth via
+    ``RunConfig.budget()``); ``window_days`` is the collect/rank span. Both
+    drive the two dominant costs: window-sized collect/rank and source-count
+    of LLM/TTS parts. Coefficients are calibrated against short/medium
+    benchmark runs (short+1d ≈180s, short+3d ≈253s, medium+1d ≈298s) — they
+    are estimates for the ETA, not exact timings.
+
+    A ``generate`` re-render only runs stage [3/3], so collect/rank are 0.
+    """
+    collect = 30.0 + 10.0 * window_days
+    rank = 20.0 + 5.0 * window_days + 2.0 * num_sources
+    generate = 40.0 + 26.0 * num_sources
+    if kind == "generate":
+        return [0.0, 0.0, 0.0, generate]
+    return [0.0, collect, rank, generate]
 
 # Matches the orchestrator's `[1/3] collecting...` style markers.
 _STAGE_MARKER = re.compile(r"^\[(\d)/\d\]")
@@ -47,12 +69,14 @@ _STAGE_MARKER = re.compile(r"^\[(\d)/\d\]")
 
 class Job:
     def __init__(self, kind: str, date: str | None, cmd: list[str],
-                 env: dict | None = None):
+                 env: dict | None = None,
+                 stage_estimates: list[float] | None = None):
         self.id = uuid.uuid4().hex[:12]
         self.kind = kind            # "full" | "generate"
         self.date = date
         self.cmd = cmd
         self.env = env              # extra env vars for the subprocess
+        self.stage_estimates = stage_estimates or list(STAGE_ESTIMATES)
         self.status = "queued"      # queued | running | done | failed
         self.started_at: str | None = None
         self.finished_at: str | None = None
@@ -74,6 +98,8 @@ class Job:
         end = self._end_mono if self._end_mono is not None else time.monotonic()
         elapsed = max(0.0, end - self._start_mono)
         done = self.status in ("done", "failed")
+        est = self.stage_estimates
+        total_estimate = sum(est)
 
         if not self._stage_times:
             # No stage marker yet: subprocess is starting up / pre-collect.
@@ -82,18 +108,18 @@ class Job:
                         "stage": STAGE_LABELS[STAGE_COUNT] if not self.log_lines
                                 else "finished",
                         "elapsed_sec": elapsed, "eta_sec": 0.0, "fraction": 1.0}
-            eta = _TOTAL_ESTIMATE
+            eta = total_estimate
             return {"stage_index": 0, "stage_count": STAGE_COUNT,
                     "stage": "starting", "elapsed_sec": elapsed,
                     "eta_sec": eta, "fraction": min(0.99, elapsed / (elapsed + eta))}
 
         current = max(self._stage_times)
-        completed_duration = sum(STAGE_ESTIMATES[1:current])
+        completed_duration = sum(est[1:current])
         stage_elapsed = elapsed - completed_duration
-        stage_remaining = max(0.0, STAGE_ESTIMATES[current] - stage_elapsed)
-        future_stages = sum(STAGE_ESTIMATES[current + 1:STAGE_COUNT + 1])
+        stage_remaining = max(0.0, est[current] - stage_elapsed)
+        future_stages = sum(est[current + 1:STAGE_COUNT + 1])
         eta = stage_remaining + future_stages
-        fraction = (completed_duration + min(stage_elapsed, STAGE_ESTIMATES[current])) / _TOTAL_ESTIMATE
+        fraction = (completed_duration + min(stage_elapsed, est[current])) / total_estimate
 
         if done:
             return {"stage_index": STAGE_COUNT, "stage_count": STAGE_COUNT,
@@ -133,12 +159,14 @@ def list_jobs(limit: int = 20) -> list[dict]:
 
 
 def submit(kind: str, cmd: list[str], date: str | None = None,
-           env: dict | None = None
+           env: dict | None = None,
+           stage_estimates: list[float] | None = None
            ) -> tuple[Job | None, str]:
     """Try to start a job. Returns (job, error).
 
     A second submit while a run is active returns (None, "busy"). The caller
     maps that to HTTP 409. ``env`` is merged into the subprocess environment.
+    ``stage_estimates`` scales the progress ETA to this job's config.
     """
     global _active
     if not _lock.acquire(blocking=False):
@@ -146,7 +174,7 @@ def submit(kind: str, cmd: list[str], date: str | None = None,
     try:
         if _active is not None and _active.status in ("queued", "running"):
             return None, "busy"
-        job = Job(kind, date, cmd, env=env)
+        job = Job(kind, date, cmd, env=env, stage_estimates=stage_estimates)
         _active = job
         job.status = "running"
         job.started_at = _now()

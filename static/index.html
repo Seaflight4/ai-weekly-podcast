@@ -137,6 +137,18 @@
         <button id="btn-confirm-ok" class="primary">Confirm</button>
       </div>
     </div>
+
+    <div id="modal-error" class="modal modal-sm hidden" role="dialog" aria-modal="true" aria-labelledby="error-title">
+      <div class="modal-head">
+        <h3 id="error-title">Run failed</h3>
+        <button class="modal-close" data-close-modal="modal-error" aria-label="Close">✕</button>
+      </div>
+      <p class="confirm-message muted">The run hit an error. Details from its log:</p>
+      <pre id="error-message" class="error-message"></pre>
+      <div class="modal-actions">
+        <button id="btn-error-ok" class="primary">OK</button>
+      </div>
+    </div>
   </div>
 
   <div id="toasts" class="toasts" aria-live="polite"></div>
@@ -151,7 +163,6 @@
       <div class="progress-bar"><div id="progress-fill" class="progress-fill"></div></div>
       <div id="progress-meta" class="progress-meta">starting…</div>
     </div>
-    <pre id="run-log"></pre>
   </div>
 
   <script src="/static/app.js"></script>
