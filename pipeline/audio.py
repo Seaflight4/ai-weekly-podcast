@@ -13,6 +13,8 @@ the run directory, produces an ``episode.mp3`` and a ground-truth
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import pathlib
 import time
@@ -41,6 +43,34 @@ class AudioResult:
     audio_path: pathlib.Path
     transcript_path: pathlib.Path | None
     backend: str
+
+
+def transcript_fingerprint(brief: pathlib.Path,
+                           chosen: list[RankedItem],
+                           config: dict | None) -> str:
+    """Fingerprint of everything that determines the transcript's content.
+
+    Covers the brief text, the selected source URLs, and the generator config
+    (word budgets, depth, audience, familiar topics). A cached transcript may
+    only be reused when this value is unchanged; otherwise the LLM would
+    silently re-synthesize audio for a different selection/config.
+    """
+    brief_text = ""
+    try:
+        brief_text = brief.read_text(encoding="utf-8")
+    except OSError:
+        pass
+    urls = sorted((c.url or "").strip().lower() for c in chosen)
+    cfg = json.dumps(config or {}, sort_keys=True, default=str)
+    payload = f"{brief_text}\x00{urls}\x00{cfg}".encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _fingerprint_matches(marker: pathlib.Path, candidate: str) -> bool:
+    try:
+        return marker.read_text(encoding="utf-8").strip() == candidate
+    except OSError:
+        return False
 
 
 # --- Podcastfy backend (vendored DeepSeek + TNG qwen3 TTS) -------------------
@@ -84,10 +114,17 @@ class PodcastfyBackend:
             web_dir=str(web_dir),
             **(config or {}),
         )
+        # Marker recording which brief/selection/config produced a cached
+        # transcript; reuse is only allowed when it still matches (so a full
+        # re-run of the same date or an edited brief never re-synthesizes
+        # audio from a stale transcript).
+        marker_path = cache_dir / "transcript.fingerprint"
+        fingerprint = transcript_fingerprint(brief, chosen, config)
         try:
-            # Source fetching only happens when we need the LLM (i.e. no cached
-            # transcript). When reusing a transcript we skip the brief fetch +
-            # LLM call entirely, so retrying TTS after a transient outage is fast.
+            # Source fetching only happens when we need the LLM (no cached
+            # transcript for these inputs). When reusing a matching transcript
+            # we skip the brief fetch + LLM call entirely, so retrying TTS
+            # after a transient outage is fast.
             t_trans = 0.0
             t_audio = 0.0
             use_pipeline = False
@@ -100,10 +137,11 @@ class PodcastfyBackend:
                 transcript_out = src
                 print(f"[podcastfy] reusing cached transcript {src.name} "
                       f"({len(transcript)} chars); skipping LLM")
-            elif transcript_out.exists():
+            elif transcript_out.exists() and _fingerprint_matches(marker_path, fingerprint):
                 transcript = transcript_out.read_text(encoding="utf-8")
                 print(f"[podcastfy] reusing existing {transcript_out.name} "
-                      f"({len(transcript)} chars); skipping LLM")
+                      f"({len(transcript)} chars); skipping LLM "
+                      f"(brief/selection/config unchanged)")
             else:
                 use_pipeline = True
                 t0 = time.perf_counter()
@@ -154,6 +192,7 @@ class PodcastfyBackend:
                 transcript = gen.generate_transcript(combined, on_part=on_part)
                 t_trans = time.perf_counter() - t0
                 transcript_out.write_text(transcript, encoding="utf-8")
+                marker_path.write_text(fingerprint, encoding="utf-8")
                 print(f"[podcastfy] transcript -> {transcript_out.name} "
                       f"({len(transcript)} chars) in {t_trans:.1f}s")
 

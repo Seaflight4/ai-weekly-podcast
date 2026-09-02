@@ -2,7 +2,7 @@ from . import RankedItem, Episode
 from . import store
 from . import audio as audio_mod
 from . import config as config_mod
-import pathlib, datetime
+import pathlib, datetime, re, subprocess
 
 
 def generate(ranked: list[RankedItem], make_audio: bool = True,
@@ -92,6 +92,21 @@ def generate(ranked: list[RankedItem], make_audio: bool = True,
         created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
         config=config.to_dict(),
     )
+
+    # Record measured duration + spoken-word count (display telemetry only —
+    # length is enforced upstream by the word budget, not corrected here).
+    duration_sec = None
+    transcript_words = None
+    if make_audio and audio and audio.exists():
+        duration_sec = _audio_duration_sec(audio)
+    if transcript_path is not None and transcript_path.exists():
+        transcript_words = _transcript_words(
+            transcript_path.read_text(encoding="utf-8"))
+    if duration_sec:
+        mm, ss = divmod(int(duration_sec), 60)
+        print(f"      episode duration ~{mm}m {ss:02d}s · "
+              f"{transcript_words or '?'} transcript words")
+
     # Persist the resolved config alongside the run for reproducibility and so
     # ``--only generate`` re-runs can be replayed with the same knobs.
     (run / "config.yaml").write_text(config.to_yaml(), encoding="utf-8")
@@ -103,6 +118,8 @@ def generate(ranked: list[RankedItem], make_audio: bool = True,
         "backend": backend_name,
         "selection_source": selection_source,
         "config": ep.config,
+        "duration_sec": duration_sec,
+        "transcript_words": transcript_words,
     }, date=date)
     print(f"      wrote {brief.name} ({len(chosen)} items)")
     return ep
@@ -210,3 +227,24 @@ def _paper_pdf_url(item: RankedItem) -> str | None:
 MIN_SCORE_FLOOR = 0.5
 MIN_SOURCES = 4
 MAX_SOURCES = 30
+
+
+def _audio_duration_sec(path: pathlib.Path) -> float | None:
+    """Episode mp3 duration in seconds (display telemetry). Uses ffprobe
+    (ffmpeg is a hard dependency for pydub); returns None if unavailable."""
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+            capture_output=True, text=True, timeout=15,
+        )
+        if out.returncode == 0 and out.stdout.strip():
+            return round(float(out.stdout.strip()), 1)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    return None
+
+
+def _transcript_words(text: str) -> int:
+    """Spoken-word count of a tagged transcript (``<PersonN>`` stripped)."""
+    return len(re.sub(r"</?Person\d+>", "", text).split())

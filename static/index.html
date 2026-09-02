@@ -4,37 +4,51 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>AI Weekly Podcast</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232563eb'/%3E%3Cpath d='M12 10l11 6-11 6z' fill='%23fff'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-  <header>
-    <h1>AI Weekly Podcast</h1>
+  <header class="app-header">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <div class="brand-text">
+        <h1>AI Weekly Podcast</h1>
+        <span class="tagline">A weekly briefing on AI research &amp; news</span>
+      </div>
+    </div>
     <div class="header-right">
-      <span id="schedule-info" class="muted">schedule: …</span>
-      <label class="switch" title="Toggle the weekly auto-run">
-        <input type="checkbox" id="schedule-toggle">
-        <span class="slider"></span>
-      </label>
-      <button id="btn-settings" title="Edit the persistent podcast config">Settings</button>
+      <button id="btn-settings" class="ghost" title="Edit the persistent podcast config">Settings</button>
       <button id="btn-new" class="primary" title="Run collect → rank → generate now">Generate new episode</button>
     </div>
   </header>
 
   <main>
     <aside id="episode-list">
-      <h2>History</h2>
+      <div class="list-head">
+        <h2>History</h2>
+        <span id="episode-count" class="count-chip">0</span>
+      </div>
       <ul id="episodes"></ul>
     </aside>
 
     <section id="detail">
-      <p class="muted">Select an episode on the left.</p>
+      <div id="empty-state" class="empty-state">
+        <div class="empty-orb" aria-hidden="true"></div>
+        <h2>No episode selected</h2>
+        <p class="muted">Pick an episode from the history on the left, or generate a fresh one.</p>
+        <button id="btn-empty-new" class="primary">Generate new episode</button>
+      </div>
+      <div id="detail-body" class="hidden"></div>
     </section>
   </main>
 
   <div id="modal-backdrop" class="modal-backdrop hidden">
-    <div id="modal-settings" class="modal hidden">
-      <h3 id="settings-title">Podcast settings</h3>
-      <p class="muted">Saved to data/podcast_config.yaml. Knowledge settings apply to every generation; the podcast defaults drive auto-runs and pre-fill the generate dialog.</p>
+    <div id="modal-settings" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+      <div class="modal-head">
+        <h3 id="settings-title">Podcast settings</h3>
+        <button class="modal-close" data-close-modal="modal-settings" aria-label="Close">✕</button>
+      </div>
+      <p class="muted">Saved to data/podcast_config.yaml. Your knowledge settings apply to every generation; the episode-shape defaults pre-fill the Generate dialog.</p>
       <div class="modal-section">
         <h4>For you (applies to all episodes)</h4>
         <div class="cfg-grid">
@@ -51,7 +65,7 @@
         </div>
       </div>
       <div class="modal-section">
-        <h4>Episode shape (auto-run defaults &amp; generate pre-fill)</h4>
+        <h4>Episode shape (generate-dialog defaults)</h4>
         <div class="cfg-grid">
           <label>Rolling window (days)
             <input type="number" id="set-window-days" min="1" max="14" value="7">
@@ -70,7 +84,7 @@
             </select>
           </label>
         </div>
-        <p class="muted">Derived sources: <span id="set-sources">9</span> · est. <span id="set-minutes">18</span> min</p>
+        <p class="stat-pill">Derived sources: <span id="set-sources">7</span> · est. <span id="set-minutes">18</span> min</p>
       </div>
       <div class="modal-actions">
         <button id="btn-settings-cancel">Cancel</button>
@@ -78,8 +92,11 @@
       </div>
     </div>
 
-    <div id="modal-generate" class="modal hidden">
-      <h3>Generate new episode</h3>
+    <div id="modal-generate" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="generate-title">
+      <div class="modal-head">
+        <h3 id="generate-title">Generate new episode</h3>
+        <button class="modal-close" data-close-modal="modal-generate" aria-label="Close">✕</button>
+      </div>
       <p class="muted">Confirm the episode shape. Your knowledge settings (audience, familiar topics) always come from the saved config.</p>
       <div class="cfg-grid">
         <label>Window start
@@ -102,13 +119,27 @@
           </select>
         </label>
       </div>
-      <p class="muted">Derived sources: <span id="gen-sources">9</span> · est. <span id="gen-minutes">18</span> min</p>
+      <p class="stat-pill">Derived sources: <span id="gen-sources">7</span> · est. <span id="gen-minutes">18</span> min</p>
       <div class="modal-actions">
         <button id="btn-generate-cancel">Cancel</button>
         <button id="btn-generate-run" class="primary">Run now</button>
       </div>
     </div>
+
+    <div id="modal-confirm" class="modal modal-sm hidden" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+      <div class="modal-head">
+        <h3 id="confirm-title">Are you sure?</h3>
+        <button class="modal-close" data-close-modal="modal-confirm" aria-label="Close">✕</button>
+      </div>
+      <p id="confirm-message" class="confirm-message"></p>
+      <div class="modal-actions">
+        <button id="btn-confirm-cancel">Cancel</button>
+        <button id="btn-confirm-ok" class="primary">Confirm</button>
+      </div>
+    </div>
   </div>
+
+  <div id="toasts" class="toasts" aria-live="polite"></div>
 
   <div id="run-panel" class="hidden">
     <div class="run-panel-head">
@@ -116,6 +147,7 @@
       <button id="run-close" class="link">close</button>
     </div>
     <div class="progress">
+      <div class="stage-dots" id="progress-stages"></div>
       <div class="progress-bar"><div id="progress-fill" class="progress-fill"></div></div>
       <div id="progress-meta" class="progress-meta">starting…</div>
     </div>

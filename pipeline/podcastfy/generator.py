@@ -263,6 +263,9 @@ class SimplePodcastGenerator:
         web_dir: Optional[str] = None,
         depth_factor: float = 1.0,
         max_num_chunks: int = 10,
+        per_source_words: int | None = None,
+        intro_words: int | None = None,
+        recap_words: int | None = None,
         audience_prompt: str | None = None,
         familiar_clause: str = "none",
     ):
@@ -330,6 +333,12 @@ class SimplePodcastGenerator:
         self.depth_factor = depth_factor
         self.audience_prompt = audience_prompt
         self.familiar_clause = familiar_clause
+        # Output word budget (derived by RunConfig.budget). These cap each
+        # part's transcript length so the finished episode conforms to the
+        # requested length; they do NOT scale with depth_factor.
+        self.per_source_words = per_source_words or 240
+        self.intro_words = intro_words or 200
+        self.recap_words = recap_words or 280
         self.config_conversation = {
             "podcast_name": "AI News Weekly",
             "podcast_tagline": "Latest AI research and news",
@@ -343,6 +352,10 @@ class SimplePodcastGenerator:
             "engagement_techniques": ["analogies", "examples", "specific numbers"],
             "max_num_chunks": max(2, min(30, int(max_num_chunks))),
             "min_chunk_size": 4000,
+            # Word caps for intro / mid / recap parts.
+            "intro_words": self.intro_words,
+            "per_source_words": self.per_source_words,
+            "recap_words": self.recap_words,
             # Per-source input context scales with depth: brief feeds less so
             # the LLM stays concise, deep-dive feeds more so it can go deeper.
             "per_paper_chars": round(10000 * depth_factor),      # abstract + intro per paper
@@ -370,6 +383,10 @@ class SimplePodcastGenerator:
         # PDFs like {August}) don't trip a false "missing parameter" error.
         self._check_required_params(LONGFORM_PROMPT, params)
         prompt = LONGFORM_PROMPT.format(**params)
+        # Generous token ceiling (per-part word budgets are enforced by the
+        # prompt + deterministic trim in content_generator; a tight cap would
+        # truncate DeepSeek's pre-JSON reasoning and cancel the part).
+        max_tokens = int(params.get("max_output_tokens") or self._max_output_tokens)
         resp = self._raw_client.chat.completions.create(
             model=self.model_name,
             messages=[
@@ -383,7 +400,7 @@ class SimplePodcastGenerator:
                 {"role": "user", "content": prompt},
             ],
             temperature=0.7,
-            max_tokens=self._max_output_tokens,
+            max_tokens=max_tokens,
             presence_penalty=0.1,
             frequency_penalty=0.1,
         )

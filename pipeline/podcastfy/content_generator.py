@@ -109,8 +109,14 @@ class LongFormContentGenerator:
         self.llm = llm
         self.max_num_chunks = config_conversation.get("max_num_chunks", 10)  # Default if not in config
         self.min_chunk_size = config_conversation.get("min_chunk_size", 200)  # Default if not in config
-        # Per-source transcript budget multiplier (brief < 1.0 < deep-dive).
+        # Per-source input reference scale (brief < 1.0 < deep-dive). This
+        # scales how much source TEXT the LLM sees — never the output budget.
         self.depth_factor = float(config_conversation.get("depth_factor", 1.0))
+        # Output word budget per part (derived by RunConfig.budget). These set
+        # the hard ceiling each LLM part must stay under.
+        self.intro_words = int(config_conversation.get("intro_words", 200))
+        self.per_source_words = int(config_conversation.get("per_source_words", 240))
+        self.recap_words = int(config_conversation.get("recap_words", 280))
 
     def __calculate_chunk_size(self, input_content: str) -> int:
         """
@@ -203,26 +209,26 @@ class LongFormContentGenerator:
         # No markers found: fall back to single chunk.
         return [input_content] if input_content.strip() else []
 
-    def _turn_budget(self, chunk_len: int):
-        """
-        Return (turn_range_str, word_range_str, min_turns) based on chunk length,
-        scaled by ``self.depth_factor`` (the run config's per-topic depth).
+    def _part_word_cap(self, part_idx: int, total_parts: int) -> int:
+        """Word ceiling for a part: intro, then each source, then recap."""
+        if part_idx == 0:
+            return self.intro_words
+        if part_idx == total_parts - 1:
+            return self.recap_words
+        return self.per_source_words
 
-        Baseline bands (depth_factor=1.0, ≈1.25 min/source):
-        chunk_len < 3000  ->  3-5 turns,  80-120 words, min 3
-        chunk_len < 10000 ->  5-7 turns, 120-150 words, min 5
-        chunk_len >= 10000 -> 6-9 turns, 150-180 words, min 6
+    @staticmethod
+    def _turn_range_for_cap(cap: int) -> tuple[int, int, int]:
+        """(lo, hi, min) turn counts for a part with a ``cap``-word budget.
+
+        Conversational pace ≈ 24-34 words/turn; the min feeds the retry loop's
+        under-generation floor. Not scaled by depth_factor — the cap already
+        encodes how much the part should say.
         """
-        df = self.depth_factor
-        if chunk_len < 3000:
-            t_lo, t_hi, w_lo, w_hi, m = 3, 5, 80, 120, 3
-        elif chunk_len < 10000:
-            t_lo, t_hi, w_lo, w_hi, m = 5, 7, 120, 150, 5
-        else:
-            t_lo, t_hi, w_lo, w_hi, m = 6, 9, 150, 180, 6
-        return (f"{round(t_lo * df)} to {round(t_hi * df)} turns",
-                f"{round(w_lo * df)}-{round(w_hi * df)} words",
-                max(1, round(m * df)))
+        lo = max(3, round(cap / 34.0))
+        hi = max(4, round(cap / 24.0))
+        mn = max(3, round(cap / 30.0))
+        return lo, hi, mn
 
     def enhance_prompt_params(self, prompt_params: Dict,
                               part_idx: int,
@@ -238,7 +244,7 @@ class LongFormContentGenerator:
             total_parts (int): Total number of conversation parts
             chat_context (str): Chat context from previous parts
             chunk_len (int): Length of the current chunk in characters.
-                Used to set a dynamic turn/word budget for mid-parts.
+                Retained for signature compatibility (no longer drives length).
 
         Returns:
             Dict: Enhanced prompt parameters with part-specific instructions
@@ -246,14 +252,18 @@ class LongFormContentGenerator:
         enhanced_params = prompt_params.copy()
         # Initialize part_instructions with chat context
         enhanced_params["context"] = chat_context
-        df = self.depth_factor
 
         host1 = prompt_params.get("host1_name", "Person1")
         host2 = prompt_params.get("host2_name", "Person2")
 
-        # Dynamic turn/word budget for mid-parts (based on chunk length).
-        turn_range, word_range, _ = self._turn_budget(chunk_len)
-        
+        # Every part gets a word ceiling derived from the episode budget; the
+        # prompt instructs it and _trim_to_words enforces it deterministically
+        # afterward. We deliberately do NOT set a tight per-call token ceiling:
+        # DeepSeek emits a reasoning preamble before the JSON, so a small
+        # max_tokens would truncate that and cancel the whole part.
+        cap_words = self._part_word_cap(part_idx, total_parts)
+        turn_lo, turn_hi, _ = self._turn_range_for_cap(cap_words)
+
         COMMON_INSTRUCTIONS = """
             Podcast conversation so far is given in CONTEXT.
             Continue the natural flow of conversation. Follow-up on the very previous point/question without repeating topics already discussed in earlier PARTS. A topic previewed in the introduction is NOT already discussed. It gets its full treatment here.
@@ -276,7 +286,7 @@ class LongFormContentGenerator:
             2. Give a themed overview: group the topics into 2-3 themes. Weave them together conversationally. Do NOT label themes explicitly ("first theme," "second theme," "third theme"). Use natural connective phrases like "We'll also dive into," "Then we'll cover," "Finally, we'll discuss." For each topic, use a relative clause or flowing sentence that says what it does, not a standalone fragment. Integrate a brief "why it matters" into the theme, not as a separate label. Interleave genuine reactions between themes. One host reacts to the previous theme, the other continues to the next. Do NOT explain mechanisms, cite numbers, or describe how things work. Save those for the topic discussions.
                Example: "In today's episode, we'll cover three major model releases. A, which achieves unprecedented generation speeds. B, which brings multimodal capabilities to a compact architecture. And C, which uses an end-to-end self-improvement loop." [Reaction: "And those are pushing boundaries we didn't think possible a year ago."] "We'll also dive into agent frameworks, covering D's breakthrough in harness scaling and E's flexible navigation. Because raw intelligence doesn't mean much without a reliable environment to operate within." "Right. Finally, we'll discuss major industry news, including F's big acquisition and a shocking audit revealing benchmark cheating."
             3. End with "Let's begin!" or similar.
-            Keep it to {round(5 * df)} to {round(7 * df)} turns total, ~{round(200 * df)} words. The overview should tease topics by name and significance, woven into flowing sentences, not listed as fragments. No analogy or numbers in the intro.
+            Keep this part to {turn_lo} to {turn_hi} turns total and at most {cap_words} words. The overview should tease topics by name and significance, woven into flowing sentences, not listed as fragments. No analogy or numbers in the intro.
             """
         elif part_idx == total_parts - 1:
             enhanced_params["instruction"] = f"""
@@ -287,7 +297,7 @@ class LongFormContentGenerator:
             1. Synthesize the episode's arc: group the topics into 2-3 themes and summarize what each theme revealed. Show the through-line, not just a list.
             2. Connect the themes: show how they relate and build on each other (e.g. "We started with speed, then saw how reliability matters just as much, and finally learned that even our benchmarks can't be trusted").
             3. End with a provocative question for the audience, then Person1 ({host1}) says a brief goodbye addressing {host2} ("Until next time, keep digging...").
-            Keep it to {round(9 * df)} to {round(11 * df)} turns, ~{round(280 * df)} words. This is a recap with synthesis, not a new discussion. No per-topic analogy needed here.
+            Keep this part to {turn_lo} to {turn_hi} turns and at most {cap_words} words. This is a recap with synthesis, not a new discussion. No per-topic analogy needed here.
             """
         else:
             enhanced_params["instruction"] = f"""
@@ -304,9 +314,9 @@ class LongFormContentGenerator:
 
             Cite at most 1-2 striking numbers per topic. Do NOT recite every metric. Lead with what the number means (the delta, ratio, or comparison), not the raw endpoints. "Jumps 9 points to 85.4" beats "from 76.7 to 85.4." "Doubles to 35.4" beats "from 17.2 to 35.4." Never stack more than two numbers in a single turn. Vivid cost pairs like "$15 vs $574" may stay as-is. The gap is the story.
             If the INPUT contains named case studies, specific models, or concrete behaviors, USE THEM BY NAME. Do not paraphrase them into a generality. For example, if the INPUT says a model ran `git clone` on the writeup repo to read the flag, say which model and say "git clone", not "a model cheated".
-            Keep this part to {word_range} of dialogue, {turn_range}.
+            Keep this part to {turn_lo} to {turn_hi} turns and at most {cap_words} words of dialogue.
             """
-        
+
         return enhanced_params
 
     def generate_long_form(
@@ -338,13 +348,8 @@ class LongFormContentGenerator:
         print(f"Generating {num_parts} parts")
         
         for i, chunk in enumerate(chunks):
-            df = self.depth_factor
-            if i == 0:
-                min_turns = max(3, round(5 * df))  # intro
-            elif i == num_parts - 1:
-                min_turns = max(4, round(7 * df))  # recap
-            else:
-                _, _, min_turns = self._turn_budget(len(chunk))
+            cap_words = self._part_word_cap(i, num_parts)
+            _, _, min_turns = self._turn_range_for_cap(cap_words)
             enhanced_params = self.enhance_prompt_params(
                 prompt_params,
                 part_idx=i,
@@ -358,6 +363,14 @@ class LongFormContentGenerator:
                 min_turns=min_turns,
             )
             response = ContentCleanerMixin._strip_preamble(response)
+            # Enforce the part's word ceiling deterministically (prompt + token
+            # cap are soft; this makes the total transcript conform to length).
+            trimmed = ContentCleanerMixin._trim_to_words(response, cap_words)
+            if trimmed != response:
+                print(f"      [part {i+1}/{num_parts}] trimmed "
+                      f"{len(response.split())} -> {len(trimmed.split())} words "
+                      f"(cap {cap_words})")
+                response = trimmed
             if on_part is not None:
                 on_part(i, response)
             if i == 0:
@@ -534,6 +547,86 @@ class ContentCleanerMixin:
                 continue
             kept_lines.append(line.strip())
         return " ".join(kept_lines).strip()
+
+    @staticmethod
+    def _strip_dialogue_tags(text: str) -> str:
+        """Remove <PersonN> tags so word counting reflects spoken text only."""
+        return re.sub(r"</?Person[12]>", "", text)
+
+    @staticmethod
+    def _word_count(text: str) -> int:
+        if not text:
+            return 0
+        return len(ContentCleanerMixin._strip_dialogue_tags(text).split())
+
+    @staticmethod
+    def _trim_to_words(text: str, cap: int) -> str:
+        """Deterministically bound ``text`` to ``cap`` spoken words.
+
+        Keeps whole <PersonN>...</PersonN> turns while the running total is at
+        or under the cap; the next (partially fitting) turn is cut at the last
+        sentence boundary within the remaining budget. Tags stay balanced.
+        Returns the original text unchanged if it is already within ``cap``.
+        """
+        if cap <= 0 or ContentCleanerMixin._word_count(text) <= cap:
+            return text
+        turn_re = re.compile(r"(<Person[12]>.*?</Person[12]>)", re.DOTALL)
+        matches = list(turn_re.finditer(text))
+        if not matches:
+            # No turns to protect: bound the raw text by word count.
+            return " ".join(text.split()[:cap]).strip()
+        words = 0
+        last_kept_end = None
+        for m in matches:
+            turn = m.group(0)
+            n = ContentCleanerMixin._word_count(turn)
+            if words + n <= cap:
+                words += n
+                last_kept_end = m.end()
+                if words >= cap:
+                    break
+                continue
+            # This turn does not fit whole: keep its leading part within budget.
+            trimmed = ContentCleanerMixin._trim_turn_to_words(turn, cap - words)
+            if last_kept_end is not None:
+                return (text[:last_kept_end] + "\n" + trimmed).strip()
+            return (text[:m.start()] + trimmed).strip()
+        return text[:last_kept_end].strip() if last_kept_end is not None else ""
+
+    @staticmethod
+    def _trim_turn_to_words(turn: str, budget: int) -> str:
+        """Cut a single ``<PersonN>...</PersonN>`` turn to ``budget`` words at the
+        last sentence boundary. Returns an empty string for a zero budget."""
+        if budget <= 0:
+            return ""
+        m = re.match(r"(<Person[12]>)(.*?)(</Person[12]>)", turn, re.DOTALL)
+        if not m:
+            return turn if ContentCleanerMixin._word_count(turn) <= budget else ""
+        open_tag, body, close_tag = m.groups()
+        sentences = re.split(r"(?<=[.!?])\s+", body.strip())
+        out: list[str] = []
+        words = 0
+        for sentence in sentences:
+            sw = len(sentence.split())
+            if words + sw <= budget:
+                out.append(sentence)
+                words += sw
+                continue
+            # Partially keep this sentence up to the budget.
+            keep = []
+            for tok in sentence.split():
+                if words + 1 <= budget:
+                    keep.append(tok)
+                    words += 1
+                else:
+                    break
+            if keep:
+                out.append(" ".join(keep))
+            break
+        body2 = " ".join(out).strip()
+        if not body2:
+            return ""
+        return f"{open_tag} {body2} {close_tag}"
 
     @staticmethod
     def _clean_scratchpad(text: str) -> str:

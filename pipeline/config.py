@@ -25,12 +25,26 @@ AUDIENCE_CHOICES = ("researcher", "intermediate", "beginner")
 # Target duration (minutes) for each podcast-length option.
 LENGTH_MINUTES = {"short": 10.0, "medium": 17.5, "long": 30.0}
 
-# Target duration (minutes) per source for each depth option.
+# Target duration (minutes) per source for each depth option. This is the
+# source-count driver: depth = how long each topic is given, length = how
+# many topics fit (see RunConfig.budget).
 DEPTH_MINUTES = {"brief": 1.0, "deep-dive": 2.0}
 
-# Per-source transcript budget multiplier vs the pipeline's historical
-# ~1.25 min/source baseline (brief trims it, deep-dive extends it).
+# Input reference fetch scale per depth — controls how much source text the
+# LLM sees (per_paper_chars etc.). It does NOT scale the output word budget;
+# duration is derived separately (WPM * length).
 DEPTH_FACTOR = {"brief": 0.8, "deep-dive": 1.6}
+
+# Spoken words-per-minute used to convert length presets into a total word
+# budget. Fixed (measured deep-dive output runs ~165-190 wpm, so 165 gives a
+# small safety margin).
+WPM = 165.0
+
+# Intro + recap together take this fraction of the total length; the rest is
+# split evenly across sources.
+INTRO_RECAP_FRACTION = 0.20
+# Within the intro/recap slice, the intro gets this share (recap = 1 - share).
+INTRO_SHARE = 0.40
 
 MIN_SOURCES = 4
 MAX_SOURCES = 30
@@ -94,10 +108,33 @@ class RunConfig:
             )
         return start, end
 
+    def budget(self) -> dict:
+        """The episode's word budget, derived from length and per-source depth.
+
+        Length fixes the TOTAL spoken word count (paced at ``WPM``); depth
+        fixes the per-source time and therefore words per source. Source
+        count = the topic budget (length minus the 20% intro/recap slice)
+        divided by per-source words, so the produced duration conforms to the
+        length preset instead of drifting.
+        """
+        total_words = round(LENGTH_MINUTES[self.length] * WPM)
+        ir_words = round(total_words * INTRO_RECAP_FRACTION)
+        intro_words = round(ir_words * INTRO_SHARE)
+        recap_words = ir_words - intro_words
+        per_source_words = round(DEPTH_MINUTES[self.depth] * WPM)
+        topic_words = total_words - ir_words
+        n = max(MIN_SOURCES, min(MAX_SOURCES, round(topic_words / per_source_words)))
+        return {
+            "total_words": total_words,
+            "intro_words": intro_words,
+            "recap_words": recap_words,
+            "per_source_words": per_source_words,
+            "num_sources": n,
+        }
+
     def num_sources(self) -> int:
-        """Derived source count from podcast length / per-topic depth."""
-        n = round(LENGTH_MINUTES[self.length] / DEPTH_MINUTES[self.depth])
-        return max(MIN_SOURCES, min(MAX_SOURCES, n))
+        """Source count derived from length / per-source depth."""
+        return self.budget()["num_sources"]
 
     def depth_factor(self) -> float:
         return DEPTH_FACTOR[self.depth]
@@ -111,14 +148,25 @@ class RunConfig:
         return ", ".join(self.familiar_topics)
 
     def target_minutes(self) -> float:
-        """Estimated episode duration = num_sources * per-topic minutes."""
-        return self.num_sources() * DEPTH_MINUTES[self.depth]
+        """Duration the budget should land on: intro/recap + sources × depth."""
+        b = self.budget()
+        return (LENGTH_MINUTES[self.length] * INTRO_RECAP_FRACTION
+                + b["num_sources"] * DEPTH_MINUTES[self.depth])
 
     def podcastfy_overrides(self) -> dict:
-        """Knobs threaded into the vendored podcastfy transcript generator."""
+        """Knobs threaded into the vendored podcastfy transcript generator.
+
+        ``depth_factor`` + ``max_num_chunks`` scale how much source text the
+        LLM sees; the word-budget keys set each part's output cap (so the
+        transcript conforms to the length preset).
+        """
+        b = self.budget()
         return {
             "depth_factor": self.depth_factor(),
-            "max_num_chunks": self.num_sources(),
+            "max_num_chunks": b["num_sources"],
+            "per_source_words": b["per_source_words"],
+            "intro_words": b["intro_words"],
+            "recap_words": b["recap_words"],
             "audience_prompt": self.audience_prompt(),
             "familiar_clause": self.familiar_clause(),
         }
@@ -140,6 +188,7 @@ class RunConfig:
                 "depth": self.depth,
                 "num_sources": self.num_sources(),
                 "target_minutes": self.target_minutes(),
+                "word_budget": self.budget(),
             },
         }
 

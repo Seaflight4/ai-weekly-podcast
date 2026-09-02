@@ -10,9 +10,9 @@ The filesystem is the source of truth — no DB. A run folder is named
     episode.mp3      — the produced audio (absent if generation failed)
     transcript.md    — ground-truth (backend) or whisper transcript
 
-One shared root for every episode, however it was created (scheduled
-auto-run, manual generate, or a brief-edit re-render that replaces a date's
-episode in place).
+One shared root for every episode, however it was created (a UI-generated
+run, a CLI run, or a brief-edit re-render that replaces a date's episode in
+place).
 """
 from __future__ import annotations
 
@@ -75,6 +75,8 @@ def _run_summary(folder: pathlib.Path) -> dict:
         "items": len(ep["manifest"]) if ep else 0,
         "selection_source": ep.get("selection_source") if ep else None,
         "created_at": ep.get("created_at") if ep else None,
+        "duration_sec": ep.get("duration_sec") if ep else None,
+        "transcript_words": ep.get("transcript_words") if ep else None,
     }
 
 

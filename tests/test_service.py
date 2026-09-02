@@ -9,7 +9,7 @@ import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from service import episodes, jobs, podcast_config, scheduler
+from service import episodes, jobs, podcast_config
 
 
 # --- episodes scan + status badges -----------------------------------------
@@ -20,7 +20,8 @@ def test_episodes_list_status_badges(tmp_path, monkeypatch):
     r = tmp_path / "31-08-2026"; r.mkdir()
     (r / "episode.json").write_text(json.dumps({
         "manifest": [{"url": "u"}], "created_at": "2026-08-31T09:00:00Z",
-        "selection_source": "personalized"}))
+        "selection_source": "personalized",
+        "duration_sec": 754.5, "transcript_words": 2000}))
     (r / "episode.mp3").write_bytes(b"")
     # draft: episode.json but no mp3
     d = tmp_path / "24-08-2026"; d.mkdir()
@@ -35,6 +36,8 @@ def test_episodes_list_status_badges(tmp_path, monkeypatch):
     by_date = {x["date"]: x for x in runs}
     assert by_date["31-08-2026"]["status"] == "ready"
     assert by_date["31-08-2026"]["selection_source"] == "personalized"
+    assert by_date["31-08-2026"]["duration_sec"] == 754.5
+    assert by_date["31-08-2026"]["transcript_words"] == 2000
     assert by_date["24-08-2026"]["status"] == "draft"
     assert by_date["17-08-2026"]["status"] == "empty"
 
@@ -115,54 +118,7 @@ def test_jobs_command_builder():
     assert cmd[cmd.index("--depth") + 1] == "brief"
 
 
-# --- scheduler: cron parse + persist ---------------------------------------
-
-def test_scheduler_parse_cron_valid():
-    trig = scheduler._parse_cron("0 9 * * 1")
-    assert trig is not None
-
-
-def test_scheduler_parse_cron_rejects_bad_field_count():
-    with pytest.raises(ValueError):
-        scheduler._parse_cron("0 9 *")
-    with pytest.raises(ValueError):
-        scheduler._parse_cron("not-a-cron at all")
-
-
-def test_scheduler_persist_and_load_round_trip(tmp_path, monkeypatch):
-    monkeypatch.setattr(scheduler, "CONFIG_PATH", tmp_path / "schedule.json")
-    scheduler._state.update({"enabled": True, "cron": "30 7 * * 2"})
-    scheduler._persist()
-    scheduler._state.update({"enabled": True, "cron": scheduler.DEFAULT_CRON})
-    scheduler._load()
-    assert scheduler._state["cron"] == "30 7 * * 2"
-    assert scheduler._state["enabled"] is True
-
-
-def test_scheduler_configure_persists_and_validates(tmp_path, monkeypatch):
-    monkeypatch.setattr(scheduler, "CONFIG_PATH", tmp_path / "schedule.json")
-    # _scheduler is None here (not started) so _reschedule is a no-op.
-    scheduler._scheduler = None
-    with pytest.raises(ValueError):
-        scheduler.configure(cron="bad")
-    st = scheduler.configure(enabled=False, cron="0 10 * * 5")
-    assert st["enabled"] is False
-    assert st["cron"] == "0 10 * * 5"
-
-
-def test_scheduler_default_cron_is_friday():
-    # Friday auto-run: the default cron expression uses the 'fri' weekday.
-    assert "fri" in scheduler.DEFAULT_CRON.lower()
-
-
 # --- podcast_config: persistent data/podcast_config.yaml --------------------
-
-@pytest.fixture
-def cfg_root(tmp_path, monkeypatch):
-    """Isolate the config file under a tmp path."""
-    monkeypatch.setattr(podcast_config, "CONFIG_PATH", tmp_path / "podcast_config.yaml")
-    return tmp_path
-
 
 def test_podcast_config_load_defaults_when_missing(tmp_path, monkeypatch):
     monkeypatch.setattr(podcast_config, "CONFIG_PATH", tmp_path / "podcast_config.yaml")
