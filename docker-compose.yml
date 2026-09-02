@@ -1,6 +1,9 @@
 services:
   podcast:
     build: .
+    # Run as the host user so bind-mounted files in ./data are never
+    # root-owned (root-owned leftovers break host-side pipeline runs).
+    user: "${UID:-1000}:${GID:-1000}"
     ports:
       - "8000:8000"
     volumes:

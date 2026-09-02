@@ -5,14 +5,10 @@ __pycache__/
 *.egg-info/
 
 # --- Runtime data ---
-# Example run output IS tracked (e.g. data/default/<Friday>/), but per-run
-# caches, the service's job logs + scheduler config + the personalized
-# library, and podcastfy's default output dirs are regenerable, so keep them
-# out.
-data/**/.podcastfy-cache/
-data/.jobs/
-data/.schedule.json
-data/personalized/
+# Everything under data/ is per-machine runtime state (episode history,
+# persisted podcast config, job logs, caches) served through the ./data bind
+# mount — it stays local, nothing under data/ is tracked.
+/data/
 output/
 
 # --- Whisper model cache (one-off ASR verifier) ---

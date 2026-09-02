@@ -9,7 +9,7 @@ import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from service import episodes, jobs, personalized, scheduler
+from service import episodes, jobs, podcast_config, scheduler
 
 
 # --- episodes scan + status badges -----------------------------------------
@@ -95,6 +95,24 @@ def test_jobs_command_builder():
     cmd = jobs.generate_cmd("31-08-2026", pathlib.Path("data/31-08-2026/podcast_brief.md"))
     assert "--only" in cmd and cmd[cmd.index("--only") + 1] == "generate"
     assert "--brief-in" in cmd
+    # config_path (run's stored config.yaml) + user-wise overrides thread
+    # through as pipeline CLI flags.
+    cmd = jobs.generate_cmd(
+        "31-08-2026", pathlib.Path("data/31-08-2026/podcast_brief.md"),
+        config={"audience_level": "beginner", "familiar_topics": ["RLHF", "MoE"]},
+        config_path=pathlib.Path("data/31-08-2026/config.yaml"))
+    assert "--config" in cmd and "data/31-08-2026/config.yaml" in cmd
+    assert "--audience" in cmd and cmd[cmd.index("--audience") + 1] == "beginner"
+    assert "--familiar" in cmd and cmd[cmd.index("--familiar") + 1] == "RLHF,MoE"
+    # full_run_cmd flattens the resolved knob dict into flags.
+    cmd = jobs.full_run_cmd(config={
+        "window_start": "2026-08-24", "window_end": "2026-08-31",
+        "audience_level": "intermediate", "familiar_topics": [],
+        "length": "long", "depth": "brief"})
+    assert cmd[cmd.index("--window-start") + 1] == "2026-08-24"
+    assert cmd[cmd.index("--audience") + 1] == "intermediate"
+    assert cmd[cmd.index("--length") + 1] == "long"
+    assert cmd[cmd.index("--depth") + 1] == "brief"
 
 
 # --- scheduler: cron parse + persist ---------------------------------------
@@ -137,60 +155,96 @@ def test_scheduler_default_cron_is_friday():
     assert "fri" in scheduler.DEFAULT_CRON.lower()
 
 
-# --- personalized: shared library filesystem ops ----------------------------
+# --- podcast_config: persistent data/podcast_config.yaml --------------------
 
 @pytest.fixture
-def pers_data(tmp_path, monkeypatch):
-    """Isolate personalized + episodes under a tmp data root."""
-    monkeypatch.setattr(episodes, "DATA_ROOT", tmp_path)
-    monkeypatch.setattr(personalized, "PERSONALIZED_ROOT", tmp_path / "personalized")
-    # A default run with rank.json + brief, so prepare_render can copy rank.json.
-    default_run = tmp_path / "31-08-2026"
-    default_run.mkdir()
-    (default_run / "rank.json").write_text(
-        json.dumps([{"title": "P", "url": "https://arxiv.org/abs/2601.1",
-                     "source": "arxiv", "score": 0.9, "judge_reason": "imp"}]))
-    (default_run / "podcast_brief.md").write_text("# brief\n")
+def cfg_root(tmp_path, monkeypatch):
+    """Isolate the config file under a tmp path."""
+    monkeypatch.setattr(podcast_config, "CONFIG_PATH", tmp_path / "podcast_config.yaml")
     return tmp_path
 
 
-def test_personalized_prepare_render_copies_rank_and_writes_brief(pers_data):
-    folder = personalized.prepare_render("2026-08-31", "# edited\n- [P](https://arxiv.org/abs/2601.1)\n")
-    assert folder == pers_data / "personalized" / "31-08-2026"
-    assert (folder / "rank.json").exists()       # copied from default
-    assert (folder / "podcast_brief.md").read_text().startswith("# edited")
-    # default run untouched
-    assert (pers_data / "31-08-2026" / "rank.json").exists()
+def test_podcast_config_load_defaults_when_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(podcast_config, "CONFIG_PATH", tmp_path / "podcast_config.yaml")
+    assert podcast_config.exists() is False
+    cfg = podcast_config.load()
+    assert cfg == podcast_config.DEFAULTS
+    assert cfg["user"]["audience"] == "researcher"
+    assert cfg["podcast"]["window_days"] == 7
+    assert cfg["podcast"]["length"] == "medium"
+    assert cfg["podcast"]["depth"] == "deep-dive"
+    assert cfg["user"]["familiar_topics"] == []
 
 
-def test_personalized_list_and_get(pers_data):
-    personalized.prepare_render("2026-08-31", "# brief\n")
-    personalized.prepare_render("2026-08-24", "# brief\n")
-    runs = personalized.list_runs()
-    assert [r["date"] for r in runs] == ["31-08-2026", "24-08-2026"]  # newest first
-    run = personalized.get_run("2026-08-31")
-    assert run is not None and run["brief"] == "# brief\n"
+def test_podcast_config_save_round_trip_and_validation(tmp_path, monkeypatch):
+    monkeypatch.setattr(podcast_config, "CONFIG_PATH", tmp_path / "podcast_config.yaml")
+    saved = podcast_config.save({
+        "user": {"audience": "beginner", "familiar_topics": [" RLHF ", "MoE", ""]},
+        "podcast": {"window_days": 10, "length": "long", "depth": "brief"},
+    })
+    # normalized: familiar topics trimmed, empties dropped
+    assert saved["user"]["familiar_topics"] == ["RLHF", "MoE"]
+    assert podcast_config.exists() is True
+    assert podcast_config.load() == saved
+    # invalid values are rejected before persisting
+    for bad in (
+        {"user": {"audience": "wizard", "familiar_topics": []},
+         "podcast": {"window_days": 7, "length": "medium", "depth": "deep-dive"}},
+        {"user": {"audience": "beginner", "familiar_topics": []},
+         "podcast": {"window_days": 30, "length": "medium", "depth": "deep-dive"}},
+        {"user": {"audience": "beginner", "familiar_topics": []},
+         "podcast": {"window_days": 7, "length": "huge", "depth": "deep-dive"}},
+        {"user": {"audience": "beginner", "familiar_topics": []},
+         "podcast": {"window_days": 7, "length": "medium", "depth": "nope"}},
+        {"user": {"audience": "beginner", "familiar_topics": []},
+         "podcast": {"window_days": "soon", "length": "medium", "depth": "deep-dive"}},
+    ):
+        with pytest.raises(ValueError):
+            podcast_config.save(bad)
 
 
-def test_personalized_empty_when_none(pers_data):
-    assert personalized.list_runs() == []
-
-
-def test_personalized_delete_run_removes_folder(pers_data):
-    personalized.prepare_render("2026-08-31", "# brief\n")
-    folder = pers_data / "personalized" / "31-08-2026"
-    assert folder.is_dir()
-    assert personalized.delete_run("2026-08-31") is True
-    assert not folder.exists()
-    # second delete returns False (nothing to remove)
-    assert personalized.delete_run("2026-08-31") is False
-    # default run untouched
-    assert (pers_data / "31-08-2026" / "rank.json").exists()
-
-
-def test_personalized_delete_run_bad_date_raises(pers_data):
+def test_podcast_config_resolved_run_config_merges_overrides(tmp_path, monkeypatch):
+    monkeypatch.setattr(podcast_config, "CONFIG_PATH", tmp_path / "podcast_config.yaml")
+    podcast_config.save({
+        "user": {"audience": "intermediate", "familiar_topics": ["RLHF"]},
+        "podcast": {"window_days": 5, "length": "medium", "depth": "deep-dive"},
+    })
+    # Explicit podcast-wise overrides win; user-wise always from the file.
+    cfg = podcast_config.resolved_run_config({
+        "window_start": "2026-08-01", "window_end": "2026-08-08",
+        "length": "long", "depth": "brief"})
+    assert cfg["window_start"] == "2026-08-01"
+    assert cfg["window_end"] == "2026-08-08"
+    assert cfg["length"] == "long"
+    assert cfg["depth"] == "brief"
+    assert cfg["audience_level"] == "intermediate"
+    assert cfg["familiar_topics"] == ["RLHF"]
+    # Missing override keys fall back to the file; no overrides (auto-run)
+    # resolves the rolling window at call time.
+    cfg = podcast_config.resolved_run_config()
+    assert cfg["length"] == "medium" and cfg["depth"] == "deep-dive"
+    assert cfg["window_start"] is not None and cfg["window_end"] is not None
+    import datetime
+    today = datetime.date.today()
+    assert cfg["window_end"] == today.isoformat()
+    assert cfg["window_start"] == (today - datetime.timedelta(days=5)).isoformat()
+    # bad window span in the request is caught by pipeline validation
     with pytest.raises(ValueError):
-        personalized.delete_run("not-a-date")
+        podcast_config.resolved_run_config({
+            "window_start": "2026-01-01", "window_end": "2026-08-31"})
+
+
+# --- episodes: delete a history entry ---------------------------------------
+
+def test_episodes_delete_run(tmp_path, monkeypatch):
+    monkeypatch.setattr(episodes, "DATA_ROOT", tmp_path)
+    r = tmp_path / "31-08-2026"; r.mkdir()
+    (r / "episode.json").write_text("{}")
+    assert episodes.delete_run("2026-08-31") is True
+    assert not r.exists()
+    assert episodes.delete_run("2026-08-31") is False
+    with pytest.raises(ValueError):
+        episodes.delete_run("not-a-date")
 
 
 # --- jobs: env threading ---------------------------------------------------

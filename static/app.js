@@ -2,9 +2,12 @@
 
 const $ = (sel) => document.querySelector(sel);
 let activeDate = null;
-let activeTab = "default";   // "default" | "personalized"
 let pollTimer = null;
 let scheduleCron = null;
+// Persistent podcast config (data/podcast_config.yaml). Null until loaded;
+// the app forces the setup dialog when the file doesn't exist yet.
+let podcastConfig = null;
+let firstRun = true;
 
 // --- brief parsing ---------------------------------------------------------
 // Brief format (see pipeline/generate.py _brief_text):
@@ -69,21 +72,15 @@ function renderBrief(parsed) {
   return out.join("\n").trimEnd() + "\n";
 }
 
-// --- episodes list (tab-aware) --------------------------------------------
-
-function apiBase() {
-  return activeTab === "personalized" ? "/api/personalized" : "/api/episodes";
-}
+// --- episodes list (single history) ----------------------------------------
 
 async function loadEpisodes() {
   const ul = $("#episodes");
   ul.innerHTML = "";
-  const res = await fetch(apiBase());
+  const res = await fetch("/api/episodes");
   const eps = await res.json();
   if (eps.length === 0) {
-    ul.innerHTML = activeTab === "personalized"
-      ? '<li class="muted">No personalized renders yet.</li>'
-      : '<li class="muted">No episodes yet. Generate one.</li>';
+    ul.innerHTML = '<li class="muted">No episodes yet. Generate one.</li>';
     return;
   }
   for (const ep of eps) {
@@ -99,48 +96,36 @@ async function loadEpisodes() {
   }
 }
 
-// --- episode detail (tab-aware) -------------------------------------------
+// --- episode detail ---------------------------------------------------------
 
 async function selectEpisode(date) {
   activeDate = date;
   document.querySelectorAll("#episodes li").forEach((li) =>
     li.classList.toggle("active", li.dataset.date === date));
-  const res = await fetch(`${apiBase()}/${date}`);
+  const res = await fetch(`/api/episodes/${date}`);
   if (!res.ok) { $("#detail").innerHTML = "<p>Not found.</p>"; return; }
   const run = await res.json();
   renderDetail(run);
 }
 
-function audioUrl(date) {
-  return `${apiBase()}/${date}/audio`;
-}
-
 function renderDetail(run) {
   const sec = $("#detail");
   const audio = run.has_audio
-    ? `<audio controls preload="metadata" src="${audioUrl(run.date)}"></audio>`
+    ? `<audio controls preload="metadata" src="/api/episodes/${run.date}/audio"></audio>`
     : '<p class="muted">No audio for this run.</p>';
-  // Only default-tab episodes can be personalized (personalized renders are
-  // already curated; re-personalizing from a personalized render is out of scope).
-  const personalizeBtn = activeTab === "default"
-    ? '<button id="btn-personalize" class="primary">Personalize</button>' : "";
-  // Personalized renders can be deleted; default episodes are shared, so no delete.
-  const deleteBtn = activeTab === "personalized"
-    ? '<button id="btn-delete" class="danger">Delete</button>' : "";
-  // Brief / Transcript tabs. The transcript tab is only shown when one exists.
-  const transcriptTab = run.has_transcript
-    ? `<button data-dtab="transcript">Transcript</button>` : "";
+  // Every history entry can be re-rendered from an edited brief (replaces
+  // the episode in place) or deleted outright.
   sec.innerHTML = `
     <div class="detail-head">
       <h2>${run.date}</h2>
       <span class="muted">${run.items} items · ${run.selection_source || "auto"}</span>
-      ${personalizeBtn}
-      ${deleteBtn}
+      <button id="btn-personalize" class="primary">Edit brief</button>
+      <button id="btn-delete" class="danger">Delete</button>
     </div>
     ${audio}
     <div class="tabs" id="detail-tabs">
       <button data-dtab="brief" class="active">Brief</button>
-      ${transcriptTab}
+      ${run.has_transcript ? `<button data-dtab="transcript">Transcript</button>` : ""}
     </div>
     <div class="tab-body markdown" id="brief"></div>
     <div class="tab-body markdown hidden" id="transcript"></div>`;
@@ -150,8 +135,8 @@ function renderDetail(run) {
   }
   document.querySelectorAll("#detail-tabs button").forEach((b) =>
     b.onclick = () => switchDetailTab(b.dataset.dtab));
-  if ($("#btn-personalize")) $("#btn-personalize").onclick = () => openPersonalize(run);
-  if ($("#btn-delete")) $("#btn-delete").onclick = () => deletePersonalized(run.date);
+  $("#btn-personalize").onclick = () => openPersonalize(run);
+  $("#btn-delete").onclick = () => deleteEpisode(run.date);
 }
 
 function switchDetailTab(tab) {
@@ -188,9 +173,9 @@ function renderTranscript(md) {
   return html;
 }
 
-async function deletePersonalized(date) {
-  if (!confirm(`Delete the personalized render for ${date}? This cannot be undone.`)) return;
-  const res = await fetch(`/api/personalized/${date}`, { method: "DELETE" });
+async function deleteEpisode(date) {
+  if (!confirm(`Delete the episode for ${date} from history? This cannot be undone.`)) return;
+  const res = await fetch(`/api/episodes/${date}`, { method: "DELETE" });
   if (!res.ok) {
     if (res.status === 404) { alert("Already gone."); }
     else { alert("Delete failed: " + (await res.text())); }
@@ -213,7 +198,7 @@ function renderMarkdown(md) {
     if (/^##\s/.test(line)) { closeList(); html += `<h2>${esc(line.replace(/^##\s/, ""))}</h2>`; continue; }
     const m = line.match(/^- \[([^\]]+)\]\(([^)]+)\)(?:\s*·\s*\[PDF\]\(([^)]+)\))?(?:\s*—\s*score\s*([\d.]+))?\s*$/);
     if (m) {
-      if (!inList) { html += "<ul class=\"brief-items\">"; inList = true; }
+      if (inList) { html += "</ul>"; inList = false; }
       const [_, title, url, pdfUrl, score] = m;
       let item = `<a href="${esc(url)}" target="_blank" rel="noopener">${esc(title)}</a>`;
       if (pdfUrl) item += ` · <a class="pdf" href="${esc(pdfUrl)}" target="_blank" rel="noopener">PDF</a>`;
@@ -234,7 +219,7 @@ function renderMarkdown(md) {
   return html;
 }
 
-// --- personalization -------------------------------------------------------
+// --- brief editing + re-render (replaces the episode in place) --------------
 
 async function openPersonalize(run) {
   if (!run.brief) { alert("No brief for this run."); return; }
@@ -257,10 +242,10 @@ function renderPersonalize(parsed, run) {
   const count = () => allItems.filter((it) => !it.removed).length;
   sec.innerHTML = `
     <div class="detail-head">
-      <h2>Personalize — ${run.date}</h2>
+      <h2>Edit brief — ${run.date}</h2>
       <span class="muted" id="perso-count">${count()} items kept</span>
     </div>
-    <p class="muted">Delete items to drop them from the audio. "Generate audio" re-renders episode.mp3 with your selection.</p>
+    <p class="muted">Delete items to drop them from the audio. "Generate audio" re-renders this episode's mp3 with your selection, replacing it in history.</p>
     <div class="perso-list" id="perso-list"></div>
     <div class="perso-actions-row">
       <button id="btn-generate" class="primary">Generate audio</button>
@@ -300,7 +285,7 @@ function renderPersonalize(parsed, run) {
   $("#btn-generate").onclick = async () => {
     const kept = count();
     if (kept === 0) { alert("Keep at least one item."); return; }
-    if (!confirm(`Render audio with ${kept} items into the personalized library?`)) return;
+    if (!confirm(`Re-render the audio for ${run.date} with ${kept} items? The existing episode is replaced.`)) return;
     const brief_md = renderBrief(parsed);
     $("#btn-generate").disabled = true;
     const res = await fetch(`/api/runs/${run.date}/generate`, {
@@ -310,9 +295,6 @@ function renderPersonalize(parsed, run) {
     if (res.status === 409) { alert("A run is already active. Wait for it to finish."); $("#btn-generate").disabled = false; return; }
     if (!res.ok) { alert("Failed to start: " + (await res.text())); $("#btn-generate").disabled = false; return; }
     const job = await res.json();
-    // Switch to the personalized tab so the run panel's completion handler
-    // selects the freshly-rendered episode from the personalized library.
-    switchTab("personalized");
     openRunPanel(job);
   };
 }
@@ -322,7 +304,7 @@ function esc(s) {
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
-// --- run panel (live log) --------------------------------------------------
+// --- run panel (live log) ---------------------------------------------------
 
 async function openRunPanel(job) {
   const panel = $("#run-panel");
@@ -367,55 +349,143 @@ function renderProgress(p) {
 }
 $("#run-close").onclick = () => { $("#run-panel").classList.add("hidden"); if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } };
 
-// --- new episode button + config form --------------------------------------
+// --- modal plumbing ----------------------------------------------------------
+
+function openModal(id) {
+  $("#modal-backdrop").classList.remove("hidden");
+  document.querySelectorAll(".modal").forEach((m) => m.classList.add("hidden"));
+  $("#" + id).classList.remove("hidden");
+}
+
+function closeModals() {
+  $("#modal-backdrop").classList.add("hidden");
+}
+
+// --- persistent config (setup on first run, Settings afterwards) ------------
 
 const CFG_LENGTH_MIN = { short: 10, medium: 17.5, long: 30 };
 const CFG_DEPTH_MIN = { brief: 1.0, "deep-dive": 2.0 };
 
-function readConfig() {
-  const cfg = {};
-  if ($("#cfg-window-start").value) cfg.window_start = $("#cfg-window-start").value;
-  if ($("#cfg-window-end").value) cfg.window_end = $("#cfg-window-end").value;
-  cfg.audience_level = $("#cfg-audience").value;
-  const familiar = $("#cfg-familiar").value.split(",").map((s) => s.trim()).filter(Boolean);
-  if (familiar.length) cfg.familiar_topics = familiar;
-  cfg.length = $("#cfg-length").value;
-  cfg.depth = $("#cfg-depth").value;
-  return cfg;
+function updateDerivedMeta(lengthSel, depthSel, sourcesId, minutesId) {
+  const n = Math.round(CFG_LENGTH_MIN[$(lengthSel).value] / CFG_DEPTH_MIN[$(depthSel).value]);
+  $(sourcesId).textContent = Math.max(4, Math.min(30, n));
+  $(minutesId).textContent = Math.round(CFG_LENGTH_MIN[$(lengthSel).value]);
 }
 
-function updateCfgMeta() {
-  const n = Math.round(CFG_LENGTH_MIN[$("#cfg-length").value] / CFG_DEPTH_MIN[$("#cfg-depth").value]);
-  const sources = Math.max(4, Math.min(30, n));
-  $("#cfg-sources").textContent = sources;
-  $("#cfg-minutes").textContent = Math.round(
-    CFG_LENGTH_MIN[$("#cfg-length").value]);
+function fillSettingsForm() {
+  $("#set-audience").value = podcastConfig.user.audience;
+  $("#set-familiar").value = (podcastConfig.user.familiar_topics || []).join(", ");
+  $("#set-window-days").value = podcastConfig.podcast.window_days;
+  $("#set-length").value = podcastConfig.podcast.length;
+  $("#set-depth").value = podcastConfig.podcast.depth;
+  updateDerivedMeta("#set-length", "#set-depth", "#set-sources", "#set-minutes");
 }
-["cfg-length", "cfg-depth"].forEach((id) =>
-  $("#" + id).addEventListener("change", updateCfgMeta));
-updateCfgMeta();
 
-$("#btn-new").onclick = async () => {
-  if (!confirm("Run collect → rank → generate now? This takes several minutes.")) return;
-  const res = await fetch("/api/runs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ config: readConfig() }) });
+function readSettingsForm() {
+  return {
+    user: {
+      audience: $("#set-audience").value,
+      familiar_topics: $("#set-familiar").value.split(",").map((s) => s.trim()).filter(Boolean),
+    },
+    podcast: {
+      window_days: parseInt($("#set-window-days").value, 10),
+      length: $("#set-length").value,
+      depth: $("#set-depth").value,
+    },
+  };
+}
+
+async function loadConfig() {
+  const res = await fetch("/api/config");
+  const data = await res.json();
+  podcastConfig = data.config;
+  firstRun = data.first_run;
+  if (firstRun) {
+    // First use: the user must write the config file before anything runs.
+    $("#settings-title").textContent = "Set up your podcast";
+    $("#btn-settings-cancel").classList.add("hidden");
+    fillSettingsForm();
+    openModal("modal-settings");
+  }
+}
+
+function openSettings() {
+  $("#settings-title").textContent = "Podcast settings";
+  $("#btn-settings-cancel").classList.remove("hidden");
+  fillSettingsForm();
+  openModal("modal-settings");
+}
+
+$("#btn-settings").onclick = openSettings;
+$("#btn-settings-cancel").onclick = () => { if (!firstRun) closeModals(); };
+["#set-length", "#set-depth"].forEach((sel) =>
+  $(sel).addEventListener("change", () =>
+    updateDerivedMeta("#set-length", "#set-depth", "#set-sources", "#set-minutes")));
+
+$("#btn-settings-save").onclick = async () => {
+  const body = readSettingsForm();
+  const res = await fetch("/api/config", {
+    method: "PUT", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) { alert("Save failed: " + (await res.text())); return; }
+  const data = await res.json();
+  podcastConfig = data.config;
+  firstRun = false;
+  closeModals();
+};
+
+// --- generate new episode dialog ---------------------------------------------
+
+function isoDate(d) { return d.toISOString().slice(0, 10); }
+
+function openGenerate() {
+  if (firstRun || !podcastConfig) {
+    alert("Set up your podcast config first.");
+    openSettings();
+    return;
+  }
+  const end = new Date();
+  const start = new Date(end);
+  start.setDate(start.getDate() - podcastConfig.podcast.window_days);
+  $("#gen-window-start").value = isoDate(start);
+  $("#gen-window-end").value = isoDate(end);
+  $("#gen-length").value = podcastConfig.podcast.length;
+  $("#gen-depth").value = podcastConfig.podcast.depth;
+  updateDerivedMeta("#gen-length", "#gen-depth", "#gen-sources", "#gen-minutes");
+  openModal("modal-generate");
+}
+
+$("#btn-new").onclick = openGenerate;
+$("#btn-generate-cancel").onclick = closeModals;
+["#gen-length", "#gen-depth"].forEach((sel) =>
+  $(sel).addEventListener("change", () =>
+    updateDerivedMeta("#gen-length", "#gen-depth", "#gen-sources", "#gen-minutes")));
+
+$("#btn-generate-run").onclick = async () => {
+  const body = {
+    podcast: {
+      window_start: $("#gen-window-start").value,
+      window_end: $("#gen-window-end").value,
+      length: $("#gen-length").value,
+      depth: $("#gen-depth").value,
+    },
+  };
+  if (!body.podcast.window_start || !body.podcast.window_end) {
+    alert("Window start and end are required."); return;
+  }
+  $("#btn-generate-run").disabled = true;
+  const res = await fetch("/api/runs", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  $("#btn-generate-run").disabled = false;
   if (res.status === 409) { alert("A run is already active."); return; }
   if (!res.ok) { alert("Failed to start: " + (await res.text())); return; }
+  closeModals();
   const job = await res.json();
   openRunPanel(job);
 };
-
-// --- tabs (Default / My library) ------------------------------------------
-
-function switchTab(tab) {
-  activeTab = tab;
-  activeDate = null;
-  document.querySelectorAll(".list-tabs button").forEach((b) =>
-    b.classList.toggle("active", b.dataset.tab === tab));
-  loadEpisodes();
-  $("#detail").innerHTML = '<p class="muted">Select an episode on the left.</p>';
-}
-document.querySelectorAll(".list-tabs button").forEach((b) =>
-  b.onclick = () => switchTab(b.dataset.tab));
 
 // --- schedule ---------------------------------------------------------------
 
@@ -436,6 +506,7 @@ $("#schedule-toggle").onchange = async (e) => {
 
 // --- init ------------------------------------------------------------------
 
+loadConfig();
 loadEpisodes();
 loadSchedule();
 // refresh episode list periodically so scheduled runs show up.

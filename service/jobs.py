@@ -6,9 +6,9 @@ the service) and tails its stdout/stderr into an in-memory ring buffer plus a
 log file under ``data/.jobs/<job_id>.log``.
 
 Two job kinds share the same lock:
-  - full run:           ``python -m pipeline run [--date D] [--no-audio]``
-  - personalized render: ``python -m pipeline run --only generate --date D
-                          --brief-in data/D/podcast_brief.md``
+  - full run:  ``python -m pipeline run [--date D] [--no-audio] [config flags]``
+  - re-render: ``python -m pipeline run --only generate --date D --brief-in
+                <edited brief> [--config <run config.yaml>] [user overrides]``
 
 Both produce a finished episode (or fail and leave the brief).
 
@@ -241,6 +241,26 @@ def full_run_cmd(date: str | None = None, no_audio: bool = False,
     return cmd
 
 
-def generate_cmd(date: str, brief_in: pathlib.Path) -> list[str]:
-    return [sys.executable, "-m", "pipeline", "run",
-            "--only", "generate", "--date", date, "--brief-in", str(brief_in)]
+def generate_cmd(date: str, brief_in: pathlib.Path,
+                 config: dict | None = None,
+                 config_path: str | None = None) -> list[str]:
+    """Build the CLI argv for a generate-only re-render.
+
+    ``config_path`` points at the target run's stored config.yaml, restoring
+    that episode's original podcast-wise knobs (length/depth/window) for the
+    LLM/TTS; ``config`` carries user-wise overrides (audience_level,
+    familiar_topics from the persistent config) applied on top as CLI flags.
+    Pipeline resolution order is code defaults < config file < CLI flags, so
+    the user's current knowledge level always wins.
+    """
+    cmd = [sys.executable, "-m", "pipeline", "run",
+           "--only", "generate", "--date", date, "--brief-in", str(brief_in)]
+    if config_path:
+        cmd += ["--config", str(config_path)]
+    value = (config or {}).get("audience_level")
+    if value:
+        cmd += ["--audience", str(value)]
+    familiar = (config or {}).get("familiar_topics")
+    if familiar:
+        cmd += ["--familiar", ",".join(str(t) for t in familiar)]
+    return cmd

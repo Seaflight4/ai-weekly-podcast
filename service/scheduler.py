@@ -47,11 +47,18 @@ def _parse_cron(expr: str) -> CronTrigger:
 
 
 def _fire():
-    """Scheduler callback: enqueue a full run unless one is active."""
+    """Scheduler callback: enqueue a full run unless one is active.
+
+    The run uses the full persistent config (``data/podcast_config.yaml``):
+    user-wise knobs always, podcast-wise resolved at fire time with a fresh
+    rolling window (end = today, start = today - window_days).
+    """
     from . import app  # noqa: avoid circular import at module load
     from . import episodes
+    from . import podcast_config
     env = {"PIPELINE_DATA_ROOT": str(episodes.DATA_ROOT)}
-    job, err = jobs.submit("full", jobs.full_run_cmd(), date=None, env=env)
+    cmd = jobs.full_run_cmd(config=podcast_config.resolved_run_config())
+    job, err = jobs.submit("full", cmd, date=None, env=env)
     if err == "busy":
         print("[scheduler] skipped — a run is already active")
         app.broadcast({"type": "schedule-skip", "reason": "run-in-progress"})

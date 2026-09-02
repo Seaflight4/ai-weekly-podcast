@@ -311,7 +311,7 @@ def _arxiv_pages(date: str, start: datetime.date):
         for e in page:
             published = (e.findtext("{http://www.w3.org/2005/Atom}published") or "").strip()
             pub_date = published[:10]
-            if _is_recent(pub_date, start, day):
+            if _is_recent(pub_date, cutoff, day):
                 base_id = _arxiv_id(e.findtext("{http://www.w3.org/2005/Atom}id") or "")
                 if base_id and base_id not in seen_ids and not _withdrawn(e):
                     seen_ids.add(base_id)

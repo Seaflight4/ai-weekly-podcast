@@ -15,52 +15,14 @@
         <input type="checkbox" id="schedule-toggle">
         <span class="slider"></span>
       </label>
-      <button id="btn-new" title="Run collect → rank → generate now">Generate new episode</button>
+      <button id="btn-settings" title="Edit the persistent podcast config">Settings</button>
+      <button id="btn-new" class="primary" title="Run collect → rank → generate now">Generate new episode</button>
     </div>
   </header>
 
-  <details id="customize-box" class="customize-box">
-    <summary>Customize episode</summary>
-    <div class="cfg-grid">
-      <label>Window start
-        <input type="date" id="cfg-window-start">
-      </label>
-      <label>Window end
-        <input type="date" id="cfg-window-end">
-      </label>
-      <label>Audience
-        <select id="cfg-audience">
-          <option value="researcher" selected>Researcher</option>
-          <option value="intermediate">Intermediate</option>
-          <option value="beginner">Beginner</option>
-        </select>
-      </label>
-      <label>Familiar topics (comma-separated)
-        <input type="text" id="cfg-familiar" placeholder="e.g. transformers, RLHF">
-      </label>
-      <label>Podcast length
-        <select id="cfg-length">
-          <option value="short">Short (~10 min)</option>
-          <option value="medium" selected>Medium (15–20 min)</option>
-          <option value="long">Long (~30 min)</option>
-        </select>
-      </label>
-      <label>Topic depth
-        <select id="cfg-depth">
-          <option value="brief">Brief (~1 min/source)</option>
-          <option value="deep-dive" selected>Deep-dive (~2 min/source)</option>
-        </select>
-      </label>
-    </div>
-    <p class="muted">Derived sources: <span id="cfg-sources">9</span> · est. <span id="cfg-minutes">18</span> min</p>
-  </details>
-
   <main>
     <aside id="episode-list">
-      <div class="list-tabs">
-        <button data-tab="default" class="active">Default</button>
-        <button data-tab="personalized">Personalized</button>
-      </div>
+      <h2>History</h2>
       <ul id="episodes"></ul>
     </aside>
 
@@ -68,6 +30,85 @@
       <p class="muted">Select an episode on the left.</p>
     </section>
   </main>
+
+  <div id="modal-backdrop" class="modal-backdrop hidden">
+    <div id="modal-settings" class="modal hidden">
+      <h3 id="settings-title">Podcast settings</h3>
+      <p class="muted">Saved to data/podcast_config.yaml. Knowledge settings apply to every generation; the podcast defaults drive auto-runs and pre-fill the generate dialog.</p>
+      <div class="modal-section">
+        <h4>For you (applies to all episodes)</h4>
+        <div class="cfg-grid">
+          <label>Audience
+            <select id="set-audience">
+              <option value="researcher">Researcher</option>
+              <option value="intermediate">Intermediate</option>
+              <option value="beginner">Beginner</option>
+            </select>
+          </label>
+          <label>Familiar topics (comma-separated)
+            <input type="text" id="set-familiar" placeholder="e.g. transformers, RLHF">
+          </label>
+        </div>
+      </div>
+      <div class="modal-section">
+        <h4>Episode shape (auto-run defaults &amp; generate pre-fill)</h4>
+        <div class="cfg-grid">
+          <label>Rolling window (days)
+            <input type="number" id="set-window-days" min="1" max="14" value="7">
+          </label>
+          <label>Podcast length
+            <select id="set-length">
+              <option value="short">Short (~10 min)</option>
+              <option value="medium">Medium (15–20 min)</option>
+              <option value="long">Long (~30 min)</option>
+            </select>
+          </label>
+          <label>Topic depth
+            <select id="set-depth">
+              <option value="brief">Brief (~1 min/source)</option>
+              <option value="deep-dive">Deep-dive (~2 min/source)</option>
+            </select>
+          </label>
+        </div>
+        <p class="muted">Derived sources: <span id="set-sources">9</span> · est. <span id="set-minutes">18</span> min</p>
+      </div>
+      <div class="modal-actions">
+        <button id="btn-settings-cancel">Cancel</button>
+        <button id="btn-settings-save" class="primary">Save</button>
+      </div>
+    </div>
+
+    <div id="modal-generate" class="modal hidden">
+      <h3>Generate new episode</h3>
+      <p class="muted">Confirm the episode shape. Your knowledge settings (audience, familiar topics) always come from the saved config.</p>
+      <div class="cfg-grid">
+        <label>Window start
+          <input type="date" id="gen-window-start">
+        </label>
+        <label>Window end
+          <input type="date" id="gen-window-end">
+        </label>
+        <label>Podcast length
+          <select id="gen-length">
+            <option value="short">Short (~10 min)</option>
+            <option value="medium">Medium (15–20 min)</option>
+            <option value="long">Long (~30 min)</option>
+          </select>
+        </label>
+        <label>Topic depth
+          <select id="gen-depth">
+            <option value="brief">Brief (~1 min/source)</option>
+            <option value="deep-dive">Deep-dive (~2 min/source)</option>
+          </select>
+        </label>
+      </div>
+      <p class="muted">Derived sources: <span id="gen-sources">9</span> · est. <span id="gen-minutes">18</span> min</p>
+      <div class="modal-actions">
+        <button id="btn-generate-cancel">Cancel</button>
+        <button id="btn-generate-run" class="primary">Run now</button>
+      </div>
+    </div>
+  </div>
 
   <div id="run-panel" class="hidden">
     <div class="run-panel-head">

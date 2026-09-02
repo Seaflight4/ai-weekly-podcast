@@ -94,9 +94,9 @@ def test_latest_dir_raises_when_no_run_folders(tmp_path, monkeypatch):
 
 
 def test_store_root_from_env(tmp_path, monkeypatch):
-    """PIPELINE_DATA_ROOT redirects the pipeline's data root, so a
-    personalized render can write to a per-user library dir without touching
-    the default data/ tree. Read at module import time (per-subprocess)."""
+    """PIPELINE_DATA_ROOT redirects the pipeline's data root, so a run can
+    write into a different history tree (the service points it at
+    data/history). Read at module import time (per-subprocess)."""
     import importlib, os
     monkeypatch.setenv("PIPELINE_DATA_ROOT", str(tmp_path))
     # store reads the env at import; reload so the new value takes effect.

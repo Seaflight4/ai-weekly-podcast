@@ -1,6 +1,8 @@
 import datetime, json, os, pathlib
 
-ROOT = pathlib.Path(os.environ.get("PIPELINE_DATA_ROOT", "data/default"))
+# Same tree the service reads (service/episodes.py). Overridable per
+# subprocess via PIPELINE_DATA_ROOT, which the service always sets.
+ROOT = pathlib.Path(os.environ.get("PIPELINE_DATA_ROOT", "data/history"))
 DATE_FORMAT = "%d-%m-%Y"
 
 

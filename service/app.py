@@ -1,8 +1,9 @@
 """FastAPI service over the pipeline.
 
-Serves existing episodes (read from data/), lets a user trigger a full run
-or a personalized re-render, and exposes the scheduler config. The static
-frontend is served at /.
+Serves the episode history (read from data/history/), lets a user trigger a
+full run or a brief-edit re-render (which replaces a date's episode in
+place), manages the persistent podcast config (data/podcast_config.yaml),
+and exposes the scheduler config. The static frontend is served at /.
 """
 from __future__ import annotations
 
@@ -15,7 +16,7 @@ from fastapi import FastAPI, HTTPException, Body
 from fastapi.responses import FileResponse, PlainTextResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import episodes, jobs, personalized, scheduler
+from . import episodes, jobs, podcast_config, scheduler
 
 STATIC_DIR = pathlib.Path(__file__).resolve().parent.parent / "static"
 
@@ -79,6 +80,37 @@ def get_transcript(date: str):
     return PlainTextResponse(p.read_text(encoding="utf-8"), media_type="text/markdown")
 
 
+@app.delete("/api/episodes/{date}")
+def delete_episode(date: str):
+    """Delete a history entry — folder and all artifacts. Cannot be undone."""
+    try:
+        removed = episodes.delete_run(date)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    if not removed:
+        raise HTTPException(404, f"no episode for {date}")
+    return {"deleted": date}
+
+
+# --- podcast config ---------------------------------------------------------
+
+@app.get("/api/config")
+def get_config():
+    """The persistent podcast config. ``first_run`` is true until the user
+    saves it once (the UI shows a setup dialog pre-filled with defaults)."""
+    return {"first_run": not podcast_config.exists(),
+            "config": podcast_config.load()}
+
+
+@app.put("/api/config")
+def put_config(payload: dict = Body(default={})):
+    try:
+        stored = podcast_config.save(payload)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"first_run": False, "config": stored}
+
+
 # --- runs -------------------------------------------------------------------
 
 @app.get("/api/runs")
@@ -92,9 +124,19 @@ def list_runs():
 
 @app.post("/api/runs")
 def submit_run(payload: dict = Body(default={})):
+    """Start a full collect → rank → generate run.
+
+    Body: {"date": ..., "no_audio": ..., "podcast": {"window_start",
+    "window_end", "length", "depth"}} — the podcast section is the user's
+    confirmed dialog values. User-wise knobs (audience, familiar topics)
+    come from the persistent config, never from the request.
+    """
     date = payload.get("date")
     no_audio = bool(payload.get("no_audio", False))
-    config = payload.get("config") or {}
+    try:
+        config = podcast_config.resolved_run_config(payload.get("podcast"))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     cmd = jobs.full_run_cmd(date=date, no_audio=no_audio, config=config)
     env = {"PIPELINE_DATA_ROOT": str(episodes.DATA_ROOT)}
     job, err = jobs.submit("full", cmd, date=date, env=env)
@@ -110,26 +152,34 @@ def submit_run(payload: dict = Body(default={})):
 
 @app.post("/api/runs/{date}/generate")
 def submit_generate(date: str, payload: dict = Body(default={})):
-    """Re-render audio from an edited brief into the shared personalized
-    library.
+    """Re-render a history episode from an edited brief, replacing it in
+    place.
 
     Body: {"brief_markdown": "..."} — the user's edited brief. We write it
-    + a copy of rank.json into ``data/personalized/<date>/``, then run
-    ``pipeline run --only generate --brief-in ...`` with
-    ``PIPELINE_DATA_ROOT=data/personalized`` so the subprocess writes
-    episode.mp3 + episode.json into the personalized library. The default
-    ``data/default/<date>/`` is never touched.
+    over ``data/history/<date>/podcast_brief.md`` (rank.json already lives
+    in that folder), then run ``pipeline run --only generate --brief-in ...``
+    with the run's stored config.yaml for podcast-wise knobs and CLI
+    overrides for the persistent config's user-wise knobs. The date's
+    episode.mp3 + episode.json are regenerated; ``selection_source`` flips
+    to "customized".
     """
     brief_md = payload.get("brief_markdown")
     if not brief_md:
         raise HTTPException(400, "body must include 'brief_markdown'")
-    try:
-        run_dir = personalized.prepare_render(date, brief_md)
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-    brief_path = run_dir / "podcast_brief.md"
-    cmd = jobs.generate_cmd(date, brief_path)
-    env = {"PIPELINE_DATA_ROOT": str(personalized.PERSONALIZED_ROOT)}
+    folder = episodes.DATA_ROOT / episodes._normalize_date(date)
+    if not (folder / "rank.json").exists():
+        raise HTTPException(404, f"no ranked pool for {date} — cannot re-render")
+    brief_path = folder / "podcast_brief.md"
+    brief_path.write_text(brief_md, encoding="utf-8")
+    user = podcast_config.load()["user"]
+    run_cfg = folder / "config.yaml"
+    cmd = jobs.generate_cmd(
+        date, brief_path,
+        config={"audience_level": user["audience"],
+                "familiar_topics": user["familiar_topics"]},
+        config_path=run_cfg if run_cfg.exists() else None,
+    )
+    env = {"PIPELINE_DATA_ROOT": str(episodes.DATA_ROOT)}
     job, err = jobs.submit("generate", cmd, date=date, env=env)
     if err == "busy":
         active = jobs.active_job()
@@ -150,58 +200,6 @@ def get_run(job_id: str):
         if j["id"] == job_id:
             return j
     raise HTTPException(404, "no such job")
-
-
-# --- personalized renders (shared library) --------------------------------
-
-@app.get("/api/personalized")
-def list_personalized():
-    return personalized.list_runs()
-
-
-@app.get("/api/personalized/{date}")
-def get_personalized(date: str):
-    run = personalized.get_run(date)
-    if run is None:
-        raise HTTPException(404, f"no render for {date}")
-    return run
-
-
-@app.get("/api/personalized/{date}/audio")
-def get_personalized_audio(date: str):
-    p = personalized.audio_path(date)
-    if p is None:
-        raise HTTPException(404, "no audio for this render")
-    return FileResponse(p, media_type="audio/mpeg", filename="episode.mp3")
-
-
-@app.get("/api/personalized/{date}/brief")
-def get_personalized_brief(date: str):
-    p = personalized.brief_path(date)
-    if p is None:
-        raise HTTPException(404, "no brief for this render")
-    return PlainTextResponse(p.read_text(encoding="utf-8"), media_type="text/markdown")
-
-
-@app.get("/api/personalized/{date}/transcript")
-def get_personalized_transcript(date: str):
-    p = personalized.transcript_path(date)
-    if p is None:
-        raise HTTPException(404, "no transcript for this render")
-    return PlainTextResponse(p.read_text(encoding="utf-8"), media_type="text/markdown")
-
-
-@app.delete("/api/personalized/{date}")
-def delete_personalized(date: str):
-    """Delete a personalized render. The default episode for the same date
-    is never affected."""
-    try:
-        removed = personalized.delete_run(date)
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-    if not removed:
-        raise HTTPException(404, f"no render for {date}")
-    return {"deleted": date}
 
 
 # --- schedule --------------------------------------------------------------

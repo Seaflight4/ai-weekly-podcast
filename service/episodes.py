@@ -1,4 +1,4 @@
-"""Scan data/default/ for run folders and load their artifacts.
+"""Scan data/history/ for run folders and load their artifacts.
 
 The filesystem is the source of truth — no DB. A run folder is named
 ``DD-MM-YYYY`` (the format the pipeline writes). Each folder may contain:
@@ -10,16 +10,18 @@ The filesystem is the source of truth — no DB. A run folder is named
     episode.mp3      — the produced audio (absent if generation failed)
     transcript.md    — ground-truth (backend) or whisper transcript
 
-The helpers are written root-agnostic so ``personalized.py`` reuses them for
-the shared personalized library under ``data/personalized/``.
+One shared root for every episode, however it was created (scheduled
+auto-run, manual generate, or a brief-edit re-render that replaces a date's
+episode in place).
 """
 from __future__ import annotations
 
 import datetime
 import json
 import pathlib
+import shutil
 
-DATA_ROOT = pathlib.Path("data/default")
+DATA_ROOT = pathlib.Path("data/history")
 DATE_FORMAT = "%d-%m-%Y"
 
 
@@ -107,7 +109,7 @@ def _read_text(path: pathlib.Path) -> str | None:
         return None
 
 
-# --- public API (default episodes) ----------------------------------------
+# --- public API -----------------------------------------------------------
 
 def list_runs() -> list[dict]:
     return _list_runs(DATA_ROOT)
@@ -140,3 +142,16 @@ def run_folder(date: str) -> pathlib.Path:
     folder = DATA_ROOT / _normalize_date(date)
     folder.mkdir(parents=True, exist_ok=True)
     return folder
+
+
+def delete_run(date: str) -> bool:
+    """Delete the whole history entry for ``date`` — folder and artifacts.
+
+    Returns True if a folder existed and was removed, False if there was
+    nothing to delete. Raises ValueError for an unparseable date.
+    """
+    folder = DATA_ROOT / _normalize_date(date)
+    if not folder.is_dir():
+        return False
+    shutil.rmtree(folder)
+    return True

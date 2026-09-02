@@ -41,13 +41,7 @@ aside#episode-list {
   overflow-y: auto;
   padding: 0 12px 12px;
 }
-.list-tabs { display: flex; gap: 4px; padding: 10px 0 8px; }
-.list-tabs button {
-  border: none; background: none; border-bottom: 2px solid transparent;
-  padding: 4px 10px; border-radius: 0; font-size: 13px;
-}
-.list-tabs button.active { border-bottom-color: #2563eb; color: #2563eb; font-weight: 600; }
-aside h2 { font-size: 14px; margin: 4px 0 10px; color: #555; text-transform: uppercase; letter-spacing: 0.04em; }
+aside h2 { font-size: 14px; margin: 12px 0 10px; color: #555; text-transform: uppercase; letter-spacing: 0.04em; }
 aside ul { list-style: none; margin: 0; padding: 0; }
 aside li {
   padding: 9px 10px;
@@ -64,7 +58,6 @@ aside li.active { background: #e0eaff; border-color: #b8ccf5; }
 .badge-ready { background: #d4f5d4; color: #156530; }
 .badge-draft { background: #fff3cd; color: #856404; }
 .badge-empty { background: #eee; color: #666; }
-.badge-personalized { background: #e0eaff; color: #2a4d9c; }
 
 /* --- per-run customize panel --------------------------------------------- */
 .customize-box {
@@ -150,6 +143,22 @@ audio { width: 100%; margin: 12px 0 20px; }
 .slider::before { content: ""; position: absolute; height: 14px; width: 14px; left: 3px; top: 3px; background: #fff; border-radius: 50%; transition: 0.2s; }
 .switch input:checked + .slider { background: #2563eb; }
 .switch input:checked + .slider::before { transform: translateX(18px); }
+
+/* --- config modal (settings / setup / generate) --------------------------- */
+.modal-backdrop {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.35);
+  display: flex; align-items: center; justify-content: center; z-index: 200;
+}
+.modal {
+  background: #fff; border-radius: 10px; box-shadow: 0 8px 32px rgba(0,0,0,0.25);
+  width: 560px; max-width: calc(100vw - 40px); max-height: calc(100vh - 60px);
+  overflow-y: auto; padding: 18px 22px;
+}
+.modal h3 { margin: 0 0 6px; }
+.modal-section { margin: 14px 0; padding-top: 10px; border-top: 1px solid #eee; }
+.modal-section h4 { margin: 0 0 8px; font-size: 13px; color: #555; }
+.modal .muted { margin: 6px 0; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; }
 
 /* run panel */
 #run-panel {
