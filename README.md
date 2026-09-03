@@ -143,8 +143,17 @@ all Python deps. The service serves a single-page UI on port 8000.
 ```bash
 git clone <repo> && cd learn-ai-podcast-pipeline
 cp .env.example .env          # then set SKAINET_API_KEY
-docker compose up             # then open http://localhost:8000 in your browser
+docker compose up --build     # then open http://localhost:8000 in your browser
 ```
+
+Always use `--build`: a plain `docker compose up` silently reuses the
+last-built image, so after pulling new code you'd keep running the old UI —
+and if the frontend/root route is newer than the image, you'll get a
+`{"detail":"Not Found"}` 404 at `/`. With `--build` Docker rebuilds only the
+layers that changed (fast when deps are unchanged). The Dockerfile uses no
+BuildKit-specific features (`RUN --mount=`), so it builds on any engine —
+Linux Docker, Docker Desktop, or a homebrew CLI + colima setup — with no extra
+plugins to install.
 
 The container runs as root on purpose (so the `./data` bind mount is writable
 on any machine — Linux rootful/rootless, macOS/Windows Docker Desktop — with

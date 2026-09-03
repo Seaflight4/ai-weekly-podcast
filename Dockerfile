@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 FROM python:3.12-slim
 
 # ffmpeg is required by pydub for MP3 encoding in the podcastfy audio backend.
@@ -9,10 +8,10 @@ WORKDIR /app
 
 # 1) Install ONLY pinned dependencies first. This layer caches and only
 #    rebuilds when requirements.txt changes, so code edits skip it entirely.
-#    The BuildKit cache mount keeps wheels across builds (no re-downloads).
+#    No BuildKit-specific features (plain builder-compatible); purge pip's
+#    cache in the same layer so it doesn't bloat the image.
 COPY requirements.txt ./
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r requirements.txt
+RUN pip install -r requirements.txt && rm -rf /root/.cache/pip
 
 # 2) Copy source AFTER deps; editable install with --no-deps is fast (~secs).
 COPY pyproject.toml README.md ./
@@ -20,8 +19,7 @@ COPY pipeline ./pipeline
 COPY service ./service
 COPY static ./static
 
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -e . --no-deps
+RUN pip install -e . --no-deps && rm -rf /root/.cache/pip
 
 # data/ is mounted as a volume at runtime; episodes + job logs + the
 # podcast config persist there. Seeds (default episode.mp3s) come from the
