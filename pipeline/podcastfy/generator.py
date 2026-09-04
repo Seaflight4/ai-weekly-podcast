@@ -285,7 +285,13 @@ class SimplePodcastGenerator:
                 to ``"web"``.
         """
         if model_name is None:
-            model_name = os.environ.get("LLM_MODEL", DEFAULT_MODEL)
+            # Transcript generation is pinned to DeepSeek-V4-Flash. A heavier
+            # reasoning model (e.g. Pro) spends far more of max_output_tokens on
+            # a thinking preamble whose truncation kills the JSON and forces the
+            # empty/1-turn retry path. Always use Flash unless model_name is
+            # passed explicitly (programmatic override); LLM_MODEL must not
+            # silently redirect it.
+            model_name = DEFAULT_MODEL
 
         self.papers_dir = papers_dir or "papers"
         self.web_dir = web_dir or "web"
@@ -603,6 +609,15 @@ class SimplePodcastGenerator:
         pdf_extractor = SimplePDFExtractor()
         topic_titles = []
         for src in ordered:
+            # A source with NO content is dropped entirely (never aired): no
+            # excerpt in the brief AND no fetched full text. The collect stage
+            # already drops empty-body items, so this only fires for hand-
+            # edited briefs that keep a bare bullet with no excerpt.
+            has_full = ((src.kind == "arxiv" and src.arxiv_id and src.arxiv_id in pdf_by_id)
+                        or (src.kind == "blog" and src.url in web_by_url))
+            if not src.excerpt.strip() and not has_full:
+                print(f"[podcastfy] no content for topic, dropping: {src.title} ({src.url})")
+                continue
             topic_titles.append(src.title)
             combined_content += f"\n=== TOPIC: {src.title} ===\n"
             combined_content += f"SOURCE: {src.kind} · URL: {src.url}\n"

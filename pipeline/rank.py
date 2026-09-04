@@ -13,8 +13,9 @@ items from this week's AI news and research deserve airtime on the internal AI
 podcast. The audience is AI researchers who advise clients and build systems.
 
 You are given a JSON array of items, each with an integer "index", a "title",
-a "url", a "source" ("arxiv" or "hn"), and a "body" (an abstract for arxiv, the
-extracted page text for hn — which may be empty if the fetch failed). Score
+a "url", a "source" ("arxiv", "hn", or "hf"), and a "body" (an abstract for
+arxiv, the extracted page text for hn, a model-card README for hf — any may be
+empty if the fetch failed). Score
 each 0.0 to 1.0 on **how much a busy researcher needs to know this week**,
 using ONE source-agnostic scale.
 
@@ -35,7 +36,7 @@ directly comparable:
 - A typical niche or incremental paper ≈ 0.45.
 - A typical low-signal HN post ≈ 0.3.
 
-Worked per-source anchors (the two sources are judged together, but the pool
+Worked per-source anchors (the sources are judged together, but the pool
 is often lopsided — arXiv may far outnumber HN or vice versa. Do NOT let the
 majority source inflate its scores; rate each item against the anchors below,
 never against the other items in the batch):
@@ -44,6 +45,11 @@ never against the other items in the batch):
 - HN: a frontier model release, major incident, or pricing shock announced via
   blog = 0.9; a well-argued engineering writeup with real numbers = 0.7;
   a cool demo with no method transfer = 0.35; a gossip/pro-tip post = 0.3.
+- HF: a major open-weights model/checkpoint release, capable tool (inference,
+  quant, serving), or official implementation = 0.9; a niche fine-tune or
+  incremental update to a known repo = 0.45; a toy/personal demo model = 0.3.
+  A model release counts as heavily as a paper or blog release of the same
+  thing — it IS the artifact practitioners actually deploy.
 
 Thin-evidence rule: if an item NAMES a major event but has a thin or empty
 body (e.g. a launch post whose fetch failed), score it on the EVENT's

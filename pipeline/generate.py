@@ -176,6 +176,14 @@ def select_sources(ranked: list[RankedItem],
 
 # --- brief: a flat, source-grouped digest fed to the backend as a source ----
 
+# Source id -> human label for the brief's section headings. Order is the
+# podcast's canonical source order (papers first, then community, then releases).
+SOURCE_LABELS = {
+    "arxiv": "arXiv papers",
+    "hn": "Hacker News stories",
+    "hf": "Hugging Face model releases",
+}
+
 def _brief_text(chosen: list[RankedItem],
                 by_source: dict[str, list[RankedItem]],
                 audience_desc: str = "AI researchers",
@@ -188,11 +196,10 @@ def _brief_text(chosen: list[RankedItem],
         f"Audience: {audience_desc}.",
         "",
     ]
-    for source in ("arxiv", "hn"):
+    for source, label in SOURCE_LABELS.items():
         items = by_source.get(source, [])
         if not items:
             continue
-        label = "arXiv papers" if source == "arxiv" else "Hacker News stories"
         lines += [f"## {label} ({len(items)})", ""]
         for m in items:
             pdf = _paper_pdf_url(m)

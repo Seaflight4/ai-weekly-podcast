@@ -114,6 +114,171 @@ def test_store_root_from_env(tmp_path, monkeypatch):
         importlib.reload(s)
 
 
+# --- collect: source registry + data-driven cross-source dedup --------------
+
+def test_collect_source_registry():
+    """The collect stage is driven by a SOURCES registry; adding a source is
+    registering a collector (plus a label + dedup rule), not editing branches."""
+    from pipeline import collect
+    assert list(collect.SOURCES) == ["hn", "arxiv", "hf"]
+    assert all(callable(fn) for fn in collect.SOURCES.values())
+
+
+def test_collect_joins_all_source_branches(tmp_path, monkeypatch):
+    """collect() runs every registered branch and joins their items — the join
+    must key its futures dict by source name (regression: a flipped key/value
+    caused KeyError: 'hn' the moment any branch finished)."""
+    from pipeline import collect
+    import json
+
+    def fake_hn(date, start):
+        return [Item(title="hn-t", url="https://h.example/x", date="2026-09-03",
+                     body="body", source="hn")]
+
+    def fake_arxiv(date, start):
+        return [Item(title="ax-t", url="https://arxiv.org/abs/2601.00002",
+                     date="2026-09-03", body="abs", source="arxiv")]
+
+    def fake_hf(date, start):
+        return [Item(title="hf-t", url="https://huggingface.co/org/model",
+                     date="2026-09-03", body="readme", source="hf")]
+
+    monkeypatch.setattr(collect, "SOURCES",
+                        {"hn": fake_hn, "arxiv": fake_arxiv, "hf": fake_hf})
+    monkeypatch.setattr(collect.store, "run_dir", lambda date=None: tmp_path)
+    monkeypatch.setattr(collect.store, "write",
+                        lambda name, payload, date=None: (tmp_path / name)
+                        .write_text(json.dumps(payload, indent=2)))
+
+    out = collect.collect("2026-09-04", window_start="2026-09-03")
+    assert [i.source for i in out] == ["hn", "arxiv", "hf"]  # registry order
+    assert json.loads((tmp_path / "collect.json").read_text())[0]["title"] == "hn-t"
+
+
+def test_dedup_rules_hn_arxiv_twin_dropped():
+    """An HN item pointing at an arXiv paper we already collected is dropped
+    (the arXiv entry carries the full abstract)."""
+    from pipeline import collect
+    items = [
+        Item(title="paper", url="https://arxiv.org/abs/2601.12345", date="d",
+             body="abstract", source="arxiv"),
+        Item(title="HN link", url="https://arxiv.org/abs/2601.12345", date="d",
+             body="", source="hn"),
+        Item(title="keep", url="https://other.example/x", date="d", body="",
+             source="hn"),
+    ]
+    out = collect._dedup(items, collect.DEDUP_RULES)
+    assert [i.source + ":" + i.title for i in out] == [
+        "arxiv:paper", "hn:keep"]
+
+
+def test_dedup_rules_hn_hf_twin_dropped():
+    """An HN story pointing at a Hugging Face model card we collected is dropped
+    (the card is the canonical page)."""
+    from pipeline import collect
+    items = [
+        Item(title="org/model", url="https://huggingface.co/org/model", date="d",
+             body="readme", source="hf"),
+        Item(title="HN link", url="https://huggingface.co/org/model", date="d",
+             body="", source="hn"),
+    ]
+    out = collect._dedup(items, collect.DEDUP_RULES)
+    assert len(out) == 1 and out[0].source == "hf"
+
+
+def test_dedup_rules_hf_citing_collected_paper_dropped():
+    """An HF model card whose README cites an arXiv paper we already collected is
+    dropped (the paper already covers it, with the abstract)."""
+    from pipeline import collect
+    items = [
+        Item(title="paper", url="https://arxiv.org/abs/2601.98765", date="d",
+             body="abstract", source="arxiv"),
+        Item(title="org/model", url="https://huggingface.co/org/model", date="d",
+             body="official implementation of arxiv.org/abs/2601.98765",
+             source="hf"),
+    ]
+    out = collect._dedup(items, collect.DEDUP_RULES)
+    assert len(out) == 1 and out[0].source == "arxiv"
+
+
+def test_hf_window_and_traction_prefilter(monkeypatch):
+    """The HF branch keeps only in-window, non-private models with at least one
+    download or like (killing the stream of zero-traction junk)."""
+    from pipeline import collect
+    fetched = [
+        {"id": "org/real", "lastModified": "2026-08-30T10:00:00.000Z",
+         "downloads": 5, "likes": 1},
+        {"id": "junk/toy", "lastModified": "2026-08-29T10:00:00.000Z",
+         "downloads": 0, "likes": 0},
+        {"id": "org/private", "lastModified": "2026-08-31T10:00:00.000Z",
+         "private": True, "downloads": 9, "likes": 9},
+        {"id": "org/old", "lastModified": "2026-07-01T10:00:00.000Z",
+         "downloads": 1, "likes": 0},
+    ]
+    monkeypatch.setattr(collect, "_get_json", lambda url: fetched)
+    import datetime
+    out = collect._hf("2026-08-31", datetime.date(2026, 8, 24))
+    assert [i.title for i in out] == ["org/real"]
+    assert out[0].url == "https://huggingface.co/org/real"
+
+
+def test_hn_window_is_full_inclusive(monkeypatch):
+    """HN honors a full-inclusive [start, end] window: the end day is included
+    (previously `created_at < end-midnight` silently excluded all of it) and
+    items beyond the window are dropped. The fake emulates Algolia's server-side
+    numeric filtering on the created_at bounds the query actually sends."""
+    from pipeline import collect
+    from urllib.parse import urlparse, parse_qs
+    import datetime
+
+    def ts(s):
+        return datetime.datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+
+    all_hits = [
+        {"objectID": "1", "title": "at-start", "url": "https://a.example",
+         "created_at": "2026-09-03T00:00:00Z", "points": 150},
+        {"objectID": "2", "title": "on-end-day", "url": "https://b.example",
+         "created_at": "2026-09-04T23:59:59Z", "points": 150},
+        {"objectID": "3", "title": "beyond-end", "url": "https://c.example",
+         "created_at": "2026-09-05T00:00:00Z", "points": 150},
+    ]
+
+    def fake_get_json(url):
+        nf = parse_qs(urlparse(url).query)["numericFilters"][0]
+        lo = hi = None
+        for f in nf.split(","):
+            if f.startswith("created_at_i>="):
+                lo = int(f.split(">=")[1])
+            elif f.startswith("created_at_i<"):
+                hi = int(f.split("<")[1])
+        assert lo is not None and hi is not None
+        return {"hits": [h for h in all_hits
+                         if ts(h["created_at"]) >= lo and ts(h["created_at"]) < hi],
+                "nbPages": 1}
+
+    monkeypatch.setattr(collect, "_get_json", fake_get_json)
+    items = collect._hn("2026-09-04", datetime.date(2026, 9, 3))
+    assert [i.title for i in items] == ["at-start", "on-end-day"]
+
+
+def test_hn_single_day_window_nonempty(monkeypatch):
+    """A one-day window (start == end) returns that day's stories instead of an
+    empty range — the degenerate case the old `created_at_i<{day_ts}` made
+    impossible."""
+    from pipeline import collect
+
+    def fake_get_json(url):
+        return {"hits": [
+            {"objectID": "1", "title": "yesterday-only", "url": "https://d.example",
+             "created_at": "2026-09-03T12:00:00Z", "points": 150},
+        ], "nbPages": 1}
+
+    monkeypatch.setattr(collect, "_get_json", fake_get_json)
+    import datetime
+    items = collect._hn("2026-09-03", datetime.date(2026, 9, 3))
+    assert [i.title for i in items] == ["yesterday-only"]
+
+
 # --- generate: source selection by top-N above a quality floor ------------
 
 def test_select_sources_top_n_default():
@@ -195,16 +360,24 @@ def test_generate_brief_groups_by_source(tmp_path, monkeypatch):
                    date="d", body="abstract", source="arxiv", score=0.9),
         RankedItem(title="HN Story", url="https://hn.example/x",
                    date="d", body="body", source="hn", score=0.8),
+        RankedItem(title="org/model-repo", url="https://huggingface.co/org/model-repo",
+                   date="d", body="readme", source="hf", score=0.7),
     ]
     by_source = generate._group_by_source(chosen)
     assert {s: [i.title for i in items] for s, items in by_source.items()} == {
         "arxiv": ["Paper A"],
         "hn": ["HN Story"],
+        "hf": ["org/model-repo"],
     }
     text = generate._brief_text(chosen, by_source)
     assert "arXiv papers" in text
     assert "Hacker News stories" in text
+    assert "Hugging Face model releases" in text
     assert "https://arxiv.org/pdf/2601.00001" in text
+    assert "https://huggingface.co/org/model-repo" in text
+    # Source order is registry/label order: arXiv -> HN -> HF.
+    assert text.index("arXiv papers") < text.index("Hacker News stories")
+    assert text.index("Hacker News stories") < text.index("Hugging Face model releases")
 
 
 def test_generate_writes_episode(tmp_path, monkeypatch):
@@ -660,6 +833,53 @@ def test_config_budget_clamps_source_count(monkeypatch):
     assert config_mod.RunConfig(length="short", depth="deep-dive").num_sources() == config_mod.MAX_SOURCES
 
 
+def test_collect_hn_drops_empty_body(monkeypatch):
+    """HN items whose body fetch comes back empty are dropped at collect and
+    never reach rank — a bodyless story would air as an empty topic."""
+    from pipeline import collect
+    import datetime
+    items = [
+        Item(title="a", url="https://a.example", date="2026-09-03", body="", source="hn"),
+        Item(title="b", url="https://b.example", date="2026-09-03", body="", source="hn"),
+        Item(title="c", url="https://c.example", date="2026-09-03", body="", source="hn"),
+    ]
+    monkeypatch.setattr(collect, "_hn", lambda date, start: items)
+    monkeypatch.setattr(collect, "_hn_relevant", lambda its: its)
+    monkeypatch.setattr(collect, "_fetch_body",
+                        lambda url: "c body" if "c.example" in url else "")
+    out = collect._collect_hn("2026-09-04", datetime.date(2026, 9, 3))
+    assert [i.title for i in out] == ["c"]
+    assert out[0].body == "c body"
+
+
+def test_collect_hf_drops_empty_body(monkeypatch):
+    """HF models whose README fetch comes back empty are dropped at collect,
+    so a README-less model never reaches rank."""
+    from pipeline import collect
+    import datetime
+    items = [
+        Item(title="org/a", url="https://huggingface.co/org/a", date="2026-09-03",
+             body="", source="hf"),
+        Item(title="org/b", url="https://huggingface.co/org/b", date="2026-09-03",
+             body="", source="hf"),
+    ]
+    monkeypatch.setattr(collect, "_hf", lambda date, start: items)
+    monkeypatch.setattr(collect, "_hf_relevant", lambda its: its)
+    monkeypatch.setattr(collect, "_fetch_readme",
+                        lambda url: "# readme" if url.endswith("/org/b") else "")
+    out = collect._collect_hf("2026-09-04", datetime.date(2026, 9, 3))
+    assert [i.title for i in out] == ["org/b"]
+
+
+def test_judge_model_is_fixed_not_env_configurable(monkeypatch):
+    """The rank judge model is a pinned constant, not an env knob — a stray
+    JUDGE_MODEL value must be ignored."""
+    from pipeline import llm
+    monkeypatch.setenv("SKAINET_API_KEY", "test-key")
+    monkeypatch.setenv("JUDGE_MODEL", "some/other-model")
+    assert llm._config()["default_model"] == "Qwen/Qwen3.8-27B"
+
+
 def test_content_trim_enforces_word_cap():
     from pipeline.podcastfy.content_generator import ContentCleanerMixin
     txt = ("<Person1>One two three four. Five six seven eight nine ten.</Person1>\n"
@@ -673,3 +893,74 @@ def test_content_trim_enforces_word_cap():
         assert "<Person1>" in t  # keeps leading turn
     # Already within cap -> unchanged.
     assert ContentCleanerMixin._trim_to_words(txt, 10**6) == txt
+
+
+# --- content generation: word-count band around the per-part target ---------
+
+class _FakeChain:
+    """Pops canned responses; the last one repeats if overrun."""
+    def __init__(self, responses):
+        self.responses = responses
+        self.calls = 0
+
+    def invoke(self, params):
+        r = self.responses[min(self.calls, len(self.responses) - 1)]
+        self.calls += 1
+        return r
+
+
+def _dialogue(words: int) -> str:
+    return f"<Person1>{'word ' * words}</Person1>"
+
+
+def _generator(chain=None):
+    from pipeline.podcastfy.content_generator import LongFormContentGenerator
+    return LongFormContentGenerator(chain, None, {
+        "max_num_chunks": 4, "per_source_words": 100,
+        "intro_words": 40, "recap_words": 40})
+
+
+def test_invoke_with_retry_accepts_in_band_and_retries_out():
+    chain = _FakeChain([_dialogue(50), _dialogue(100)])   # 50 < 80 (out), 100 in band
+    gen = _generator(chain)
+    out = gen._invoke_with_retry({}, min_turns=0, target_words=100)
+    assert chain.calls == 2
+    assert f"<Person1>{'word ' * 100}</Person1>" == out
+
+
+def test_invoke_with_retry_retries_overshoot_too():
+    chain = _FakeChain([_dialogue(130), _dialogue(95)])   # 130 > 120 (out), 95 in band
+    gen = _generator(chain)
+    out = gen._invoke_with_retry({}, min_turns=0, target_words=100)
+    assert chain.calls == 2
+    assert f"<Person1>{'word ' * 95}</Person1>" == out
+
+
+def test_invoke_with_retry_returns_closest_when_never_in_band():
+    chain = _FakeChain([_dialogue(130), _dialogue(60)])   # never inside [80, 120]
+    gen = _generator(chain)
+    out = gen._invoke_with_retry({}, min_turns=0, target_words=100, max_attempts=2)
+    assert chain.calls == 2
+    # Closest to target (130 has dev 30; 60 has dev 40).
+    assert f"<Person1>{'word ' * 130}</Person1>" == out
+
+
+def test_invoke_with_retry_keeps_turn_floor():
+    # Both attempts are inside the word band (90 words, band 80-120); the first
+    # is retried because it has only 1 turn and the floor wants 2.
+    two_turns = (f"<Person1>{'word ' * 40}</Person1>\n"
+                 f"<Person2>{'more ' * 50}</Person2>")
+    chain = _FakeChain([_dialogue(90), two_turns])
+    gen = _generator(chain)
+    out = gen._invoke_with_retry({}, min_turns=2, target_words=100)
+    assert chain.calls == 2
+    assert out == two_turns
+
+
+def test_source_part_prompt_targets_words():
+    gen = _generator()
+    p = gen.enhance_prompt_params(
+        {"host1_name": "A", "host2_name": "B"},
+        part_idx=1, total_parts=3, chat_context="", chunk_len=500)
+    assert "targeting about 100 words of dialogue" in p["instruction"]
+    assert "at most 100 words" not in p["instruction"]

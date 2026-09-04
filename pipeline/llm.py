@@ -14,6 +14,12 @@ from openai import OpenAI
 
 SKAINET_BASE_URL = "https://chat.model.tngtech.com/v1/"
 
+# Fixed judge/rank model. Model choices are pinned constants per stage (not
+# configurable): collect gates use collect.RELEVANCE_MODEL, the transcript LLM
+# uses podcastfy.generator.DEFAULT_MODEL, TTS is TNG qwen3, and the rank judge
+# is this one.
+JUDGE_MODEL = "Qwen/Qwen3.8-27B"
+
 
 def _config() -> dict:
     """Read backend config lazily (not at import time) so a misconfigured env
@@ -24,7 +30,7 @@ def _config() -> dict:
     return {
         "api_key": key,
         "base_url": SKAINET_BASE_URL,
-        "default_model": os.environ.get("JUDGE_MODEL", "Qwen/Qwen3.8-27B"),
+        "default_model": JUDGE_MODEL,
     }
 
 

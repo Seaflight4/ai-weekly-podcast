@@ -8,14 +8,18 @@ flowchart TB
 
     subgraph collect[Stage 1 — collect · writes data/collect.json]
         direction TB
-        COLLECT[collect.collect<br/><small>date = today · sources = HN + arXiv</small>] --> HN[<b>Hacker News</b><br/><small>Algolia /search<br/>tags=story · points&gt;100 · 7d window<br/>upper date bound = target date</small>]
+        COLLECT[collect.collect<br/><small>date = today · sources = HN + arXiv + Hugging Face</small>] --> HN[<b>Hacker News</b><br/><small>Algolia /search<br/>tags=story · points&gt;100 · 7d window<br/>upper date bound = target date</small>]
         COLLECT --> ARXIV[<b>arXiv</b><br/><small>Atom API cat:cs.AI<br/>submittedDate range query · 7d window<br/>5s sleep between pages</small>]
+        COLLECT --> HF[<b>Hugging Face</b><br/><small>JSON /api/models · sort=lastModified<br/>7d window · non-private + traction prefilter<br/>README body fetch for survivors</small>]
         HN --> HNDEDUP[HN dedup<br/><small>by objectID + normalized URL<br/>keep highest points · order preserved</small>]
         HNDEDUP --> HNGATE[<b>HN relevance gate</b><br/><small>100 titles/chunk -> relevant indices<br/>audience: AI researchers at a company</small>]
-        HNGATE --> FETCH[<b>Body fetch</b><br/><small>trafilatura main-text extraction<br/>per surviving URL · 1MB cap · 8000-char limit<br/>empty -> title-only fallback</small>]
+        HNGATE --> FETCH[<b>Body fetch</b><br/><small>trafilatura main-text extraction<br/>per surviving URL · 1MB cap · 8000-char limit<br/>empty body -> item dropped at collect</small>]
         ARXIV --> AXGATE[<b>arXiv relevance gate</b><br/><small>20 abstracts/chunk · recall-leaning<br/>RELEVANCE_MODEL · temperature=0</small>]
-        AXGATE --> DEDUP[Dedup HN vs arXiv<br/><small>O&#40;n&#41; arXiv-ID hash join<br/>drop HN twin, keep paper abstract</small>]
+        HF --> HFGATE[<b>HF relevance gate</b><br/><small>100 model ids/chunk · recall-leaning<br/>same small model as HN</small>]
+        HFGATE --> HFREADME[<b>README fetch</b><br/><small>raw README.md per surviving model<br/>plain text · 8k cap · tolerant<br/>empty body -> item dropped at collect</small>]
+        AXGATE --> DEDUP[Dedup cross-source<br/><small>O&#40;n&#41; rule table &#40;winner, dropper, key&#41;<br/>drop HN twin of arXiv paper / HF card<br/>drop HF card citing a collected paper</small>]
         FETCH --> DEDUP
+        HFREADME --> DEDUP
         DEDUP --> COLLECTJSON[/data/collect.json<br/><small>list of Item: title, url, date, body, source</small>/]
     end
 
@@ -35,7 +39,7 @@ flowchart TB
         direction TB
         GEN[<b>Source selection</b><br/><small>threshold &gt;= 0.8 = must include<br/>fixed floor=10 · cap=20<br/>weak week -&gt; pad to 10<br/>strong week -&gt; cut at 20</small>] --> BRIEF[Render podcast_brief.md<br/><small>source-grouped digest · researcher audience<br/>arXiv PDF links + HN story links<br/>score per item · body excerpt</small>]
         BRIEF --> PFETCH[Fetch sources into per-run cache<br/><small>arXiv -&gt; full PDF &#40;10k head + 3k tail&#41;<br/>HN/web -&gt; page text &#40;22k&#41;<br/>transcript_in -&gt; reuse cached transcript, skip LLM</small>]
-        PFETCH --> TRANS[Generate two-host transcript<br/><small>DeepSeek on SkaiNet gateway<br/>reuses SKAINET_API_KEY<br/>writes data/transcript.md</small>]
+        PFETCH --> TRANS[Generate two-host transcript<br/><small>DeepSeek on SkaiNet gateway · reuses SKAINET_API_KEY<br/>per part: target ~N words, retry outside +-20%<br/>writes data/transcript.md</small>]
         TRANS --> HEALTH[Check TNG qwen3 TTS health]
         HEALTH --> AUDIO[Synthesize voice-cloned audio<br/><small>TNG qwen3 TTS · pydub MP3 encode<br/>needs ffmpeg on PATH</small>]
         AUDIO --> MP3[/data/episode.mp3/]
@@ -51,7 +55,7 @@ flowchart TB
 
 | Stage | Input | Output |
 |-------|-------|--------|
-| `collect` | date (default: today) | `data/DD-MM-YYYY/collect.json` — every `Item`: title, url, date, body, source (`hn` or `arxiv`) |
+| `collect` | date (default: today) | `data/DD-MM-YYYY/collect.json` — every `Item`: title, url, date, body, source (`hn`, `arxiv` or `hf`) |
 | `rank` | collect.json | `data/DD-MM-YYYY/rank.json` — the **full** scored pool (sorted desc) with `score`, `judge_reason` |
 | `generate` | rank.json | `data/DD-MM-YYYY/podcast_brief.md` + `episode.json` manifest + `episode.mp3` + `transcript.md` |
 

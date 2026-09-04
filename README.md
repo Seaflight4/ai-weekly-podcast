@@ -7,6 +7,7 @@ contract, so any stage can be swapped without touching its neighbours.
 ```
 collect ──> HN (points>100, 7d, batched LLM relevance gate, per-URL body fetch)
          ─-> arXiv (cs.AI, 7d, full abstracts, LLM relevance gate)
+         ─-> Hugging Face (7d recently-modified models, LLM gate, per-card README fetch)
 rank    ─-> unified rubric scores the whole pool (pure importance, no personal pass)
 generate ─> threshold-selected items fed to the vendored podcastfy audio backend
 ```
@@ -22,7 +23,7 @@ stage is a no-op.
 
 | Stage | Input | Output |
 |-------|-------|--------|
-| `collect` | date (default: today) | `<data/history/DD-MM-YYYY>/collect.json` — every `Item`: title, url, date, body, source (`hn` or `arxiv`) |
+| `collect` | date (default: today) | `<data/history/DD-MM-YYYY>/collect.json` — every `Item`: title, url, date, body, source (`hn`, `arxiv` or `hf`) |
 | `rank` | collect.json | `<data/history/DD-MM-YYYY>/rank.json` — the **full** scored pool (sorted desc, no top-N slice) |
 | `generate` | rank.json | `<data/history/DD-MM-YYYY>/podcast_brief.md` + `episode.json` manifest + `episode.mp3` + `transcript.md` |
 
@@ -37,10 +38,37 @@ a **batched LLM relevance gate** keeps only stories useful to AI researchers at
 a company. **arXiv** is now gated too (recall-leaning, on title+abstract) so the
 judge sees the plausibly-relevant survivors, not all ~987 cs.AI papers. Points
 are used only to *select*, never emitted, so the judge weighs content, not hype.
+**Hugging Face** (`hf`) captures the week's shipped-model signal: the last-7-days
+`lastModified` feed is prefiltered cheaply (non-private, at least one download or
+like) to kill the zero-traction junk, gated by the same small-model relevance
+gate on the model id, then the survivors' model-card READMEs are fetched as the
+body (mirroring the HN fetch path).
 
-**arXiv↔HN dedup** is deterministic and O(n): extract the arXiv ID from each HN
-URL, hash-lookup against the collected arXiv set, and drop the HN twin (the arXiv
-entry already carries the full abstract). No quadratic similarity search.
+**A source with no content is dropped at collect** — never fed to rank and never
+aired. Only HN/HF can end up bodyless (their per-item page/README fetch can come
+back empty; arXiv always carries its abstract), so after each branch's body
+fetch, empty-body items are pruned: a bodyless story would ask the judge to read
+nothing and would air as an empty topic.
+
+**The run window is a full-inclusive `[start, end]` date range for every source**
+(both end days are whole days): arXiv filters `submittedDate`, HN filters
+`created_at` (submission time, so a one-day window returns that day's stories),
+and HF is inclusive on `lastModified` (i.e. "repos shipped/updated in the
+window" — note this is not `createdAt`, so a repo touched this week counts even
+if it was published earlier).
+
+**Cross-source dedup** is deterministic, O(n) per rule, and data-driven: a
+`DEDUP_RULES` table lists `(winner, dropper, key)` triples that drop an HN item
+when its URL references an already-collected arXiv paper or HF model card, and
+drop an HF release whose README cites an already-collected arXiv paper. No
+quadratic similarity search.
+
+**Adding a source** is a data change, not a refactor: register a collector
+`fn(date, start) -> list[Item]` in `collect.SOURCES`, give it a human label in
+`generate.SOURCE_LABELS` (drives the brief's section heading), and add any
+dedup rules to `collect.DEDUP_RULES`. The rank rubric, brief, audio backend
+(non-arXiv items are fetched as "web" content) and UI all consume sources
+generically.
 
 **Ranking** (`rank`): a unified rubric scores the whole pool on general
 importance. There is no personalization pass — every listener gets the same
@@ -70,12 +98,16 @@ conform:
 | Medium 17.5 min | 2888 / 578 w | 14 × 165 w | 7 × 330 w |
 | Long 30 min | 4950 / 990 w | 24 × 165 w | 12 × 330 w |
 
-Each part is prompted with its word ceiling, given a matching per-call token
-cap, and then deterministically trimmed to the last sentence boundary within
-budget — so the finished episode lands near the requested length instead of
-drifting (the old behaviour produced ~20+ min for a "medium" episode). Topic
-depth only scales how much source *text* the LLM sees (`per_paper_chars` ×
-`depth_factor`); it never scales the output word budget.
+Each part is prompted to **target about its word ceiling** (`targeting about N
+words`), the LLM call is **retried while the part's word count falls outside
+±20% of that target** (undergenerating fills, overgenerating is retried too),
+and on retry exhaustion the closest-to-target attempt is kept and then
+deterministically trimmed to the last sentence boundary within budget — so the
+finished episode lands near the requested length instead of drifting or
+undershooting (the old behaviour produced ~20+ min for a "medium" episode, and
+thinly-fed parts routinely landed at 60-80% of their budget). Topic depth only
+scales how much source *text* the LLM sees (`per_paper_chars` × `depth_factor`);
+it never scales the output word budget.
 
 **Audio generation** (`generate`): the selected items are written into a
 `podcast_brief.md` and fed to the vendored podcastfy backend. It re-fetches full
@@ -211,9 +243,15 @@ Environment variables (`.env`) only carry the API keys/models:
 | Variable | Purpose |
 |----------|---------|
 | `SKAINET_API_KEY` | API key for the OpenAI-compatible judge backend (required); also reused by the podcastfy backend's TNG TTS |
-| `JUDGE_MODEL` | Override the judge/rank model (`Qwen/Qwen3.8-27B` by default) |
 | `LLM_API_BASE` | OpenAI-compatible LLM endpoint for the podcastfy transcript LLM |
-| `LLM_MODEL` | LLM model name for the podcastfy transcript LLM |
+
+Model choices are **fixed constants in their modules** (not configurable via
+env): collect gates use `mistralai/Mistral-Small-3.2-24B-Instruct-2506`
+(`collect.RELEVANCE_MODEL`), the rank judge uses `Qwen/Qwen3.8-27B`
+(`llm.JUDGE_MODEL`), the podcastfy **transcript LLM is pinned to
+`deepseek-ai/DeepSeek-V4-Flash-0731`** (`podcastfy.generator.DEFAULT_MODEL` —
+a heavier reasoning model's thinking preamble exhausts `max_output_tokens` and
+truncates the JSON, forcing empty/one-turn retries), and TTS is TNG `qwen3`.
 
 Everything user-facing lives in `data/podcast_config.yaml` (edited via the
 UI's setup/Settings dialog): `user.audience`, `user.familiar_topics`,

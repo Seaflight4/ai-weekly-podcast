@@ -2,21 +2,25 @@ from . import Item
 from . import store
 from . import llm
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from collections.abc import Iterable
+from collections.abc import Iterable, Callable
 import json, urllib.request, urllib.error, urllib.parse, datetime, re, time
 import xml.etree.ElementTree as ET
 import trafilatura
 
 HN_API = "https://hn.algolia.com/api/v1/search"
 ARXIV_API = "https://export.arxiv.org/api/query"
+HF_API = "https://huggingface.co/api/models"
 
 RELEVANCE_GATE_BATCH = 100   # HN titles per LLM relevance call
 ARXIV_GATE_BATCH = 20         # arXiv title+abstract per relevance call (~9k tokens/chunk)
 ARXIV_TITLE_GATE_BATCH = 100  # arXiv titles only per coarse relevance call (cheap trim before Qwen)
+HF_GATE_BATCH = 100           # HF model titles per LLM relevance call (title-only, like HN)
 MAX_FETCH_BYTES = 1_000_000   # cap a single HN target page (~1 MB raw HTML)
 BODY_FETCH_WORKERS = 8        # parallel trafilatura body fetches
 GATE_WORKERS = 4              # concurrent relevance-gate batches (small model)
 ARXIV_TITLE_GATE_WORKERS = 8  # arXiv title gate is the collect bottleneck; overlap fetch+judge with more workers
+HF_CANDIDATE_LIMIT = 300      # bounded HF candidate pool before the relevance gate (a week is noisy)
+HF_PAGE_SIZE = 100            # HF models API page size
 RELEVANCE_MODEL = "mistralai/Mistral-Small-3.2-24B-Instruct-2506"
 
 RELEVANCE_PROMPT = """You are screening Hacker News stories for a weekly AI podcast
@@ -139,8 +143,47 @@ If none pass, return {"relevant": [], "scores": [{"index": 0, "score": 0.0}, ...
 No prose before or after. No markdown fences.
 """
 
+HF_GATE_PROMPT = """You are screening Hugging Face model releases for a weekly AI podcast
+for AI researchers at a software consulting firm. This is a CHEAP COARSE FILTER
+that trims the raw "recently modified" Hub stream before an expensive ranker
+scores the survivors.
+
+You are given a JSON array of models, each with an integer "index", a "title"
+(the model id, e.g. "org/model"), and a "url". Decide which are plausibly worth
+carrying into a downstream ranking stage; this stage favors RECALL — the
+downstream ranker does the fine discrimination.
+
+ALWAYS KEEP / HIGH-SCORE:
+- New or updated LLMs / MoE / vision / audio / multimodal / diffusion models with
+  a real capability step, notable scale, or quality claim (incl. quantized or
+  otherwise more-deployable checkpoints of important models).
+- Inference/runtime/tool releases: vLLM, llama.cpp, TGI, tokenizers, evals, etc.
+- Official implementations of notable papers; open-weights frontier models.
+- Releases from notable labs/orgs (Meta, Mistral, DeepSeek, Google, OpenAI, ...).
+
+USUALLY DROP / LOW-SCORE unless a striking claim:
+- Personal/toy fine-tunes, roleplay/uncensored/NSFW image models, memes.
+- Pure repackaging of an existing model (new tag/branch), empty or test uploads.
+
+When in doubt, KEEP (recall).
+
+Return ONLY a JSON object with two keys:
+- "relevant": an array of the integer indices of the models that pass.
+- "scores": an array of objects, one per model in the input, each with
+  "index" (the integer index) and "score" (a float 0.0 to 1.0, likelihood of
+  importance — used to prefilter the expensive ranker downstream). Score EVERY
+  index in the batch, whether or not it is in "relevant".
+If none pass, return {"relevant": [], "scores": [{"index": 0, "score": 0.0}, ...]}.
+No prose before or after. No markdown fences.
+"""
+
 def _collect_hn(date: str, start: datetime.date) -> list[Item]:
-    """HN branch: fetch -> relevance gate (title-only, cheap) -> body fetch (slow, parallel)."""
+    """HN branch: fetch -> relevance gate (title-only, cheap) -> body fetch (slow, parallel).
+
+    An HN item whose body fetch comes back empty is DROPPED here — a bodyless
+    story never reaches the rank stage (only HN/HF can be empty; arXiv always
+    carries its abstract).
+    """
     fetched = _hn(date, start)
     print(f"      hn: {len(fetched)} raw items")
     hn_items = [i for i in fetched if i.source == "hn"]
@@ -164,6 +207,7 @@ def _collect_hn(date: str, start: datetime.date) -> list[Item]:
                 print(f"      hn: {done}/{len(kept)} bodies fetched")
     dt = (datetime.datetime.now(datetime.timezone.utc) - t0).total_seconds()
     print(f"      hn: body fetch took {dt:.1f}s")
+    kept = _drop_empty_bodies("hn", kept)
     return kept
 
 
@@ -185,11 +229,48 @@ def _collect_arxiv(date: str, start: datetime.date) -> list[Item]:
     return kept
 
 
+def _collect_hf(date: str, start: datetime.date) -> list[Item]:
+    """HF Hub branch: fetch -> relevance gate (title-only, cheap) -> README fetch (parallel).
+
+    Mirrors the HN flow: list-time items carry only a title (model id) + url, so
+    survivors get a per-item body fetch (the model-card README as plain text).
+    """
+    fetched = _hf(date, start)
+    print(f"      hf: {len(fetched)} raw candidates (window + traction prefilter)")
+    hf_items = [i for i in fetched if i.source == "hf"]
+    if not hf_items:
+        return []
+    print(f"      hf: gating {len(hf_items)} models by relevance...")
+    kept = _hf_relevant(hf_items)
+    print(f"      hf: {len(kept)} relevant, fetching READMEs in parallel (up to {BODY_FETCH_WORKERS} workers)...")
+    t0 = datetime.datetime.now(datetime.timezone.utc)
+    with ThreadPoolExecutor(max_workers=BODY_FETCH_WORKERS) as ex:
+        futures = {ex.submit(_fetch_readme, it.url): it for it in kept if not it.body}
+        done = 0
+        for fut in as_completed(futures):
+            it = futures[fut]
+            try:
+                it.body = fut.result() or ""
+            except Exception:
+                it.body = ""
+            done += 1
+            if done % 10 == 0 or done == len(futures):
+                print(f"      hf: {done}/{len(kept)} READMEs fetched")
+    dt = (datetime.datetime.now(datetime.timezone.utc) - t0).total_seconds()
+    print(f"      hf: README fetch took {dt:.1f}s")
+    kept = _drop_empty_bodies("hf", kept)
+    return kept
+
+
 def collect(date: str | None = None, window_start: str | None = None) -> list[Item]:
-    """Fetch the week's AI news from HN and arXiv, running the two source
-    pipelines concurrently (their inputs are disjoint, their gates are shared
-    small-model LLM calls, and their outputs only need a single join): HN goes
-    fetch -> title gate -> body fetch; arXiv goes fetch -> coarse title gate.
+    """Fetch the week's AI news from every registered source concurrently.
+
+    ``SOURCES`` maps a source id to its collector (``fn(date, start) -> list[Item]``);
+    branches run in parallel (inputs are disjoint, gates are shared small-model
+    LLM calls, outputs only need a single join): HN goes fetch -> title gate ->
+    body fetch; arXiv goes fetch -> coarse title gate; HF goes fetch -> title
+    gate -> README fetch. Cross-source dedup is a data-driven rule list
+    (``DEDUP_RULES``), so adding a source is register-a-collector + a rule.
 
     ``date`` is the window end / run anchor (ISO date, defaults to today);
     ``window_start`` (ISO date) overrides the default 7-day-back cutoff.
@@ -199,19 +280,18 @@ def collect(date: str | None = None, window_start: str | None = None) -> list[It
     end = datetime.date.fromisoformat(date)
     start = datetime.date.fromisoformat(window_start) if window_start else end - datetime.timedelta(days=7)
 
-    print("      collect: running hn and arxiv branches in parallel...")
-    with ThreadPoolExecutor(max_workers=2) as ex:
-        hn_fut = ex.submit(_collect_hn, date, start)
-        arxiv_fut = ex.submit(_collect_arxiv, date, start)
-        hn_items = hn_fut.result()
-        arxiv_items = arxiv_fut.result()
+    print(f"      collect: running {len(SOURCES)} source branches in parallel...")
+    with ThreadPoolExecutor(max_workers=len(SOURCES)) as ex:
+        futures = {name: ex.submit(fn, date, start) for name, fn in SOURCES.items()}
+        results = {name: futures[name].result() for name in SOURCES}
 
-    items = hn_items + arxiv_items
+    items = []
+    for name in SOURCES:          # registry order, so output order is stable
+        items += results[name]
 
-    # Cross-source dedup at the join (after both branches finish): drop HN items
-    # pointing at an arXiv paper we already collected. The arXiv paper carries
-    # the full abstract, so the HN twin is redundant.
-    items = _dedup_hn_arxiv(items)
+    # Cross-source dedup at the join (after all branches finish), via the
+    # data-driven DEDUP_RULES table.
+    items = _dedup(items, DEDUP_RULES)
 
     if not items:
         raise SystemExit("collect: no items from any source — refusing to write an empty file")
@@ -221,16 +301,23 @@ def collect(date: str | None = None, window_start: str | None = None) -> list[It
 
 # --- source: Hacker News (Algolia JSON): points>100 candidates, title+URL only ---
 def _hn(date: str, start: datetime.date) -> list[Item]:
-    day = datetime.datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=datetime.timezone.utc)
+    """HN branch: full-inclusive ``[start, day]`` window on ``created_at``.
+
+    The upper bound is midnight UTC of the day AFTER the end date, so the whole
+    end day is included (matching arXiv's ``submittedDate:[... TO ...2359]`` and
+    HF's inclusive ``lastModified`` filter). A one-day window therefore returns
+    that day's stories instead of an empty range.
+    """
     cutoff = int(datetime.datetime.combine(start, datetime.time.min, tzinfo=datetime.timezone.utc).timestamp())
-    day_ts = int(day.timestamp())
+    day = datetime.datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=datetime.timezone.utc)
+    end_next = int(day.timestamp()) + 86400  # midnight UTC of the day after end (exclusive upper)
     hits: list[dict] = []
     page = 0
     per_page = 100
     nb_pages = None
     while True:
         query = {"tags": "story", "hitsPerPage": per_page, "page": page,
-                 "numericFilters": f"points>100,created_at_i>{cutoff},created_at_i<{day_ts}"}
+                 "numericFilters": f"points>100,created_at_i>={cutoff},created_at_i<{end_next}"}
         url = f"{HN_API}?{urllib.parse.urlencode(query)}"
         print(f"      fetching {url}")
         raw = _get_json(url)
@@ -278,6 +365,93 @@ def _hn(date: str, start: datetime.date) -> list[Item]:
             source="hn",
         ))
     return out
+
+# --- source: Hugging Face Hub (JSON API): recently-modified models, bounded ---
+def _hf(date: str, start: datetime.date) -> list[Item]:
+    """Page `sort=lastModified` (desc) over a bounded candidate pool.
+
+    The Hub's "recently modified" stream is the week's shipped-model signal
+    (new uploads + updates to popular repos). It is noisy up top, so we keep a
+    cheap traction prefilter (private=False, and at least one download or like)
+    and let the LLM title gate do the real sieving. ``lastModified`` is sorted
+    desc, so the first out-of-window entry ends the paging.
+    """
+    day = datetime.date.fromisoformat(date)
+    hits: list[dict] = []
+    page = 0
+    while page * HF_PAGE_SIZE < HF_CANDIDATE_LIMIT:
+        query = {"sort": "lastModified", "direction": -1, "limit": HF_PAGE_SIZE, "page": page}
+        url = f"{HF_API}?{urllib.parse.urlencode(query)}"
+        print(f"      fetching {url}")
+        raw = _get_json(url)
+        if not isinstance(raw, list) or not raw:
+            break
+        hits.extend(raw)
+        if len(raw) < HF_PAGE_SIZE:
+            break
+        page += 1
+
+    seen: set[str] = set()
+    out: list[Item] = []
+    for m in hits:
+        mid = m.get("id") or m.get("modelId")
+        if not mid or mid in seen or m.get("private"):
+            continue
+        seen.add(mid)
+        lm = (m.get("lastModified") or "")[:10]
+        if not lm:
+            continue
+        if lm < start.isoformat():  # lastModified desc -> everything after is also before start
+            break
+        if not _is_recent(lm, start, day):
+            continue
+        if (m.get("downloads", 0) or 0) == 0 and (m.get("likes", 0) or 0) == 0:
+            continue  # no traction signal at all -> almost certainly junk
+        out.append(Item(
+            title=mid,
+            url=f"https://huggingface.co/{mid}",
+            date=lm,
+            body="",  # README fetched for survivors (title-only gate first)
+            source="hf",
+        ))
+    return out
+
+def _fetch_readme(url: str) -> str:
+    """Fetch a Hugging Face model-card README as plain text (the body source).
+
+    The model page itself is JS-heavy, so we read the raw README instead:
+    ``/raw/main/README.md`` returns plain markdown. Tolerant: empty/error -> "".
+    """
+    prefix = "https://huggingface.co/"
+    if not url.startswith(prefix):
+        return ""
+    readme_url = f"{url}/raw/main/README.md"
+    try:
+        text = _get(readme_url, max_bytes=MAX_FETCH_BYTES)
+    except Exception:
+        return ""
+    text = (text or "").strip()
+    if not text or text.startswith("{"):   # HF answers 404/errors as JSON
+        return ""
+    return re.sub(r"\s+", " ", text)[:8000]
+
+def _hf_relevant(items: list[Item]) -> list[Item]:
+    return _gate(items, HF_GATE_PROMPT, RELEVANCE_MODEL, HF_GATE_BATCH, "hf")
+
+def _drop_empty_bodies(label: str, items: list[Item]) -> list[Item]:
+    """Drop items whose content fetch came back empty (HN/HF only).
+
+    arXiv always carries its abstract, so it never hits this path. An item with
+    no body would reach rank with nothing for the judge to read and would air as
+    an empty topic — so it is dropped here, never fed to the rank stage.
+    """
+    before = len(items)
+    kept = [it for it in items if (it.body or "").strip()]
+    dropped = before - len(kept)
+    if dropped:
+        print(f"      {label}: dropped {dropped}/{before} empty-body item(s) "
+              f"(no fetched content); they never reach rank")
+    return kept
 
 # --- source: arXiv (official Atom API): cat:cs.AI, window, latest version ---
 def _arxiv_pages(date: str, start: datetime.date):
@@ -349,21 +523,53 @@ def _arxiv_id(url_or_id: str) -> str | None:
         m = re.search(r"(?<![\d/])(\d{4}\.\d{4,5})(?:v\d+)?(?!\d)", url_or_id.strip().rstrip("/"))
     return m.group(1) if m else None
 
-# --- cross-source dedup: drop HN items pointing at a paper we already collected ---
-def _dedup_hn_arxiv(items: list[Item]) -> list[Item]:
-    arxiv_ids = {_arxiv_id(i.url) for i in items if i.source == "arxiv"}
-    if not arxiv_ids:
-        return items
-    kept: list[Item] = []
-    dropped = 0
-    for it in items:
-        if it.source == "hn" and _arxiv_id(it.url) in arxiv_ids:
-            dropped += 1
+def _hf_id(url_or_id: str) -> str | None:
+    """Extract a bare HF model id (org/model) from a huggingface.co URL."""
+    m = re.search(r"huggingface\.co/([^/]+/[^/\s]+?)/?$", (url_or_id or "").strip().rstrip("/"), re.IGNORECASE)
+    return m.group(1).lower() if m else None
+
+def _canonical_key(item: Item) -> str | None:
+    """A stable cross-reference identity for a collected item's own URL."""
+    u = (item.url or "").strip().rstrip("/")
+    if item.source == "arxiv" and _arxiv_id(u):
+        return _arxiv_id(u)
+    if item.source == "hf" and u.startswith("https://huggingface.co/"):
+        return _hf_id(u)
+    return u.lower()
+
+# --- cross-source dedup: data-driven rule list -------------------------------
+# Each rule is (winner_source, dropper_source, dropper_key): when a dropper
+# item's key (computed by ``dropper_key`` from its url/body) matches the URL
+# identity of any winner item, drop the dropper (the winner carries richer
+# content: arXiv has the full abstract, an HF card is the canonical page).
+DEDUP_RULES = [
+    ("arxiv", "hn", lambda it: _arxiv_id(it.url)),    # HN twin of a collected paper
+    ("hf",    "hn", lambda it: _hf_id(it.url)),       # HN story -> a collected HF model page
+    ("arxiv", "hf", lambda it: _arxiv_id(it.body)),   # HF card citing a collected paper
+]
+
+def _dedup(items: list[Item], rules: list[tuple]) -> list[Item]:
+    """Apply ``rules`` in order; each drops dropper items that collide with a
+    winner item. Deterministic, O(n) per rule via a key-set hash lookup."""
+    kept = list(items)
+    for winner_src, dropper_src, dropper_key in rules:
+        winner_keys = {k for i in kept if i.source == winner_src
+                       for k in [_canonical_key(i)] if k}
+        if not winner_keys:
             continue
-        kept.append(it)
-    if dropped:
-        print(f"      dedup: dropped {dropped} HN item(s) pointing at a collected arXiv paper")
+        dropped = 0
+        out: list[Item] = []
+        for it in kept:
+            if it.source == dropper_src and dropper_key(it) in winner_keys:
+                dropped += 1
+                continue
+            out.append(it)
+        if dropped:
+            print(f"      dedup: dropped {dropped} {dropper_src} item(s) matching a "
+                  f"collected {winner_src} item")
+        kept = out
     return kept
+
 
 # --- batched LLM relevance gate (shared by HN titles and arXiv abstracts) ---
 def _gate(items: list[Item], prompt: str, model: str, batch_size: int,
@@ -615,3 +821,11 @@ def _get_arxiv(url: str, max_bytes: int | None = None, retries: int = 5,
 
 def _get_json(url: str):  # HN returns a dict — caller knows which
     return json.loads(_get(url))
+
+# --- source registry: adding a source = a collector fn + a label + dedup rules
+# Registry order is the output order of the join (and the brief's section order).
+SOURCES: dict[str, Callable[[str, datetime.date], list[Item]]] = {
+    "hn": _collect_hn,
+    "arxiv": _collect_arxiv,
+    "hf": _collect_hf,
+}

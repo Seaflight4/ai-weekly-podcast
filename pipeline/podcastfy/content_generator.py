@@ -286,7 +286,7 @@ class LongFormContentGenerator:
             2. Give a themed overview: group the topics into 2-3 themes. Weave them together conversationally. Do NOT label themes explicitly ("first theme," "second theme," "third theme"). Use natural connective phrases like "We'll also dive into," "Then we'll cover," "Finally, we'll discuss." For each topic, use a relative clause or flowing sentence that says what it does, not a standalone fragment. Integrate a brief "why it matters" into the theme, not as a separate label. Interleave genuine reactions between themes. One host reacts to the previous theme, the other continues to the next. Do NOT explain mechanisms, cite numbers, or describe how things work. Save those for the topic discussions.
                Example: "In today's episode, we'll cover three major model releases. A, which achieves unprecedented generation speeds. B, which brings multimodal capabilities to a compact architecture. And C, which uses an end-to-end self-improvement loop." [Reaction: "And those are pushing boundaries we didn't think possible a year ago."] "We'll also dive into agent frameworks, covering D's breakthrough in harness scaling and E's flexible navigation. Because raw intelligence doesn't mean much without a reliable environment to operate within." "Right. Finally, we'll discuss major industry news, including F's big acquisition and a shocking audit revealing benchmark cheating."
             3. End with "Let's begin!" or similar.
-            Keep this part to {turn_lo} to {turn_hi} turns total and at most {cap_words} words. The overview should tease topics by name and significance, woven into flowing sentences, not listed as fragments. No analogy or numbers in the intro.
+            Keep this part to {turn_lo} to {turn_hi} turns total, targeting about {cap_words} words. The overview should tease topics by name and significance, woven into flowing sentences, not listed as fragments. No analogy or numbers in the intro.
             """
         elif part_idx == total_parts - 1:
             enhanced_params["instruction"] = f"""
@@ -297,7 +297,7 @@ class LongFormContentGenerator:
             1. Synthesize the episode's arc: group the topics into 2-3 themes and summarize what each theme revealed. Show the through-line, not just a list.
             2. Connect the themes: show how they relate and build on each other (e.g. "We started with speed, then saw how reliability matters just as much, and finally learned that even our benchmarks can't be trusted").
             3. End with a provocative question for the audience, then Person1 ({host1}) says a brief goodbye addressing {host2} ("Until next time, keep digging...").
-            Keep this part to {turn_lo} to {turn_hi} turns and at most {cap_words} words. This is a recap with synthesis, not a new discussion. No per-topic analogy needed here.
+            Keep this part to {turn_lo} to {turn_hi} turns, targeting about {cap_words} words. This is a recap with synthesis, not a new discussion. No per-topic analogy needed here.
             """
         else:
             enhanced_params["instruction"] = f"""
@@ -314,7 +314,7 @@ class LongFormContentGenerator:
 
             Cite at most 1-2 striking numbers per topic. Do NOT recite every metric. Lead with what the number means (the delta, ratio, or comparison), not the raw endpoints. "Jumps 9 points to 85.4" beats "from 76.7 to 85.4." "Doubles to 35.4" beats "from 17.2 to 35.4." Never stack more than two numbers in a single turn. Vivid cost pairs like "$15 vs $574" may stay as-is. The gap is the story.
             If the INPUT contains named case studies, specific models, or concrete behaviors, USE THEM BY NAME. Do not paraphrase them into a generality. For example, if the INPUT says a model ran `git clone` on the writeup repo to read the flag, say which model and say "git clone", not "a model cheated".
-            Keep this part to {turn_lo} to {turn_hi} turns and at most {cap_words} words of dialogue.
+            Keep this part to {turn_lo} to {turn_hi} turns, targeting about {cap_words} words of dialogue. Hitting the target matters: noticeably less leaves the topic thin, noticeably more gets cut. Try to land near {cap_words} words.
             """
 
         return enhanced_params
@@ -361,6 +361,7 @@ class LongFormContentGenerator:
             response = self._invoke_with_retry(
                 enhanced_params,
                 min_turns=min_turns,
+                target_words=cap_words,
             )
             response = ContentCleanerMixin._strip_preamble(response)
             # Enforce the part's word ceiling deterministically (prompt + token
@@ -390,21 +391,36 @@ class LongFormContentGenerator:
         return self.stitch_conversations(conversation_parts)
 
     def _invoke_with_retry(self, enhanced_params: dict, max_attempts: int = 6,
-                           min_turns: int = 0) -> str:
+                           min_turns: int = 0, target_words: int | None = None,
+                           tol: float = 0.2) -> str:
         """
-        Invoke the chain, retrying on empty results, transient errors, or
-        under-generation (too few turns) so a single flaky LLM call (truncated
-        JSON, network blip, under-allocation, token-budget exhaustion) does
-        not abort the whole episode or starve a topic.
+        Invoke the chain, retrying on empty results, transient errors, under-
+        generation (too few turns), or a word count outside ``tol`` of
+        ``target_words``, so a flaky LLM call does not abort the episode and a
+        part lands near its word budget instead of undershooting.
 
         Args:
             enhanced_params: Prompt parameters for the LLM chain.
             max_attempts: Number of retry attempts on failure.
-            min_turns: Minimum number of <PersonN> turns expected. If the
-                response has fewer, retry. Applies to ALL parts (intro, mid,
-                recap). Set to 0 to disable the turn-count check.
+            min_turns: Minimum number of <PersonN> turns expected; retry when
+                fewer. 0 disables the turn-count check.
+            target_words: Word count the part should land on; retry while the
+                response sits outside ``[target*(1-tol), target*(1+tol)]``.
+                None disables the band (fallback = keep the longest attempt).
+            tol: Word-count tolerance band (0.2 = +-20% of target).
         """
+        track_band = target_words is not None and target_words > 0
         best_response = ""
+        best_dev = None
+
+        def update_best(response: str) -> None:
+            nonlocal best_response, best_dev
+            # Band: closest to target wins. No band: longest wins (-len).
+            dev = (abs(ContentCleanerMixin._word_count(response) - target_words)
+                   if track_band else -len(response))
+            if best_response == "" or dev < best_dev:
+                best_response, best_dev = response, dev
+
         for attempt in range(max_attempts):
             try:
                 response = self.llm_chain.invoke(enhanced_params)
@@ -427,11 +443,23 @@ class LongFormContentGenerator:
                         f"Generated {turn_count} turns, need {min_turns} "
                         f"(attempt {attempt+1}); retrying..."
                     )
-                    if len(response) > len(best_response):
-                        best_response = response
+                    update_best(response)
+                    continue
+            # Word-count band check (only when a target is set).
+            if track_band:
+                wc = ContentCleanerMixin._word_count(response)
+                lo = int(target_words * (1 - tol))
+                hi = int(target_words * (1 + tol))
+                if not (lo <= wc <= hi):
+                    logger.warning(
+                        f"Generated {wc} words, target {target_words} "
+                        f"(band {lo}-{hi}) (attempt {attempt+1}); retrying..."
+                    )
+                    update_best(response)
                     continue
             return response
-        # All attempts failed; return the longest attempt (graceful degradation).
+        # All attempts failed; return the best candidate (closest to target,
+        # else the longest) as graceful degradation.
         return best_response if best_response else response
 
     def stitch_conversations(self, parts: List[str]) -> str:
