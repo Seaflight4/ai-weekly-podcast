@@ -936,6 +936,72 @@ def test_invoke_with_retry_retries_overshoot_too():
     assert f"<Person1>{'word ' * 95}</Person1>" == out
 
 
+def test_invoke_with_retry_relaxed_tol_accepts_overshoot():
+    # With tol=0.3 the band is [70, 130]; a 130-word part is now in-band and
+    # accepted without a retry (the deterministic trim caps it afterwards).
+    chain = _FakeChain([_dialogue(130)])
+    gen = _generator(chain)
+    out = gen._invoke_with_retry({}, min_turns=0, target_words=100, tol=0.3)
+    assert chain.calls == 1
+    assert f"<Person1>{'word ' * 130}</Person1>" == out
+
+
+def test_call_llm_json_requests_json_object_response_format(monkeypatch):
+    # The raw-client call must request response_format=json_object so DeepSeek
+    # keeps its long reasoning out of `content`; otherwise complex parts hit the
+    # token cap (finish_reason=length), yield no JSON, and get discarded.
+    # The generator module imports langchain, which the host test venv lacks;
+    # stub the only langchain symbol it needs so the module imports cleanly.
+    lr = types.ModuleType("langchain_core")
+    lr.runnables = types.ModuleType("langchain_core.runnables")
+    lr.runnables.RunnableLambda = lambda fn: None
+    monkeypatch.setitem(sys.modules, "langchain_core", lr)
+    monkeypatch.setitem(sys.modules, "langchain_core.runnables", lr.runnables)
+
+    from pipeline.podcastfy import generator as gen_mod
+
+    captured = {}
+
+    class _Completions:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            payload = json.dumps({
+                "dialogue": [{"speaker": "1",
+                              "text": "hello world, this is a long enough spoken "
+                                      "line to clear the parsing floor"}]})
+            class _Msg:
+                content = payload
+                finish_reason = "stop"
+            class _Choice:
+                message = _Msg()
+                finish_reason = "stop"
+            class _Resp:
+                choices = [_Choice()]
+            return _Resp()
+
+    class _Client:
+        chat = type("_Chat", (), {"completions": _Completions()})()
+
+    gen = object.__new__(gen_mod.SimplePodcastGenerator)
+    gen._use_raw_client = True
+    gen._raw_client = _Client()
+    gen.model_name = "deepseek-ai/DeepSeek-V4-Flash-0731"
+    gen._max_output_tokens = 16000
+    gen._check_required_params = lambda prompt, params: None
+
+    params = {
+        "audience": "a", "familiar_topics": "none", "podcast_name": "p",
+        "podcast_tagline": "t", "output_language": "English", "instruction": "i",
+        "context": "c", "input_text": "x", "host1_name": "Brian",
+        "host2_name": "Tina", "roles_person1": "AI researcher",
+        "roles_person2": "AI researcher",
+    }
+    out = gen._call_llm_json(params)
+    assert captured["response_format"] == {"type": "json_object"}
+    assert captured["model"] == "deepseek-ai/DeepSeek-V4-Flash-0731"
+    assert "<Person1>" in out
+
+
 def test_invoke_with_retry_returns_closest_when_never_in_band():
     chain = _FakeChain([_dialogue(130), _dialogue(60)])   # never inside [80, 120]
     gen = _generator(chain)

@@ -362,6 +362,10 @@ class LongFormContentGenerator:
                 enhanced_params,
                 min_turns=min_turns,
                 target_words=cap_words,
+                # Relax the band to +-30% of the part target: the deterministic
+                # trim below caps overshoot to exactly cap_words, so retrying
+                # anything inside that band just wastes an LLM call.
+                tol=0.3,
             )
             response = ContentCleanerMixin._strip_preamble(response)
             # Enforce the part's word ceiling deterministically (prompt + token

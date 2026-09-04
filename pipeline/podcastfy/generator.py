@@ -409,6 +409,11 @@ class SimplePodcastGenerator:
             max_tokens=max_tokens,
             presence_penalty=0.1,
             frequency_penalty=0.1,
+            # DeepSeek honours response_format=json_object, which keeps its
+            # reasoning out of `content`. Without it, complex parts emit a long
+            # thinking preamble that eats the whole token budget and truncation
+            # yields finish_reason=length, no JSON, and a wasted retry.
+            response_format={"type": "json_object"},
         )
         content = resp.choices[0].message.content or ""
         tagged = parse_dialogue_json(content)
