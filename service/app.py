@@ -124,7 +124,8 @@ def submit_run(payload: dict = Body(default={})):
     # own folder instead of overwriting the first. The job carries that id (the
     # UI auto-selects it on completion); the pipeline still gets --window-end
     # for the actual collection window.
-    date = date or episodes.make_run_id(config["window_end"])
+    date = date or episodes.make_run_id(config["window_end"],
+                                        now=payload.get("now"))
     cmd = jobs.full_run_cmd(date=date, no_audio=no_audio, config=config)
     env = {"PIPELINE_DATA_ROOT": str(episodes.DATA_ROOT)}
     stage_estimates = jobs.estimate_stages(

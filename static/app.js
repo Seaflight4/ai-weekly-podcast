@@ -5,6 +5,12 @@ const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 let activeDate = null;
 let pollTimer = null;
 let confirmResolve = null;
+// Smooth elapsed clock for the run panel: between polls we advance the
+// displayed elapsed locally so it counts +1s per second instead of jumping in
+// poll-sized steps; each poll re-syncs it to the server's authoritative value.
+let clockTimer = null;
+let clockSync = { at: 0, elapsed: 0 };
+let lastProgress = null;
 // Persistent podcast config (data/podcast_config.yaml). Null until loaded;
 // the app forces the setup dialog when the file doesn't exist yet.
 let podcastConfig = null;
@@ -395,10 +401,15 @@ async function openRunPanel(job) {
     if (!res.ok) return;
     const j = await res.json();
     $("#run-title").textContent = `${j.kind} run ${j.id} — ${j.status}`;
+    lastProgress = j.progress;
+    clockSync = { at: Date.now(), elapsed: j.progress.elapsed_sec || 0 };
     renderProgress(j.progress);
     renderStages(j, j.progress.stage_index);
     if (j.status === "done" || j.status === "failed") {
       clearInterval(pollTimer); pollTimer = null;
+      if (clockTimer) { clearInterval(clockTimer); clockTimer = null; }
+      lastProgress = null;
+      renderProgress(j.progress);
       $("#run-panel").classList.add(j.status === "done" ? "done" : "failed");
       loadEpisodes();
       if (j.status === "failed") showRunError(j);
@@ -407,6 +418,13 @@ async function openRunPanel(job) {
   };
   poll();
   pollTimer = setInterval(poll, 1500);
+  if (!clockTimer) clockTimer = setInterval(tickClock, 500);
+}
+
+function tickClock() {
+  if (!lastProgress) return;
+  const elapsed = clockSync.elapsed + (Date.now() - clockSync.at) / 1000;
+  renderProgress(lastProgress, elapsed);
 }
 
 function showRunError(job) {
@@ -433,19 +451,22 @@ function fmtDur(sec) {
   return m > 0 ? `${m}m ${s}s` : `${s}s`;
 }
 
-function renderProgress(p) {
+function renderProgress(p, elapsedOverride = null) {
   if (!p) return;
   const bar = $("#progress-fill");
   const meta = $("#progress-meta");
   if (bar) bar.style.width = `${Math.round((p.fraction || 0) * 100)}%`;
   if (meta) {
-    meta.textContent = `${p.stage || "running"}… · ${fmtDur(p.elapsed_sec || 0)} elapsed`;
+    const elapsed = elapsedOverride !== null ? elapsedOverride : (p.elapsed_sec || 0);
+    meta.textContent = `${p.stage || "running"}… · ${fmtDur(elapsed)} elapsed`;
   }
 }
 $("#run-close").onclick = () => {
   $("#run-panel").classList.add("hidden");
   $("#run-panel").classList.remove("done", "failed");
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  if (clockTimer) { clearInterval(clockTimer); clockTimer = null; }
+  lastProgress = null;
 };
 
 // --- modal plumbing ----------------------------------------------------------
@@ -583,7 +604,12 @@ $("#btn-generate-cancel").onclick = closeModals;
     updateDerivedMeta("#gen-length", "#gen-depth", "#gen-sources", "#gen-minutes")));
 
 $("#btn-generate-run").onclick = async () => {
+  const now = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
   const body = {
+    // The user's local wall-clock time at submit, so the episode's timestamp
+    // matches what they see on their clock even though the server may run UTC.
+    now: `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`,
     podcast: {
       window_start: $("#gen-window-start").value,
       window_end: $("#gen-window-end").value,

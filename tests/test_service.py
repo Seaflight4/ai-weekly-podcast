@@ -73,6 +73,16 @@ def test_make_run_id_is_time_stamped_and_same_day_unique():
     assert a != b
 
 
+def test_make_run_id_accepts_client_local_time_string():
+    # A client-supplied local time string (e.g. from the browser) is used
+    # verbatim, so a UTC server still stamps the user's local time.
+    assert episodes.make_run_id("2026-08-31",
+                                "2026-08-31T08:39:12") == "31-08-2026-083912"
+    # Unparseable input falls back to server time (never crashes).
+    id_from_bad = episodes.make_run_id("2026-08-31", "garbage")
+    assert len(id_from_bad) == len("31-08-2026-000000")
+
+
 def test_episodes_get_run_loads_artifacts(tmp_path, monkeypatch):
     monkeypatch.setattr(episodes, "DATA_ROOT", tmp_path)
     r = tmp_path / "31-08-2026"; r.mkdir()

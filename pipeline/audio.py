@@ -17,12 +17,19 @@ import hashlib
 import json
 import logging
 import pathlib
+import re
 import time
 from dataclasses import dataclass
 
 from . import RankedItem
 
 logger = logging.getLogger(__name__)
+
+# Approximate clean spoken pace measured from past episodes (~130-150 wpm, so
+# ~0.40-0.45 s per spoken word). A garbled/looping TTS part is typically many
+# multiples of this — the part-audio sanity check uses it to catch such parts
+# before they are merged into the episode as meaningless noise.
+SECONDS_PER_WORD = 0.45
 
 
 # --- result -----------------------------------------------------------------
@@ -71,6 +78,30 @@ def _fingerprint_matches(marker: pathlib.Path, candidate: str) -> bool:
         return marker.read_text(encoding="utf-8").strip() == candidate
     except OSError:
         return False
+
+
+def _spoken_words(text: str) -> int:
+    """Word count of a part's dialogue, ignoring ``<PersonN>`` tags."""
+    return len(re.sub(r"</?Person[12]>", "", text or "").split())
+
+
+def part_audio_ok(part_text: str, part_path: pathlib.Path) -> bool:
+    """True if a synthesized part's audio duration is plausible for its words.
+
+    TTS occasionally returns a garbled/looping part whose audio is far longer
+    than its spoken text can account for (and is meaningless noise). Check the
+    duration against the word-derived expectation with a generous ceiling, so
+    the caller can re-synthesize (and eventually drop) the part instead of
+    merging noise into the episode. Returns False on unreadable audio too.
+    """
+    from pydub import AudioSegment
+    try:
+        dur = AudioSegment.from_file(str(part_path), format="mp3").duration_seconds
+    except Exception:
+        return False
+    expected = max(1, _spoken_words(part_text)) * SECONDS_PER_WORD
+    max_ok = max(expected * 2.5, expected + 90.0)
+    return dur <= max_ok
 
 
 # --- Podcastfy backend (vendored DeepSeek + TNG qwen3 TTS) -------------------
@@ -183,8 +214,28 @@ class PodcastfyBackend:
                 def on_part(idx: int, part_text: str):
                     part_path = str(part_audio_dir / f"part_{idx:03d}.mp3")
                     def _tts_part():
-                        tts.convert_to_speech(part_text, part_path)
-                        return part_path
+                        # TTS occasionally synthesizes a garbled/looping part
+                        # whose audio is far longer (and noisier) than its words
+                        # allow. Verify each part's duration against its spoken
+                        # length and re-synthesize once; drop the part (never
+                        # merge noise) if it is still out of proportion.
+                        for attempt in (1, 2):
+                            try:
+                                tts.convert_to_speech(part_text, part_path)
+                            except Exception as e:
+                                logger.warning(
+                                    "[tts] part %d TTS error (attempt %d): %s",
+                                    idx, attempt, e)
+                                return None
+                            if part_audio_ok(part_text, pathlib.Path(part_path)):
+                                return part_path
+                            logger.warning(
+                                "[tts] part %d audio out-of-band for its word "
+                                "count (attempt %d) — re-synthesizing", idx, attempt)
+                        logger.error(
+                            "[tts] part %d audio still out-of-band after retry "
+                            "— dropping garbled part from episode", idx)
+                        return None
                     part_futures[idx] = tts_pool.submit(_tts_part)
 
                 t0 = time.perf_counter()
@@ -206,6 +257,10 @@ class PodcastfyBackend:
                 for idx in sorted(part_futures.keys()):
                     try:
                         part_path = part_futures[idx].result()
+                        if part_path is None:
+                            logger.warning(
+                                "Skipping part %d (no usable audio after retries)", idx)
+                            continue
                         p = pathlib.Path(part_path)
                         if p.exists() and p.stat().st_size > 0:
                             combined_audio += AudioSegment.from_file(

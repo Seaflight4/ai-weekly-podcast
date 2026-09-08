@@ -54,12 +54,26 @@ def _parse_run_id(name: str) -> datetime.datetime | None:
     return None
 
 
-def make_run_id(window_end_iso: str, now: datetime.datetime | None = None) -> str:
-    """Build the unique id for a new episode: the window-end date plus the
-    creation time (DD-MM-YYYY-HHMMSS), so a second episode generated the same
-    day gets its own folder instead of overwriting the first."""
+def make_run_id(window_end_iso: str,
+                now: datetime.datetime | str | None = None) -> str:
+    """Build the unique id for a new episode: the window-end date plus a
+    user's local creation time (DD-MM-YYYY-HHMMSS), so a second episode
+    generated the same day gets its own folder instead of overwriting the
+    first.
+
+    ``now`` is the client's local wall-clock time — a datetime or an ISO-ish
+    string like ``YYYY-MM-DDTHH:MM:SS``. It falls back to the server's local
+    time only when ``now`` is missing or unparseable (the server may run UTC,
+    so a client-supplied local time keeps the stamp in the user's timezone).
+    """
     d = datetime.date.fromisoformat(window_end_iso)
-    now = now or datetime.datetime.now()
+    if now is None:
+        now = datetime.datetime.now()
+    elif isinstance(now, str):
+        try:
+            now = datetime.datetime.fromisoformat(now.strip())
+        except ValueError:
+            now = datetime.datetime.now()
     return f"{d.strftime(DATE_FORMAT)}-{now.strftime('%H%M%S')}"
 
 

@@ -425,6 +425,27 @@ def test_audio_result_dataclass():
     assert r.transcript_path is not None
 
 
+def test_part_audio_ok_rejects_garbled_oversized_part(tmp_path):
+    """The part-audio sanity check accepts duration consistent with the part's
+    word count and rejects a part that is many multiples longer — the garbled
+    TTS signature seen in production (e.g. part_006: 442s for ~350 words)."""
+    from pipeline import audio
+    from pydub import AudioSegment
+
+    # ~20 words with ~2s of audio: well within the word-derived ceiling.
+    short = tmp_path / "short.mp3"
+    AudioSegment.silent(duration=2000).export(str(short), format="mp3")
+    assert audio.part_audio_ok(" ".join(["word"] * 20), short) is True
+
+    # ~100 words but 200s of audio: far longer than ~45s expected -> reject.
+    long_p = tmp_path / "garbled.mp3"
+    AudioSegment.silent(duration=200_000).export(str(long_p), format="mp3")
+    assert audio.part_audio_ok(" ".join(["word"] * 100), long_p) is False
+
+    # Unreadable/missing audio is never accepted.
+    assert audio.part_audio_ok("some words", tmp_path / "missing.mp3") is False
+
+
 def test_podcastfy_backend_generate_writes_audio_and_transcript(tmp_path, monkeypatch):
     """PodcastfyBackend.generate drives SimplePodcastGenerator (mocked) and
     writes episode.mp3 + transcript.md into the run dir, returning a result
