@@ -58,7 +58,8 @@ def run(only: str | None = None, no_audio: bool = False,
         date = cfg.window_end
     if only is None:
         print("[1/3] collecting...")
-        items = _timed("collect", collect.collect, cfg.window_end, window_start=cfg.window_start)
+        items = _timed("collect", collect.collect, cfg.window_end,
+                       window_start=cfg.window_start, anchor=date)
         print(f"      {len(items)} items")
 
         print("[2/3] ranking...")

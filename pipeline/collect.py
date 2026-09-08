@@ -262,7 +262,8 @@ def _collect_hf(date: str, start: datetime.date) -> list[Item]:
     return kept
 
 
-def collect(date: str | None = None, window_start: str | None = None) -> list[Item]:
+def collect(date: str | None = None, window_start: str | None = None,
+            anchor: str | None = None) -> list[Item]:
     """Fetch the week's AI news from every registered source concurrently.
 
     ``SOURCES`` maps a source id to its collector (``fn(date, start) -> list[Item]``);
@@ -272,7 +273,9 @@ def collect(date: str | None = None, window_start: str | None = None) -> list[It
     gate -> README fetch. Cross-source dedup is a data-driven rule list
     (``DEDUP_RULES``), so adding a source is register-a-collector + a rule.
 
-    ``date`` is the window end / run anchor (ISO date, defaults to today);
+    ``date`` is the window end (ISO date, defaults to today) and also the
+    storage anchor unless ``anchor`` is given — a full-run passes its unique
+    run id here so collect.json lands in the same folder as rank/episode.
     ``window_start`` (ISO date) overrides the default 7-day-back cutoff.
     """
     if date is None:
@@ -296,7 +299,7 @@ def collect(date: str | None = None, window_start: str | None = None) -> list[It
     if not items:
         raise SystemExit("collect: no items from any source — refusing to write an empty file")
 
-    store.write("collect.json", [i.__dict__ for i in items], date=date)
+    store.write("collect.json", [i.__dict__ for i in items], date=anchor or date)
     return items
 
 # --- source: Hacker News (Algolia JSON): points>100 candidates, title+URL only ---

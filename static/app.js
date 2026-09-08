@@ -109,7 +109,7 @@ async function loadEpisodes() {
     else meta.push(`· audio`);
     if (ep.has_transcript) meta.push("· transcript");
     li.innerHTML = `
-      <div class="ep-date">${ep.date} <span class="badge badge-${badge}">${ep.status}</span></div>
+      <div class="ep-date">${ep.date_label || ep.date} <span class="badge badge-${badge}">${ep.status}</span></div>
       <div class="ep-meta">${meta.join(" ")}</div>`;
     li.onclick = () => selectEpisode(ep.date);
     ul.appendChild(li);
@@ -152,7 +152,7 @@ function renderDetail(run) {
   body.innerHTML = `
     <div class="hero">
       <div class="detail-head">
-        <h2>${run.date}</h2>
+        <h2>${run.date_label || run.date}</h2>
         <span class="chip">${run.items} items</span>
         ${srcChip}
         ${durChip}
@@ -176,7 +176,7 @@ function renderDetail(run) {
   $$("#detail-tabs button").forEach((b) =>
     b.onclick = () => switchDetailTab(b.dataset.dtab));
   $("#btn-personalize").onclick = () => openPersonalize(run);
-  $("#btn-delete").onclick = () => deleteEpisode(run.date);
+  $("#btn-delete").onclick = () => deleteEpisode(run);
 }
 
 function switchDetailTab(tab) {
@@ -211,10 +211,12 @@ function renderTranscript(md) {
   return html;
 }
 
-async function deleteEpisode(date) {
+async function deleteEpisode(run) {
+  const date = run.date;
+  const label = run.date_label || run.date;
   const ok = await askConfirm({
     title: "Delete episode",
-    message: `Delete the episode for ${date} from history? This cannot be undone.`,
+    message: `Delete the episode for ${label} from history? This cannot be undone.`,
     confirmLabel: "Delete",
     danger: true,
   });
@@ -227,7 +229,7 @@ async function deleteEpisode(date) {
   }
   activeDate = null;
   loadEpisodes();
-  showToast(`Deleted episode ${date}.`);
+  showToast(`Deleted episode ${label}.`);
   showEmptyState();
 }
 
@@ -285,7 +287,7 @@ function renderPersonalize(parsed, run) {
   const count = () => allItems.filter((it) => !it.removed).length;
   body.innerHTML = `
     <div class="detail-head perso-head">
-      <h2>Edit brief — ${run.date}</h2>
+      <h2>Edit brief — ${run.date_label || run.date}</h2>
       <span class="count-chip" id="perso-count">${count()} kept</span>
     </div>
     <p class="muted">Delete items to drop them from the audio. "Generate audio" re-renders this episode's mp3 with your selection, replacing it in history.</p>
@@ -331,7 +333,7 @@ function renderPersonalize(parsed, run) {
     if (kept === 0) { showToast("Keep at least one item.", "error"); return; }
     const ok = await askConfirm({
       title: "Re-render audio",
-      message: `Re-render the audio for ${run.date} with ${kept} items? The existing episode is replaced.`,
+      message: `Re-render the audio for ${run.date_label || run.date} with ${kept} items? The existing episode is replaced.`,
       confirmLabel: "Generate audio",
     });
     if (!ok) return;
@@ -437,8 +439,7 @@ function renderProgress(p) {
   const meta = $("#progress-meta");
   if (bar) bar.style.width = `${Math.round((p.fraction || 0) * 100)}%`;
   if (meta) {
-    const eta = p.eta_sec > 0 ? ` · ~${fmtDur(p.eta_sec)} left` : "";
-    meta.textContent = `${p.stage || "running"}… · ${fmtDur(p.elapsed_sec || 0)} elapsed${eta}`;
+    meta.textContent = `${p.stage || "running"}… · ${fmtDur(p.elapsed_sec || 0)} elapsed`;
   }
 }
 $("#run-close").onclick = () => {

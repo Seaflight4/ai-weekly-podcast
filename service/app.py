@@ -118,11 +118,13 @@ def submit_run(payload: dict = Body(default={})):
         config = podcast_config.resolved_run_config(payload.get("podcast"))
     except ValueError as e:
         raise HTTPException(400, str(e))
-    # The run anchors on the resolved window end (its data/history folder
-    # date); fall back to it when the body omits an explicit `date` so the
-    # job always knows which episode it produced (the UI auto-selects it on
-    # completion).
-    date = date or config["window_end"]
+    # The run anchors on the resolved window end. Unless the body pins an
+    # explicit folder date, build a unique time-stamped id (DD-MM-YYYY-HHMMSS)
+    # from the window end so a second episode generated the same day gets its
+    # own folder instead of overwriting the first. The job carries that id (the
+    # UI auto-selects it on completion); the pipeline still gets --window-end
+    # for the actual collection window.
+    date = date or episodes.make_run_id(config["window_end"])
     cmd = jobs.full_run_cmd(date=date, no_audio=no_audio, config=config)
     env = {"PIPELINE_DATA_ROOT": str(episodes.DATA_ROOT)}
     stage_estimates = jobs.estimate_stages(

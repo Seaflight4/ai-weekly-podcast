@@ -1,7 +1,8 @@
 """Scan data/history/ for run folders and load their artifacts.
 
 The filesystem is the source of truth — no DB. A run folder is named
-``DD-MM-YYYY`` (the format the pipeline writes). Each folder may contain:
+``DD-MM-YYYY`` (legacy) or ``DD-MM-YYYY-HHMMSS`` (time-stamped run id, the
+default for new episodes). Each folder may contain:
 
     collect.json     — every collected Item
     rank.json         — the full scored pool (RankedItem)
@@ -23,36 +24,70 @@ import shutil
 
 DATA_ROOT = pathlib.Path("data/history")
 DATE_FORMAT = "%d-%m-%Y"
+# Run folders are time-stamped (DD-MM-YYYY-HHMMSS) so a second episode
+# generated the same day gets its own folder instead of overwriting the first.
+# Legacy date-only folders (DATE_FORMAT) remain readable.
+RUN_ID_FORMAT = "%d-%m-%Y-%H%M%S"
 
 
 def _normalize_date(date: str) -> str:
-    """Accept ISO (YYYY-MM-DD) or DD-MM-YYYY; return DD-MM-YYYY (folder format)."""
-    for fmt in ("%Y-%m-%d", DATE_FORMAT):
+    """Accept ISO (YYYY-MM-DD), DD-MM-YYYY, or a run id DD-MM-YYYY-HHMMSS;
+    return the folder name (ISO -> DD-MM-YYYY; other forms unchanged)."""
+    for fmt in ("%Y-%m-%d", RUN_ID_FORMAT, DATE_FORMAT):
         try:
-            return datetime.datetime.strptime(date, fmt).strftime(DATE_FORMAT)
+            parsed = datetime.datetime.strptime(date, fmt)
         except ValueError:
             continue
-    raise ValueError(f"bad date {date!r} — expected YYYY-MM-DD or DD-MM-YYYY")
+        return parsed.strftime(DATE_FORMAT if fmt == "%Y-%m-%d" else fmt)
+    raise ValueError(f"bad date {date!r} — expected "
+                     f"YYYY-MM-DD, DD-MM-YYYY, or DD-MM-YYYY-HHMMSS")
+
+
+def _parse_run_id(name: str) -> datetime.datetime | None:
+    """Parse a run folder name (DD-MM-YYYY or DD-MM-YYYY-HHMMSS) to a datetime,
+    or None if it isn't a run folder."""
+    for fmt in (RUN_ID_FORMAT, DATE_FORMAT):
+        try:
+            return datetime.datetime.strptime(name, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def make_run_id(window_end_iso: str, now: datetime.datetime | None = None) -> str:
+    """Build the unique id for a new episode: the window-end date plus the
+    creation time (DD-MM-YYYY-HHMMSS), so a second episode generated the same
+    day gets its own folder instead of overwriting the first."""
+    d = datetime.date.fromisoformat(window_end_iso)
+    now = now or datetime.datetime.now()
+    return f"{d.strftime(DATE_FORMAT)}-{now.strftime('%H%M%S')}"
+
+
+def _date_label(run_id: str) -> str:
+    """Human label for a run id: 'DD-MM-YYYY' when it has no time component,
+    else 'DD-MM-YYYY HH:MM'."""
+    dt = _parse_run_id(run_id)
+    if dt is None:
+        return run_id
+    if dt.hour == dt.minute == dt.second == 0:
+        return dt.strftime(DATE_FORMAT)
+    return dt.strftime(DATE_FORMAT + " %H:%M")
 
 
 def _is_run_folder(name: str) -> bool:
-    try:
-        datetime.datetime.strptime(name, DATE_FORMAT)
-        return True
-    except ValueError:
-        return False
+    return _parse_run_id(name) is not None
 
 
 def _list_runs(root: pathlib.Path) -> list[dict]:
     """All run folders under ``root``, newest first, with a status badge."""
     if not root.exists():
         return []
-    runs: list[tuple[datetime.date, dict]] = []
+    runs: list[tuple[datetime.datetime, dict]] = []
     for p in root.iterdir():
         if not p.is_dir() or not _is_run_folder(p.name):
             continue
-        d = datetime.datetime.strptime(p.name, DATE_FORMAT).date()
-        runs.append((d, _run_summary(p)))
+        dt = _parse_run_id(p.name)
+        runs.append((dt, _run_summary(p)))
     runs.sort(key=lambda t: t[0], reverse=True)
     return [r for _, r in runs]
 
@@ -68,6 +103,7 @@ def _run_summary(folder: pathlib.Path) -> dict:
         status = "ready"
     return {
         "date": folder.name,
+        "date_label": _date_label(folder.name),
         "status": status,
         "has_audio": audio.exists(),
         "has_transcript": (folder / "transcript.md").exists(),

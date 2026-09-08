@@ -80,10 +80,22 @@ def test_latest_dir_sorts_by_date_not_lexicographically(tmp_path, monkeypatch):
     root.mkdir()
     (root / "31-12-2026").mkdir()
     (root / "02-01-2027").mkdir()
+    # a time-stamped run on the same day is newer than the bare-date folder
+    (root / "02-01-2027-235959").mkdir()
     (root / "not-a-date").mkdir()
     monkeypatch.setattr(store, "ROOT", root)
     latest = store.latest_dir()
-    assert latest.name == "02-01-2027"
+    assert latest.name == "02-01-2027-235959"
+
+
+def test_store_run_dir_accepts_run_id(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, "ROOT", tmp_path)
+    d = store.run_dir("31-08-2026-154500")
+    assert d == tmp_path / "31-08-2026-154500"
+    assert d.is_dir()
+    # ISO still normalizes to the plain date folder.
+    d2 = store.run_dir("2026-08-31")
+    assert d2 == tmp_path / "31-08-2026"
 
 
 def test_latest_dir_raises_when_no_run_folders(tmp_path, monkeypatch):

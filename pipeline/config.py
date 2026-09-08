@@ -223,8 +223,10 @@ def resolve(config_path: str | Path | None = None, *,
     cfg = RunConfig()
     if config_path is not None:
         cfg = _apply_file(cfg, config_path)
-    # --date back-compat: it is the window end / run anchor.
-    if window_end is None and date is not None:
+    # --date back-compat: it is the window end / run anchor. Only applies when
+    # it is an actual ISO date — a run id (DD-MM-YYYY-HHMMSS, the unique run
+    # folder the stage re-runs target) must never be parsed as a window date.
+    if window_end is None and date is not None and _looks_iso(date):
         window_end = date
     for name, value in (
         ("window_start", window_start),
@@ -283,3 +285,11 @@ def _parse_date(s: str, label: str) -> datetime.date:
         return datetime.date.fromisoformat(s.strip())
     except ValueError:
         raise ValueError(f"{label} must be an ISO date YYYY-MM-DD, got {s!r}")
+
+
+def _looks_iso(s: str) -> bool:
+    try:
+        datetime.date.fromisoformat(s.strip())
+        return True
+    except ValueError:
+        return False

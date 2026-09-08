@@ -1,260 +1,68 @@
 # AI Weekly Podcast
 
-A small, on-demand pipeline that turns a week of AI research and community news
-into a podcast episode. Three stages, each a single Python module with a stable
-contract, so any stage can be swapped without touching its neighbours.
+An on-demand pipeline that turns the past week of AI research and community news
+into a podcast episode. Everything runs in your browser: generate an episode,
+play it, and read or edit its content.
 
-```
-collect ──> HN (points>100, 7d, batched LLM relevance gate, per-URL body fetch)
-         ─-> arXiv (cs.AI, 7d, full abstracts, LLM relevance gate)
-         ─-> Hugging Face (7d recently-modified models, LLM gate, per-card README fetch)
-rank    ─-> unified rubric scores the whole pool (pure importance, no personal pass)
-generate ─> threshold-selected items fed to the vendored podcastfy audio backend
-```
+## Prerequisites
 
-The `generate` stage feeds the selected items to a vendored **podcastfy** stack:
-it re-fetches full arXiv PDFs and HN/web pages, generates a two-host transcript
-via an OpenAI-compatible LLM (DeepSeek on the SkaiNet gateway — same
-`SKAINET_API_KEY`), and synthesizes voice-cloned audio via the TNG qwen3 TTS
-service. It also writes a ground-truth `transcript.md`, so the `transcribe`
-stage is a no-op.
+- [Docker](https://docs.docker.com/get-docker/) (with Compose; Desktop/colima
+  all work)
+- A SkaiNet (OpenAI-compatible) API key for LLM calls and audio synthesis
 
-## Stages & contracts
-
-| Stage | Input | Output |
-|-------|-------|--------|
-| `collect` | date (default: today) | `<data/history/DD-MM-YYYY>/collect.json` — every `Item`: title, url, date, body, source (`hn`, `arxiv` or `hf`) |
-| `rank` | collect.json | `<data/history/DD-MM-YYYY>/rank.json` — the **full** scored pool (sorted desc, no top-N slice) |
-| `generate` | rank.json | `<data/history/DD-MM-YYYY>/podcast_brief.md` + `episode.json` manifest + `episode.mp3` + `transcript.md` |
-
-Each run writes all of its outputs into a folder named
-`data/history/DD-MM-YYYY/` (run anchor date = window end), so successive runs
-never overwrite each other. Running a single stage in isolation reads from the
-most recent folder's previous-stage file. `data/history/` is the **single
-episode namespace**: everything the UI lists, no matter which flow created it.
-
-**HN prefiltering** happens server-side at `points>100` (community signal), then
-a **batched LLM relevance gate** keeps only stories useful to AI researchers at
-a company. **arXiv** is now gated too (recall-leaning, on title+abstract) so the
-judge sees the plausibly-relevant survivors, not all ~987 cs.AI papers. Points
-are used only to *select*, never emitted, so the judge weighs content, not hype.
-**Hugging Face** (`hf`) captures the week's shipped-model signal: the last-7-days
-`lastModified` feed is prefiltered cheaply (non-private, at least one download or
-like) to kill the zero-traction junk, gated by the same small-model relevance
-gate on the model id, then the survivors' model-card READMEs are fetched as the
-body (mirroring the HN fetch path).
-
-**A source with no content is dropped at collect** — never fed to rank and never
-aired. Only HN/HF can end up bodyless (their per-item page/README fetch can come
-back empty; arXiv always carries its abstract), so after each branch's body
-fetch, empty-body items are pruned: a bodyless story would ask the judge to read
-nothing and would air as an empty topic.
-
-**The run window is a full-inclusive `[start, end]` date range for every source**
-(both end days are whole days): arXiv filters `submittedDate`, HN filters
-`created_at` (submission time, so a one-day window returns that day's stories),
-and HF is inclusive on `lastModified` (i.e. "repos shipped/updated in the
-window" — note this is not `createdAt`, so a repo touched this week counts even
-if it was published earlier).
-
-**Cross-source dedup** is deterministic, O(n) per rule, and data-driven: a
-`DEDUP_RULES` table lists `(winner, dropper, key)` triples that drop an HN item
-when its URL references an already-collected arXiv paper or HF model card, and
-drop an HF release whose README cites an already-collected arXiv paper. No
-quadratic similarity search.
-
-**Adding a source** is a data change, not a refactor: register a collector
-`fn(date, start) -> list[Item]` in `collect.SOURCES`, give it a human label in
-`generate.SOURCE_LABELS` (drives the brief's section heading), and add any
-dedup rules to `collect.DEDUP_RULES`. The rank rubric, brief, audio backend
-(non-arXiv items are fetched as "web" content) and UI all consume sources
-generically.
-
-**Ranking** (`rank`): a unified rubric scores the whole pool on general
-importance. There is no personalization pass — every listener gets the same
-ranking.
-
-**Source selection** (`generate`): the target count is derived from the run
-config's word budget (see below) — e.g. medium + deep-dive ≈ 7 sources,
-clamped to 4–30. The top `target_n` items by score above a quality floor
-(`score >= 0.5`) air; a weak week is never padded with sub-floor junk. The
-resolved config is stored in every run dir as `config.yaml` for reproducibility.
-
-### Episode length & topic depth → duration
-
-Length and depth are two independent knobs; the word budget makes them
-conform:
-
-- **Length** sets the *total* spoken-word budget: `length_minutes × WPM`
-  (spoken words-per-minute is fixed at **165**).
-- **Depth** sets the *per-source* budget: `depth_minutes × WPM`
-  (`brief` = 1 min/source, `deep-dive` = 2 min/source).
-- Intro + recap take **20%** of the total; source count falls out of the rest:
-  `num_sources = (length − 20%) ÷ per-source-minutes`.
-
-| Length | total / intro+recap | Brief (1 min/source) | Deep-dive (2 min/source) |
-|---|---|---|---|
-| Short 10 min | 1650 / 330 w | 8 × 165 w | 4 × 330 w |
-| Medium 17.5 min | 2888 / 578 w | 14 × 165 w | 7 × 330 w |
-| Long 30 min | 4950 / 990 w | 24 × 165 w | 12 × 330 w |
-
-Each part is prompted to **target about its word ceiling** (`targeting about N
-words`), the LLM call is **retried while the part's word count falls outside
-±20% of that target** (undergenerating fills, overgenerating is retried too),
-and on retry exhaustion the closest-to-target attempt is kept and then
-deterministically trimmed to the last sentence boundary within budget — so the
-finished episode lands near the requested length instead of drifting or
-undershooting (the old behaviour produced ~20+ min for a "medium" episode, and
-thinly-fed parts routinely landed at 60-80% of their budget). Topic depth only
-scales how much source *text* the LLM sees (`per_paper_chars` × `depth_factor`);
-it never scales the output word budget.
-
-**Audio generation** (`generate`): the selected items are written into a
-`podcast_brief.md` and fed to the vendored podcastfy backend. It re-fetches full
-arXiv PDFs (10k head + 3k tail) and HN/web pages (22k) into a per-run cache,
-generates a two-host transcript via DeepSeek on the SkaiNet gateway (reusing the
-existing `SKAINET_API_KEY`), and synthesizes voice-cloned audio via the TNG qwen3
-TTS service. Audience level, familiar topics, depth and source count from the
-run config shape the transcript prompt and part budget. It needs `ffmpeg` on
-`PATH` (for pydub MP3 encoding).
-
-## Requirements
-
-- Python 3.11+
-- An OpenAI-compatible API key (used by the relevance gate + ranking judge, and
-  reused by the podcastfy backend's TNG TTS)
-- `ffmpeg` on `PATH` (for pydub MP3 encoding)
-
-## Setup
+## Quick start
 
 ```bash
-python -m venv .venv
-.venv/bin/pip install -e ".[test]"
-
-cp .env.example .env    # then set SKAINET_API_KEY
-```
-
-## Usage
-
-```bash
-# run all three stages (collect -> rank -> generate) for the past week
-.venv/bin/python -m pipeline run
-
-# anchor the run at a different window end (window = past 7 days)
-.venv/bin/python -m pipeline run --date 2026-08-28
-
-# or re-run a single stage from the previous stage's file
-.venv/bin/python -m pipeline run --only collect
-.venv/bin/python -m pipeline run --only rank
-.venv/bin/python -m pipeline run --only generate --no-audio
-
-# re-run rank from a cached rank.json (fast iteration)
-.venv/bin/python -m pipeline run --only rank --from-cache data/history/28-08-2026/rank.json
-
-# regenerate audio from a cached transcript (skip the LLM step)
-.venv/bin/python -m pipeline run --only generate --transcript-in data/history/28-08-2026/transcript.md
-```
-
-The `--no-audio` flag skips the audio backend and stops after writing
-`podcast_brief.md` + `episode.json`. The `--transcript-in` flag reuses a cached
-transcript and goes straight to TTS — useful for retrying audio after a
-transient TTS outage without paying the multi-minute LLM cost again.
-
-The audio backend may also automatically reuse an existing `transcript.md` in
-the run dir, but **only when its stored fingerprint still matches the current
-brief, selection and config** (stored under `.podcastfy-cache/transcript.fingerprint`).
-A stale transcript — e.g. after a full re-run on the same date with a
-different window/length, an edited brief, or changed config — is silently
-regenerated instead, so a run's audio always reflects what was actually selected.
-
-## The web app (for colleagues)
-
-The fastest way to run the app locally is Docker, which bundles `ffmpeg` and
-all Python deps. The service serves a single-page UI on port 8000.
-
-```bash
-git clone <repo> && cd learn-ai-podcast-pipeline
+git clone <repo> && cd source-ranking
 cp .env.example .env          # then set SKAINET_API_KEY
 docker compose up --build     # then open http://localhost:8000 in your browser
 ```
 
-Always use `--build`: a plain `docker compose up` silently reuses the
-last-built image, so after pulling new code you'd keep running the old UI —
-and if the frontend/root route is newer than the image, you'll get a
-`{"detail":"Not Found"}` 404 at `/`. With `--build` Docker rebuilds only the
-layers that changed (fast when deps are unchanged). The Dockerfile uses no
-BuildKit-specific features (`RUN --mount=`), so it builds on any engine —
-Linux Docker, Docker Desktop, or a homebrew CLI + colima setup — with no extra
-plugins to install.
+To update the project later, pull the new code and rebuild:
 
-The container runs as root on purpose (so the `./data` bind mount is writable
-on any machine — Linux rootful/rootless, macOS/Windows Docker Desktop — with
-zero setup). Episodes, config and job logs land as root-owned files under
-`./data`, which is fine because everything happens inside the container. Note:
-`0.0.0.0:8000` in the container logs is the server's bind address — you browse
-to `http://localhost:8000`.
+```bash
+git pull
+docker compose up --build
+```
 
-On first open the app shows a **Set up your podcast** dialog, pre-filled with
-defaults (past 7 days, Researcher, no familiar topics, Medium 15–20 min,
-Deep-dive). Saving writes `data/podcast_config.yaml` — the persistent config
-that survives browser sessions and container restarts:
+Always use `--build`: a plain `docker compose up` reuses the last-built image,
+so after pulling new code you would keep running the old version. With `--build`
+Docker rebuilds only the changed layers (fast when dependencies are unchanged).
 
-- **For you** (applies to every generation): knowledge level (audience) and
-  familiar topics — the LLM tailors explanations to these.
-- **Episode shape** (dialog defaults): rolling window in days, podcast length,
-  topic depth. These pre-fill the *Generate new episode* dialog and are not
-  written back.
+Your episodes, settings and job logs persist locally in the `./data` folder
+(gitignored, so nothing is shared or committed).
+
+## Using the app
+
+On first open, the **Set up your podcast** dialog appears:
+
+- **Audience** (knowledge level) and **familiar topics** — the episode is
+  tailored to these.
+- **Episode shape** — rolling window in days, podcast length, and topic depth
+  per source.
+
+Save to keep these settings (they can be changed anytime under **Settings**).
 
 Then, all in the browser:
 
-- **Generate new episode** — confirm the pre-filled window/length/depth (with a
-  live "derived sources · est. minutes" preview) and the run starts. The run
-  panel shows a **progress bar with ETA** (fixed estimates: collect ~2m,
-  rank ~1.5m, generate ~5m) plus the live log tail. One run at a time.
-- **History** — every generated episode, newest first, with ready/draft badges.
-  Click to play the audio and read the **Brief** / **Transcript** tabs.
-- **Edit brief** — delete/restore sources from the brief and re-render the
-  audio. The episode is **replaced in place** (its `episode.mp3`,
-  `transcript.md` and manifest are regenerated; the new-length/depth come from
-  that run's stored `config.yaml`, the knowledge level from the current
-  persistent config).
+- **Generate new episode** — confirm the window, length and depth, and the run
+  starts. The panel tracks progress and shows the live log; one run at a time.
+  Generating twice in one day keeps **both** episodes — history is
+  time-stamped, so a new episode never overwrites an earlier one.
+- **History** — every episode, newest first, with ready/draft badges. Click one
+  to play the audio and read the **Brief** and **Transcript** tabs.
+- **Edit brief** — remove or restore sources, then re-render the audio. The
+  episode is replaced in place with your selection.
 - **Delete** — removes an episode from history entirely.
-- **Settings** — edits `data/podcast_config.yaml` anytime.
-
-Your episode history, config and job logs all persist locally in the `./data`
-volume mount. `data/` is gitignored — history is per-machine, nothing is
-committed (only `data/.gitkeep`, so the bind mount always has a directory).
-There is no scheduled auto-run: episodes are generated explicitly (from the
-UI or the CLI). Because the container writes `data/` as root, run the pipeline
-on the host (`.venv/bin/python -m pipeline run`) only against a **separate**
-`PIPELINE_DATA_ROOT` — a host run sharing the container's `data/` would hit
-root-owned files.
-
-## Validation
-
-```bash
-.venv/bin/python -m pytest tests/ -q     # contract tests (no network, no LLM)
-```
 
 ## Configuration
 
-Environment variables (`.env`) only carry the API keys/models:
+Environment variables (`.env`) only carry API keys/endpoints:
 
 | Variable | Purpose |
 |----------|---------|
-| `SKAINET_API_KEY` | API key for the OpenAI-compatible judge backend (required); also reused by the podcastfy backend's TNG TTS |
-| `LLM_API_BASE` | OpenAI-compatible LLM endpoint for the podcastfy transcript LLM |
+| `SKAINET_API_KEY` | API key for the LLM judge/transcript backend (required); also used for TTS |
+| `LLM_API_BASE` | OpenAI-compatible LLM endpoint for the podcast transcript |
 
-Model choices are **fixed constants in their modules** (not configurable via
-env): collect gates use `mistralai/Mistral-Small-3.2-24B-Instruct-2506`
-(`collect.RELEVANCE_MODEL`), the rank judge uses `Qwen/Qwen3.8-27B`
-(`llm.JUDGE_MODEL`), the podcastfy **transcript LLM is pinned to
-`deepseek-ai/DeepSeek-V4-Flash-0731`** (`podcastfy.generator.DEFAULT_MODEL` —
-a heavier reasoning model's thinking preamble exhausts `max_output_tokens` and
-truncates the JSON, forcing empty/one-turn retries), and TTS is TNG `qwen3`.
-
-Everything user-facing lives in `data/podcast_config.yaml` (edited via the
-UI's setup/Settings dialog): `user.audience`, `user.familiar_topics`,
-`podcast.window_days`, `podcast.length`, `podcast.depth`. The relevance gate
-model (`pipeline/collect.py`) and the batch sizes are constants in their
-respective modules.
+Everything user-facing (audience, familiar topics, window, length, depth) is
+edited in the UI and stored in `data/podcast_config.yaml`.

@@ -23,6 +23,12 @@ def test_episodes_list_status_badges(tmp_path, monkeypatch):
         "selection_source": "personalized",
         "duration_sec": 754.5, "transcript_words": 2000}))
     (r / "episode.mp3").write_bytes(b"")
+    # ready, time-stamped: a second episode generated the same day
+    r2 = tmp_path / "31-08-2026-154500"; r2.mkdir()
+    (r2 / "episode.json").write_text(json.dumps({
+        "manifest": [{"url": "u2"}], "created_at": "2026-08-31T15:45:00Z",
+        "selection_source": "auto"}))
+    (r2 / "episode.mp3").write_bytes(b"")
     # draft: episode.json but no mp3
     d = tmp_path / "24-08-2026"; d.mkdir()
     (d / "episode.json").write_text(json.dumps({"manifest": []}))
@@ -32,14 +38,39 @@ def test_episodes_list_status_badges(tmp_path, monkeypatch):
     (tmp_path / ".jobs").mkdir()
 
     runs = episodes.list_runs()
-    assert [x["date"] for x in runs] == ["31-08-2026", "24-08-2026", "17-08-2026"]
+    assert [x["date"] for x in runs] == [
+        "31-08-2026-154500", "31-08-2026", "24-08-2026", "17-08-2026"]
     by_date = {x["date"]: x for x in runs}
     assert by_date["31-08-2026"]["status"] == "ready"
+    assert by_date["31-08-2026"]["date_label"] == "31-08-2026"
     assert by_date["31-08-2026"]["selection_source"] == "personalized"
     assert by_date["31-08-2026"]["duration_sec"] == 754.5
     assert by_date["31-08-2026"]["transcript_words"] == 2000
+    assert by_date["31-08-2026-154500"]["status"] == "ready"
+    assert by_date["31-08-2026-154500"]["date_label"] == "31-08-2026 15:45"
     assert by_date["24-08-2026"]["status"] == "draft"
     assert by_date["17-08-2026"]["status"] == "empty"
+
+
+def test_episodes_get_run_accepts_time_stamped_id(tmp_path, monkeypatch):
+    monkeypatch.setattr(episodes, "DATA_ROOT", tmp_path)
+    r = tmp_path / "31-08-2026-154500"; r.mkdir()
+    (r / "episode.json").write_text(json.dumps({"manifest": [{"url": "u"}]}))
+    (r / "podcast_brief.md").write_text("# brief")
+    (r / "rank.json").write_text(json.dumps([{"url": "u", "score": 0.9}]))
+    run = episodes.get_run("31-08-2026-154500")
+    assert run is not None
+    assert run["brief"] == "# brief"
+    assert run["rank"][0]["score"] == 0.9
+
+
+def test_make_run_id_is_time_stamped_and_same_day_unique():
+    import datetime
+    a = episodes.make_run_id("2026-08-31", datetime.datetime(2026, 8, 31, 9, 0, 0))
+    b = episodes.make_run_id("2026-08-31", datetime.datetime(2026, 8, 31, 15, 45, 30))
+    assert a == "31-08-2026-090000"
+    assert b == "31-08-2026-154530"
+    assert a != b
 
 
 def test_episodes_get_run_loads_artifacts(tmp_path, monkeypatch):
@@ -218,6 +249,10 @@ def test_episodes_delete_run(tmp_path, monkeypatch):
     assert episodes.delete_run("2026-08-31") is True
     assert not r.exists()
     assert episodes.delete_run("2026-08-31") is False
+    r2 = tmp_path / "31-08-2026-154500"; r2.mkdir()
+    (r2 / "episode.json").write_text("{}")
+    assert episodes.delete_run("31-08-2026-154500") is True
+    assert not r2.exists()
     with pytest.raises(ValueError):
         episodes.delete_run("not-a-date")
 
