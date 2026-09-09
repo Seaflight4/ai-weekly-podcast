@@ -20,6 +20,7 @@ from __future__ import annotations
 import datetime
 import json
 import pathlib
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from . import llm
@@ -201,11 +202,45 @@ def _all_run_roots() -> list[pathlib.Path]:
             if p.is_dir() and store._parse_run_id(p.name) is not None]
 
 
+# Matches a brief item bullet and extracts its URL (same shape as the items
+# ``generate._brief_text`` emits: "- [Title](url) · [PDF](pdf) — score X.XX").
+_BULLET_URL_RE = re.compile(r"^-\s+\[[^\]]+\]\(([^)]+)\)")
+
+
+def _annotate_brief_labels(root: pathlib.Path,
+                           labels: dict[str, dict[str, float]]) -> bool:
+    """Append ``· <topic_id>`` to each labeled item bullet of an existing
+    episode's ``podcast_brief.md``.
+
+    Surgical: header, section titles and excerpt blockquotes are left intact;
+    bullets already carrying a label token are skipped. Returns True when the
+    file changed.
+    """
+    brief_path = root / "podcast_brief.md"
+    if not brief_path.exists():
+        return False
+    text = brief_path.read_text(encoding="utf-8")
+    out: list[str] = []
+    changed = False
+    for line in text.splitlines():
+        m = _BULLET_URL_RE.match(line)
+        if m:
+            lab = next(iter(labels.get(topics.normalize_url(m.group(1))) or {}), None)
+            if lab and not re.search(r"·\s*[\w-]+\s*$", line.rstrip()):
+                line = line.rstrip() + f" · {lab}"
+                changed = True
+        out.append(line)
+    if changed:
+        brief_path.write_text("\n".join(out) + "\n", encoding="utf-8")
+    return changed
+
+
 def backfill_labels(date=None, force: bool = False) -> list[str]:
-    """Label the chosen items of existing runs and write per-run episode
+    """Label the chosen items of existing runs, write per-run episode
     ``labels.json`` (used by the history topic filter for pre-steering
-    episodes). Skips runs that already have ``labels.json`` unless forced.
-    Returns the run folder names touched.
+    episodes), and annotate each run's ``podcast_brief.md`` with the per-item
+    topic (``— score 0.88 · <topic>``). Skips runs that already have
+    ``labels.json`` unless forced. Returns the run folder names touched.
     """
     from . import RankedItem
     touched: list[str] = []
@@ -235,8 +270,10 @@ def backfill_labels(date=None, force: bool = False) -> list[str]:
         labels = label_items(items)
         for it in items:
             it.topics = labels.get(topics.normalize_url(it.url)) or {}
+        brief_changed = _annotate_brief_labels(root, labels)
         if write_episode_labels(items, date=root.name):
             touched.append(root.name)
             print(f"      label: backfilled {root.name} "
-                  f"({sum(1 for it in items if it.topics)}/{len(items)} items labeled)")
+                  f"({sum(1 for it in items if it.topics)}/{len(items)} items labeled, "
+                  f"brief{' annotated' if brief_changed else ' unchanged'})")
     return touched

@@ -1164,6 +1164,35 @@ def test_label_items_malformed_batch_yields_nothing(monkeypatch):
     assert label_mod.label_items(items, workers=1) == {}
 
 
+def test_annotate_brief_labels_is_surgical_and_idempotent(tmp_path):
+    root = tmp_path
+    brief = root / "podcast_brief.md"
+    brief.write_text(
+        "# AI News Digest — 2026-09-08\n\n"
+        "## Hacker News stories (2)\n\n"
+        "- [A](https://a.example) — score 0.90\n"
+        "  > Excerpt A.\n"
+        "- [B](https://b.example) — score 0.85\n"
+        "- [C](https://c.example) — score 0.8 · agents\n",
+        encoding="utf-8",
+    )
+    labels = {
+        "https://a.example": {"model_release": 1.0},
+        "https://b.example": {"ai_for_science": 1.0},
+        "https://c.example": {"agents": 1.0},
+    }
+    assert label_mod._annotate_brief_labels(root, labels) is True
+    text = brief.read_text(encoding="utf-8")
+    assert "- [A](https://a.example) — score 0.90 · model_release\n" in text
+    assert "- [B](https://b.example) — score 0.85 · ai_for_science\n" in text
+    assert "- [C](https://c.example) — score 0.8 · agents\n" in text
+    # header + excerpt untouched
+    assert "# AI News Digest — 2026-09-08" in text
+    assert "  > Excerpt A." in text
+    # second run: already labeled -> no change
+    assert label_mod._annotate_brief_labels(root, labels) is False
+
+
 def test_chunk_by_chars_respects_budget():
     items = [Item(title=f"t{i}", url=f"u{i}", date="d", body="x" * 500,
                   source="arxiv") for i in range(10)]
