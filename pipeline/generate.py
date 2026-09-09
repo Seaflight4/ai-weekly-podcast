@@ -177,11 +177,10 @@ def select_sources(ranked: list[RankedItem],
 # --- brief: a flat, source-grouped digest fed to the backend as a source ----
 
 # Source id -> human label for the brief's section headings. Order is the
-# podcast's canonical source order (papers first, then community, then releases).
+# podcast's canonical source order (papers first, then community).
 SOURCE_LABELS = {
     "arxiv": "arXiv papers",
     "hn": "Hacker News stories",
-    "hf": "Hugging Face model releases",
 }
 
 def _brief_text(chosen: list[RankedItem],

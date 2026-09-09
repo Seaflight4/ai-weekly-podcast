@@ -132,7 +132,7 @@ def test_collect_source_registry():
     """The collect stage is driven by a SOURCES registry; adding a source is
     registering a collector (plus a label + dedup rule), not editing branches."""
     from pipeline import collect
-    assert list(collect.SOURCES) == ["hn", "arxiv", "hf"]
+    assert list(collect.SOURCES) == ["hn", "arxiv"]
     assert all(callable(fn) for fn in collect.SOURCES.values())
 
 
@@ -151,19 +151,15 @@ def test_collect_joins_all_source_branches(tmp_path, monkeypatch):
         return [Item(title="ax-t", url="https://arxiv.org/abs/2601.00002",
                      date="2026-09-03", body="abs", source="arxiv")]
 
-    def fake_hf(date, start):
-        return [Item(title="hf-t", url="https://huggingface.co/org/model",
-                     date="2026-09-03", body="readme", source="hf")]
-
     monkeypatch.setattr(collect, "SOURCES",
-                        {"hn": fake_hn, "arxiv": fake_arxiv, "hf": fake_hf})
+                        {"hn": fake_hn, "arxiv": fake_arxiv})
     monkeypatch.setattr(collect.store, "run_dir", lambda date=None: tmp_path)
     monkeypatch.setattr(collect.store, "write",
                         lambda name, payload, date=None: (tmp_path / name)
                         .write_text(json.dumps(payload, indent=2)))
 
     out = collect.collect("2026-09-04", window_start="2026-09-03")
-    assert [i.source for i in out] == ["hn", "arxiv", "hf"]  # registry order
+    assert [i.source for i in out] == ["hn", "arxiv"]  # registry order
     assert json.loads((tmp_path / "collect.json").read_text())[0]["title"] == "hn-t"
 
 
@@ -184,54 +180,64 @@ def test_dedup_rules_hn_arxiv_twin_dropped():
         "arxiv:paper", "hn:keep"]
 
 
-def test_dedup_rules_hn_hf_twin_dropped():
-    """An HN story pointing at a Hugging Face model card we collected is dropped
-    (the card is the canonical page)."""
+def test_hn_emits_points_for_rank_signal(monkeypatch):
+    """HN items carry their points (the popularity signal) through collect so
+    the rank judge can weigh community attention — points are no longer
+    discarded at selection time."""
     from pipeline import collect
-    items = [
-        Item(title="org/model", url="https://huggingface.co/org/model", date="d",
-             body="readme", source="hf"),
-        Item(title="HN link", url="https://huggingface.co/org/model", date="d",
-             body="", source="hn"),
-    ]
-    out = collect._dedup(items, collect.DEDUP_RULES)
-    assert len(out) == 1 and out[0].source == "hf"
 
+    def fake_get_json(url):
+        return {"hits": [
+            {"objectID": "1", "title": "big story", "url": "https://a.example",
+             "created_at": "2026-09-03T12:00:00Z", "points": 412},
+            {"objectID": "2", "title": "smaller", "url": "https://b.example",
+             "created_at": "2026-09-03T13:00:00Z", "points": 135},
+        ], "nbPages": 1}
 
-def test_dedup_rules_hf_citing_collected_paper_dropped():
-    """An HF model card whose README cites an arXiv paper we already collected is
-    dropped (the paper already covers it, with the abstract)."""
-    from pipeline import collect
-    items = [
-        Item(title="paper", url="https://arxiv.org/abs/2601.98765", date="d",
-             body="abstract", source="arxiv"),
-        Item(title="org/model", url="https://huggingface.co/org/model", date="d",
-             body="official implementation of arxiv.org/abs/2601.98765",
-             source="hf"),
-    ]
-    out = collect._dedup(items, collect.DEDUP_RULES)
-    assert len(out) == 1 and out[0].source == "arxiv"
-
-
-def test_hf_window_and_traction_prefilter(monkeypatch):
-    """The HF branch keeps only in-window, non-private models with at least one
-    download or like (killing the stream of zero-traction junk)."""
-    from pipeline import collect
-    fetched = [
-        {"id": "org/real", "lastModified": "2026-08-30T10:00:00.000Z",
-         "downloads": 5, "likes": 1},
-        {"id": "junk/toy", "lastModified": "2026-08-29T10:00:00.000Z",
-         "downloads": 0, "likes": 0},
-        {"id": "org/private", "lastModified": "2026-08-31T10:00:00.000Z",
-         "private": True, "downloads": 9, "likes": 9},
-        {"id": "org/old", "lastModified": "2026-07-01T10:00:00.000Z",
-         "downloads": 1, "likes": 0},
-    ]
-    monkeypatch.setattr(collect, "_get_json", lambda url: fetched)
+    monkeypatch.setattr(collect, "_get_json", fake_get_json)
     import datetime
-    out = collect._hf("2026-08-31", datetime.date(2026, 8, 24))
-    assert [i.title for i in out] == ["org/real"]
-    assert out[0].url == "https://huggingface.co/org/real"
+    items = collect._hn("2026-09-04", datetime.date(2026, 9, 3))
+    assert [i.hn_points for i in items] == [412, 135]
+
+
+def test_dedup_carries_hn_points_to_winner():
+    """Cross-source dedup DROPS the HN twin (it adds no content) but folds the
+    twin's upvotes onto the surviving arXiv item so rank sees the HN signal."""
+    from pipeline import collect
+    items = [
+        Item(title="paper", url="https://arxiv.org/abs/2601.12345", date="d",
+             body="abstract", source="arxiv"),
+        Item(title="HN link", url="https://arxiv.org/abs/2601.12345", date="d",
+             body="", source="hn", hn_points=340),
+    ]
+    out = collect._dedup(items, collect.DEDUP_RULES)
+    assert [i.source for i in out] == ["arxiv"]
+    assert out[0].hn_points == 340
+
+
+def test_dedup_leaves_winner_untouched_without_hn_points():
+    """An HN twin without points never fabricates a boost on the winner."""
+    from pipeline import collect
+    items = [
+        Item(title="paper", url="https://arxiv.org/abs/2601.99999", date="d",
+             body="abstract", source="arxiv"),
+        Item(title="HN link", url="https://arxiv.org/abs/2601.99999", date="d",
+             body="", source="hn"),   # no hn_points recorded
+    ]
+    out = collect._dedup(items, collect.DEDUP_RULES)
+    assert [i.source for i in out] == ["arxiv"]
+    assert out[0].hn_points == 0
+
+
+def test_story_to_dict_carries_hn_upvotes():
+    """The judge payload exposes hn_upvotes only when present, so the rubric's
+    HN-attention rule can fire without changing every item's shape."""
+    from pipeline import rank as rank_mod
+    plain = Item(title="t", url="u", date="d", body="b", source="arxiv")
+    assert "hn_upvotes" not in rank_mod._story_to_dict(plain, 0)
+    covered = Item(title="t2", url="u2", date="d", body="b", source="hn",
+                   hn_points=233)
+    assert rank_mod._story_to_dict(covered, 1)["hn_upvotes"] == 233
 
 
 def test_hn_window_is_full_inclusive(monkeypatch):
@@ -372,24 +378,18 @@ def test_generate_brief_groups_by_source(tmp_path, monkeypatch):
                    date="d", body="abstract", source="arxiv", score=0.9),
         RankedItem(title="HN Story", url="https://hn.example/x",
                    date="d", body="body", source="hn", score=0.8),
-        RankedItem(title="org/model-repo", url="https://huggingface.co/org/model-repo",
-                   date="d", body="readme", source="hf", score=0.7),
     ]
     by_source = generate._group_by_source(chosen)
     assert {s: [i.title for i in items] for s, items in by_source.items()} == {
         "arxiv": ["Paper A"],
         "hn": ["HN Story"],
-        "hf": ["org/model-repo"],
     }
     text = generate._brief_text(chosen, by_source)
     assert "arXiv papers" in text
     assert "Hacker News stories" in text
-    assert "Hugging Face model releases" in text
     assert "https://arxiv.org/pdf/2601.00001" in text
-    assert "https://huggingface.co/org/model-repo" in text
-    # Source order is registry/label order: arXiv -> HN -> HF.
+    # Source order is registry/label order: arXiv -> HN.
     assert text.index("arXiv papers") < text.index("Hacker News stories")
-    assert text.index("Hacker News stories") < text.index("Hugging Face model releases")
 
 
 def test_generate_writes_episode(tmp_path, monkeypatch):
@@ -883,25 +883,6 @@ def test_collect_hn_drops_empty_body(monkeypatch):
     out = collect._collect_hn("2026-09-04", datetime.date(2026, 9, 3))
     assert [i.title for i in out] == ["c"]
     assert out[0].body == "c body"
-
-
-def test_collect_hf_drops_empty_body(monkeypatch):
-    """HF models whose README fetch comes back empty are dropped at collect,
-    so a README-less model never reaches rank."""
-    from pipeline import collect
-    import datetime
-    items = [
-        Item(title="org/a", url="https://huggingface.co/org/a", date="2026-09-03",
-             body="", source="hf"),
-        Item(title="org/b", url="https://huggingface.co/org/b", date="2026-09-03",
-             body="", source="hf"),
-    ]
-    monkeypatch.setattr(collect, "_hf", lambda date, start: items)
-    monkeypatch.setattr(collect, "_hf_relevant", lambda its: its)
-    monkeypatch.setattr(collect, "_fetch_readme",
-                        lambda url: "# readme" if url.endswith("/org/b") else "")
-    out = collect._collect_hf("2026-09-04", datetime.date(2026, 9, 3))
-    assert [i.title for i in out] == ["org/b"]
 
 
 def test_judge_model_is_fixed_not_env_configurable(monkeypatch):

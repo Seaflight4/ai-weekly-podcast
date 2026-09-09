@@ -13,9 +13,8 @@ items from this week's AI news and research deserve airtime on the internal AI
 podcast. The audience is AI researchers who advise clients and build systems.
 
 You are given a JSON array of items, each with an integer "index", a "title",
-a "url", a "source" ("arxiv", "hn", or "hf"), and a "body" (an abstract for
-arxiv, the extracted page text for hn, a model-card README for hf — any may be
-empty if the fetch failed). Score
+a "url", a "source" ("arxiv" or "hn"), and a "body" (an abstract for arxiv,
+the extracted page text for hn — either may be empty if the fetch failed). Score
 each 0.0 to 1.0 on **how much a busy researcher needs to know this week**,
 using ONE source-agnostic scale.
 
@@ -45,16 +44,20 @@ never against the other items in the batch):
 - HN: a frontier model release, major incident, or pricing shock announced via
   blog = 0.9; a well-argued engineering writeup with real numbers = 0.7;
   a cool demo with no method transfer = 0.35; a gossip/pro-tip post = 0.3.
-- HF: a major open-weights model/checkpoint release, capable tool (inference,
-  quant, serving), or official implementation = 0.9; a niche fine-tune or
-  incremental update to a known repo = 0.45; a toy/personal demo model = 0.3.
-  A model release counts as heavily as a paper or blog release of the same
-  thing — it IS the artifact practitioners actually deploy.
 
 Thin-evidence rule: if an item NAMES a major event but has a thin or empty
 body (e.g. a launch post whose fetch failed), score it on the EVENT's
 importance, not the text length. An empty body never earns credit on its own,
 but never penalize a clearly important event for a failed fetch.
+
+HN-attention rule: some items carry an "hn_upvotes" field — that item (or the
+paper/model it points at) was prominently discussed on Hacker News this week
+(gated at >100 upvotes, so it is real attention, not noise). Treat it as
+evidence of broad community/industry notice: all else equal, an item the HN
+community rallied around is MORE "must-know this week", not less. The HN
+signal duplicates attention (HN links elsewhere without adding facts), so do
+not re-score the text — the upvote count is one extra consideration, not a
+rewrite of the anchors above.
 
 Anchor bands: 0.9+ = must-know this week; 0.7-0.89 = useful context; 0.4-0.69
 = niche or soft; below 0.4 = skip.
@@ -184,8 +187,11 @@ def _dedup_by_url(items: list[Item]) -> list[Item]:
 
 
 def _story_to_dict(group: Item, idx: int) -> dict:
-    return {"index": idx, "title": group.title,
-            "url": group.url, "source": group.source, "body": group.body}
+    d = {"index": idx, "title": group.title,
+         "url": group.url, "source": group.source, "body": group.body}
+    if group.hn_points:
+        d["hn_upvotes"] = group.hn_points  # HN community-attention signal
+    return d
 
 
 def _judge_batch(groups: list[Item], rubric: str) -> list[tuple[float, str]]:

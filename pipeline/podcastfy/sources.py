@@ -121,33 +121,6 @@ def _slugify(url: str) -> str:
     return slug[:120] or "page"
 
 
-# Matches a Hugging Face model-card URL (org/model) for the README pre-fetch.
-_HF_URL_RE = re.compile(r"^https://huggingface\.co/([^/]+/[^/]+?)/?$")
-
-
-def _fetch_hf_readme(url: str) -> str:
-    """Fetch a Hugging Face model-card README as plain text.
-
-    HF model pages are JS-heavy, so trafilatura yields little main text; the
-    raw README (``/raw/main/README.md``) is the reliable body source. Returns
-    "" when the model has no README on the default branch or the fetch fails
-    (the caller then falls back to trafilatura / the brief excerpt).
-    """
-    m = _HF_URL_RE.match(url)
-    if not m:
-        return ""
-    readme_url = f"https://huggingface.co/{m.group(1)}/raw/main/README.md"
-    try:
-        resp = requests.get(readme_url, timeout=60)
-        resp.raise_for_status()
-        text = resp.text or ""
-        if text.strip() and not text.lstrip().startswith("{"):  # not an error JSON
-            return text.strip()
-    except Exception as e:
-        logger.warning("Failed to fetch HF README %s: %s", url, e)
-    return ""
-
-
 def fetch_web_content(sources: List[Source], target_dir: str = "web") -> dict:
     """Fetch the main-article text for non-arXiv (blog) sources.
 
@@ -157,9 +130,6 @@ def fetch_web_content(sources: List[Source], target_dir: str = "web") -> dict:
     whose fetched content is empty or whose fetch fails are simply
     omitted from the returned dict (the caller then falls back to the
     brief excerpt).
-
-    Hugging Face model-card URLs are special-cased to fetch the raw README
-    (plain text) instead of extracting the JS-heavy model page.
     """
     os.makedirs(target_dir, exist_ok=True)
     fetched: dict = {}
@@ -179,24 +149,21 @@ def fetch_web_content(sources: List[Source], target_dir: str = "web") -> dict:
                 pass  # fall through to re-fetch
         logger.info("Fetching %s -> %s", src.url, dest)
         content = ""
-        if _HF_URL_RE.match(src.url):
-            content = _fetch_hf_readme(src.url)
-        if not content:
-            try:
-                import trafilatura
-                downloaded = trafilatura.fetch_url(src.url)
-                if not downloaded:
-                    logger.warning("No content returned for %s", src.url)
-                    continue
-                content = trafilatura.extract(
-                    downloaded,
-                    include_comments=False,
-                    include_tables=True,
-                    favor_recall=True,
-                ) or ""
-            except Exception as e:
-                logger.warning("Failed to fetch %s: %s", src.url, e)
+        try:
+            import trafilatura
+            downloaded = trafilatura.fetch_url(src.url)
+            if not downloaded:
+                logger.warning("No content returned for %s", src.url)
                 continue
+            content = trafilatura.extract(
+                downloaded,
+                include_comments=False,
+                include_tables=True,
+                favor_recall=True,
+            ) or ""
+        except Exception as e:
+            logger.warning("Failed to fetch %s: %s", src.url, e)
+            continue
         if not content.strip():
             logger.warning("Empty extraction for %s", src.url)
             continue
