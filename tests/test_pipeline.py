@@ -380,7 +380,8 @@ def test_select_sources_small_pool_all_above_floor():
 def test_generate_brief_groups_by_source(tmp_path, monkeypatch):
     chosen = [
         RankedItem(title="Paper A", url="https://arxiv.org/abs/2601.00001",
-                   date="d", body="abstract", source="arxiv", score=0.9),
+                   date="d", body="abstract", source="arxiv", score=0.9,
+                   topics={"post_training": 1.0}),
         RankedItem(title="HN Story", url="https://hn.example/x",
                    date="d", body="body", source="hn", score=0.8),
     ]
@@ -395,6 +396,35 @@ def test_generate_brief_groups_by_source(tmp_path, monkeypatch):
     assert "https://arxiv.org/pdf/2601.00001" in text
     # Source order is registry/label order: arXiv -> HN.
     assert text.index("arXiv papers") < text.index("Hacker News stories")
+    # Labeled items carry the topic id right after the score; unlabeled don't.
+    assert "— score 0.90 · post_training" in text
+    assert "hn.example/x) — score 0.80\n" in text
+
+
+def test_sources_parse_brief_accepts_label_token(tmp_path):
+    from pipeline.podcastfy import sources as pfsources
+    brief = tmp_path / "brief.md"
+    brief.write_text(
+        "# AI News Digest\n\n"
+        "## arXiv papers (2)\n\n"
+        "- [Old](https://arxiv.org/abs/2601.00001) — score 0.88\n"
+        "  > Excerpt A.\n"
+        "- [New](https://arxiv.org/abs/2601.00002) "
+        "· [PDF](https://arxiv.org/pdf/2601.00002) — score 0.9 · post_training\n"
+        "  > Excerpt B.\n\n"
+        "## Hacker News stories (1)\n\n"
+        "- [Blog](https://example.com/x) — score 0.85 · agents\n",
+        encoding="utf-8",
+    )
+    sources = pfsources.parse_brief(str(brief))
+    assert len(sources) == 3
+    assert [s.title for s in sources] == ["Old", "New", "Blog"]
+    # The label token must not change how sources are classified.
+    assert sources[0].pdf_url is None and sources[0].kind == "blog"
+    assert sources[1].pdf_url == "https://arxiv.org/pdf/2601.00002"
+    assert sources[1].kind == "arxiv"
+    assert sources[1].arxiv_id == "2601.00002"
+    assert sources[2].excerpt == ""
 
 
 def test_generate_writes_episode(tmp_path, monkeypatch):

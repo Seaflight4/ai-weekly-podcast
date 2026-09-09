@@ -50,7 +50,7 @@ function topicChips(topics, max = 3) {
 // --- brief parsing ---------------------------------------------------------
 // Brief format (see pipeline/generate.py _brief_text):
 //   ## arXiv papers (N)
-//   - [Title](url) · [PDF](pdf_url) — score 0.88
+//   - [Title](url) · [PDF](pdf_url) — score 0.88 · agents
 //     > Excerpt.
 // We split into a header (everything up to the first ## section), sections,
 // and items. Each item keeps its source section so we can re-render the
@@ -73,11 +73,12 @@ function parseBrief(md) {
       sections.push(cur);
       continue;
     }
-    const m = line.match(/^- \[([^\]]+)\]\(([^)]+)\)(?:\s*·\s*\[PDF\]\(([^)]+)\))?(?:\s*—\s*score\s*([\d.]+))?\s*$/);
+    const m = line.match(/^- \[([^\]]+)\]\(([^)]+)\)(?:\s*·\s*\[PDF\]\(([^)]+)\))?(?:\s*—\s*score\s*([\d.]+))?(?:\s*·\s*([\w-]+))?\s*$/);
     if (m && cur) {
       const item = {
         title: m[1], url: m[2], pdfUrl: m[3] || null,
         score: m[4] ? parseFloat(m[4]) : null,
+        label: m[5] || null,
         excerpt: "", removed: false,
       };
       if (i + 1 < lines.length) {
@@ -100,6 +101,7 @@ function renderBrief(parsed) {
       let line = `- [${it.title}](${it.url})`;
       if (it.pdfUrl) line += ` · [PDF](${it.pdfUrl})`;
       if (it.score !== null) line += ` — score ${it.score.toFixed(2)}`;
+      if (it.label) line += ` · ${it.label}`;
       out.push(line);
       if (it.excerpt) out.push(`  > ${it.excerpt}`);
     }
@@ -295,13 +297,14 @@ function renderMarkdown(md) {
   const closeList = () => { if (inList) { html += "</ul>"; inList = false; } };
   for (let line of lines) {
     if (/^##\s/.test(line)) { closeList(); html += `<h2>${esc(line.replace(/^##\s/, ""))}</h2>`; continue; }
-    const m = line.match(/^- \[([^\]]+)\]\(([^)]+)\)(?:\s*·\s*\[PDF\]\(([^)]+)\))?(?:\s*—\s*score\s*([\d.]+))?\s*$/);
+    const m = line.match(/^- \[([^\]]+)\]\(([^)]+)\)(?:\s*·\s*\[PDF\]\(([^)]+)\))?(?:\s*—\s*score\s*([\d.]+))?(?:\s*·\s*([\w-]+))?\s*$/);
     if (m) {
       if (inList) { html += "</ul>"; inList = false; }
-      const [_, title, url, pdfUrl, score] = m;
+      const [_, title, url, pdfUrl, score, label] = m;
       let item = `<a href="${esc(url)}" target="_blank" rel="noopener">${esc(title)}</a>`;
       if (pdfUrl) item += ` · <a class="pdf" href="${esc(pdfUrl)}" target="_blank" rel="noopener">PDF</a>`;
       if (score) item += ` <span class="score">— score ${score}</span>`;
+      if (label) item += ` <span class="label">· ${esc(topicLabel(label))}</span>`;
       html += `<li>${item}</li>`;
       continue;
     }
@@ -328,7 +331,12 @@ async function openPersonalize(run) {
   for (const s of parsed.sections) {
     for (const it of s.items) {
       const r = byUrl.get(it.url);
-      if (r) { it.judge_reason = r.judge_reason; it.source = r.source; }
+      if (r) {
+        it.judge_reason = r.judge_reason;
+        it.source = r.source;
+        // Legacy briefs (pre-label) can still show the label from rank.json.
+        if (!it.label && r.topics) it.label = Object.keys(r.topics)[0] || null;
+      }
     }
   }
   renderPersonalize(parsed, run);
@@ -360,10 +368,11 @@ function renderPersonalize(parsed, run) {
       const reason = it.judge_reason ? `<div class="reason">${esc(it.judge_reason)}</div>` : "";
       const src = it.source ? `<span class="tag tag-src">${esc(it.source)}</span>` : "";
       const score = it.score !== null ? ` <span class="tag tag-score">${it.score.toFixed(2)}</span>` : "";
+      const label = it.label ? ` <span class="tag tag-label">${esc(topicLabel(it.label))}</span>` : "";
       const badge = it.removed ? '<span class="tag tag-removed">removed</span>' : "";
       div.innerHTML = `
         <div class="main">
-          <div class="title"><a href="${esc(it.url)}" target="_blank" rel="noopener">${esc(it.title)}</a>${src}${score}${badge}</div>
+          <div class="title"><a href="${esc(it.url)}" target="_blank" rel="noopener">${esc(it.title)}</a>${src}${score}${label}${badge}</div>
           ${reason}
         </div>
         <div class="perso-actions">
@@ -559,10 +568,28 @@ function updateDerivedMeta(lengthSel, depthSel, sourcesId, minutesId) {
   $(minutesId).textContent = Math.round(CFG_LENGTH_MIN[$(lengthSel).value]);
 }
 
+function populateTopicChecks() {
+  const box = $("#set-topics");
+  if (!box || box.children.length > 0) return;
+  for (const [id, label] of Object.entries(TAXONOMY)) {
+    const wrap = document.createElement("label");
+    wrap.className = "topic-check";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.value = id;
+    wrap.appendChild(cb);
+    wrap.appendChild(document.createTextNode(` ${label}`));
+    box.appendChild(wrap);
+  }
+}
+
 function fillSettingsForm() {
   $("#set-audience").value = podcastConfig.user.audience;
   $("#set-familiar").value = (podcastConfig.user.familiar_topics || []).join(", ");
-  $("#set-topics").value = (podcastConfig.user.topic_prefs || []).join(", ");
+  populateTopicChecks();
+  const want = new Set(podcastConfig.user.topic_prefs || []);
+  document.querySelectorAll("#set-topics input[type=checkbox]")
+    .forEach((cb) => { cb.checked = want.has(cb.value); });
   $("#set-alpha").value = podcastConfig.user.steering_alpha ?? 0.3;
   $("#set-window-days").value = podcastConfig.podcast.window_days;
   $("#set-length").value = podcastConfig.podcast.length;
@@ -572,11 +599,14 @@ function fillSettingsForm() {
 
 function readSettingsForm() {
   const alpha = parseFloat($("#set-alpha").value);
+  const topicPrefs = Array.from(
+    document.querySelectorAll("#set-topics input[type=checkbox]:checked")
+  ).map((cb) => cb.value);
   return {
     user: {
       audience: $("#set-audience").value,
       familiar_topics: $("#set-familiar").value.split(",").map((s) => s.trim()).filter(Boolean),
-      topic_prefs: $("#set-topics").value.split(",").map((s) => s.trim()).filter(Boolean),
+      topic_prefs: topicPrefs,
       steering_alpha: isFinite(alpha) ? alpha : 0.3,
     },
     podcast: {

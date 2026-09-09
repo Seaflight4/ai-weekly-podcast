@@ -296,6 +296,7 @@ audio { width: 100%; margin: 4px 0 12px; height: 40px; }
 .tab-body.markdown a:hover { text-decoration: underline; }
 .tab-body.markdown a.pdf { color: var(--muted); font-size: 0.9em; }
 .tab-body.markdown .score { color: var(--ok); font-weight: 600; }
+.tab-body.markdown .label { color: var(--primary-strong); font-weight: 600; }
 .tab-body.markdown blockquote {
   margin: 6px 0 10px; padding: 6px 14px; border-left: 3px solid var(--border-strong);
   color: var(--muted); font-size: 13px; background: var(--surface-2);
@@ -347,7 +348,28 @@ audio { width: 100%; margin: 4px 0 12px; height: 40px; }
 }
 .tag-src { background: var(--primary-soft); color: var(--primary-strong); }
 .tag-score { background: var(--ok-bg); color: var(--ok); font-family: var(--mono); font-weight: 600; }
+.tag-label { background: var(--accent-bg, #f4ecff); color: var(--accent); }
 .tag-removed { background: var(--surface-2); color: var(--muted); }
+
+/* --- topic selector (settings) -------------------------------------------- */
+
+.topic-fieldset {
+  border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+  padding: 8px 10px 10px; margin: 4px 0 10px;
+}
+.topic-fieldset legend {
+  font-size: 14px; font-weight: 600; padding: 0 6px; color: var(--text);
+}
+.topic-checks {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 12px;
+}
+.topic-check {
+  display: flex; align-items: center; gap: 7px;
+  font-size: 13px; padding: 3px 4px; border-radius: 6px;
+}
+.topic-check:hover { background: var(--surface-2); }
+.topic-check input { accent-color: var(--primary); }
 
 /* --- modals --------------------------------------------------------------- */
 

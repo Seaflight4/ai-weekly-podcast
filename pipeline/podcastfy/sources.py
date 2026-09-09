@@ -8,13 +8,16 @@ text for blog (non-arXiv) sources via trafilatura.
 Brief format (see pipeline/generate.py `_brief_text`):
     ## arXiv papers (N)
 
-    - [Title](https://arxiv.org/abs/XXXX.XXXXX) · [PDF](https://arxiv.org/pdf/XXXX.XXXXX) — score 0.88
+    - [Title](https://arxiv.org/abs/XXXX.XXXXX) · [PDF](https://arxiv.org/pdf/XXXX.XXXXX) — score 0.88 · post_training
       > Excerpt paragraph.
 
     ## Hacker News stories (N)
 
     - [Title](https://example.com/path) — score 0.85
       > Excerpt paragraph.
+
+The trailing ``· <topic_id>`` is optional (legacy briefs and items the judge
+failed to label omit it) and is not used for generation.
 """
 
 import logging
@@ -27,11 +30,13 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-# Matches a markdown bullet with a title link, optional · [PDF](url), and a score.
+# Matches a markdown bullet with a title link, optional · [PDF](url), a score,
+# and an optional trailing topic id (e.g. "— score 0.88 · agents").
 _BULLET_RE = re.compile(
     r"^- \[(?P<title>[^\]]+)\]\((?P<url>[^)]+)\)"  # [Title](url)
     r"(?:\s*·\s*\[PDF\]\((?P<pdf_url>[^)]+)\))?"   # optional · [PDF](pdf_url)
     r"(?:\s*—\s*score\s*[\d.]+)?"                  # optional — score 0.XX
+    r"(?:\s*·\s*(?P<label>[\w-]+))?"               # optional · topic_id
     r"\s*$",
     re.MULTILINE,
 )

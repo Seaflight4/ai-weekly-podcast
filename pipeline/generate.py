@@ -212,6 +212,8 @@ def _brief_text(chosen: list[RankedItem],
             if pdf and pdf != m.url:
                 link += f" · [PDF]({pdf})"
             link += f" — score {m.score:.2f}"
+            if m.topics:
+                link += f" · {next(iter(m.topics))}"
             lines.append(link)
             if m.body:
                 lines.append(f"  > {m.body[:500]}")
