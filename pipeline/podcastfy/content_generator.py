@@ -107,6 +107,7 @@ class LongFormContentGenerator:
         """
         self.llm_chain = chain
         self.llm = llm
+        self.config_conversation = config_conversation or {}
         self.max_num_chunks = config_conversation.get("max_num_chunks", 10)  # Default if not in config
         self.min_chunk_size = config_conversation.get("min_chunk_size", 200)  # Default if not in config
         # Per-source input reference scale (brief < 1.0 < deep-dive). This
@@ -117,6 +118,9 @@ class LongFormContentGenerator:
         self.intro_words = int(config_conversation.get("intro_words", 200))
         self.per_source_words = int(config_conversation.get("per_source_words", 240))
         self.recap_words = int(config_conversation.get("recap_words", 280))
+        # Small word cap for the cross-episode MEMORY part (a brief "prior
+        # coverage sync", never a full topic discussion).
+        self.memory_words = int(config_conversation.get("memory_words", 90))
 
     def __calculate_chunk_size(self, input_content: str) -> int:
         """
@@ -197,10 +201,11 @@ class LongFormContentGenerator:
         # the corresponding END marker (or the next start marker).
         # Supported: === INTRO === ... === END INTRO ===
         #            === TOPIC: <title> === ... === END TOPIC ===
+        #            === MEMORY: ... === ... === END MEMORY ===
         #            === RECAP === ... === END RECAP ===
         #            === PAPER: <name> === (no END marker — ends at next block)
         pattern = _re.compile(
-            r"(=== (?:INTRO|TOPIC:|RECAP|PAPER:)[^\n]*===.*?)(?=(?:=== (?:INTRO|TOPIC:|RECAP|PAPER:)[^\n]*===)|$)",
+            r"(=== (?:INTRO|TOPIC:|MEMORY:|RECAP|PAPER:)[^\n]*===.*?)(?=(?:=== (?:INTRO|TOPIC:|MEMORY:|RECAP|PAPER:)[^\n]*===)|$)",
             _re.DOTALL,
         )
         chunks = [m.group(1).strip() for m in pattern.finditer(input_content)]
@@ -209,8 +214,20 @@ class LongFormContentGenerator:
         # No markers found: fall back to single chunk.
         return [input_content] if input_content.strip() else []
 
-    def _part_word_cap(self, part_idx: int, total_parts: int) -> int:
-        """Word ceiling for a part: intro, then each source, then recap."""
+    @staticmethod
+    def _is_memory_chunk(chunk: str) -> bool:
+        """True when a chunk is the cross-episode MEMORY block (see
+        pipeline.memory): it is a reference-context section, not a topic, so
+        it gets its own small budget + part instruction."""
+        return "=== MEMORY:" in chunk and "=== END MEMORY ===" in chunk
+
+    def _part_word_cap(self, part_idx: int, total_parts: int,
+                       is_memory: bool = False) -> int:
+        """Word ceiling for a part: intro, then each source, then recap. The
+        cross-episode MEMORY part keeps a small budget of its own (it is a
+        brief prior-coverage sync, not a topic discussion)."""
+        if is_memory:
+            return self.memory_words
         if part_idx == 0:
             return self.intro_words
         if part_idx == total_parts - 1:
@@ -234,7 +251,8 @@ class LongFormContentGenerator:
                               part_idx: int,
                               total_parts: int,
                               chat_context: str,
-                              chunk_len: int = 0) -> Dict:
+                              chunk_len: int = 0,
+                              is_memory: bool = False) -> Dict:
         """
         Enhance prompt parameters for long-form content generation.
 
@@ -245,6 +263,8 @@ class LongFormContentGenerator:
             chat_context (str): Chat context from previous parts
             chunk_len (int): Length of the current chunk in characters.
                 Retained for signature compatibility (no longer drives length).
+            is_memory (bool): True when this chunk is the cross-episode MEMORY
+                block (a brief prior-coverage sync, not a topic).
 
         Returns:
             Dict: Enhanced prompt parameters with part-specific instructions
@@ -256,12 +276,44 @@ class LongFormContentGenerator:
         host1 = prompt_params.get("host1_name", "Person1")
         host2 = prompt_params.get("host2_name", "Person2")
 
+        # Continuity guidance is enabled only when the run carries cross-episode
+        # memory (see pipeline/memory.py + pipeline/podcastfy/generator.py). When
+        # off, the instructions below are byte-identical to the pre-memory
+        # behavior (no MEMORY block exists, so no reference is possible anyway).
+        enable_continuity = bool(getattr(self, "config_conversation", None)
+                                 and self.config_conversation.get(
+                                     "continuity_reference_enabled"))
+        CONTRAST_CONTINUITY_INTRO = (
+            "CONTINUITY: this episode continues threads covered in prior episodes "
+            "listed in the MEMORY section of the input. When a theme or story "
+            "genuinely picks up a prior item (a new development, a successor, or "
+            "a repeated pattern), you may acknowledge the follow-up naturally "
+            "('We covered X earlier... and this week...') once, briefly. Only "
+            "reference prior coverage that is actually listed; never invent an "
+            "'as we discussed last episode' for something not in the input."
+        ) if enable_continuity else ""
+        CONTRAST_CONTINUITY_MID = (
+            "CONTINUITY: this episode may build on earlier episodes. The INPUT "
+            "may contain a MEMORY section listing the COMPLETE set of prior "
+            "coverage for this topic. You may reference a listed prior item "
+            "only when this topic genuinely continues, succeeds, or echoes it "
+            "(a new development, a successor release, a repeated pattern) — "
+            "then reference it naturally once, e.g. 'Earlier we covered X... "
+            "and this week...', and lead with what is NEW. You may also refer "
+            "back, in one line, to a topic already covered in THIS episode "
+            "('as we just heard with Y...') when it is genuinely related. "
+            "You may ONLY reference items listed in a MEMORY section or already "
+            "covered in this episode. Never invent prior coverage; a topic with "
+            "no real connection to any listed or earlier item is discussed "
+            "standalone."
+        ) if enable_continuity else ""
+
         # Every part gets a word ceiling derived from the episode budget; the
         # prompt instructs it and _trim_to_words enforces it deterministically
         # afterward. We deliberately do NOT set a tight per-call token ceiling:
         # DeepSeek emits a reasoning preamble before the JSON, so a small
         # max_tokens would truncate that and cancel the whole part.
-        cap_words = self._part_word_cap(part_idx, total_parts)
+        cap_words = self._part_word_cap(part_idx, total_parts, is_memory=is_memory)
         turn_lo, turn_hi, _ = self._turn_range_for_cap(cap_words)
 
         COMMON_INSTRUCTIONS = """
@@ -278,7 +330,22 @@ class LongFormContentGenerator:
         """
 
         # Add part-specific instructions
-        if part_idx == 0:
+        if is_memory:
+            enhanced_params["instruction"] = f"""
+            You are generating the PRIOR-COVERAGE SYNC part of the podcast.
+            {COMMON_INSTRUCTIONS}
+            This part's INPUT is a MEMORY section: prior-episode coverage,
+            matched to this episode's topics. Read it and have the hosts briefly,
+            naturally connect this episode to what came before:
+            1. Name the earlier episode(s) concisely ("Earlier we covered X...") and
+               what they established.
+            2. Tease how today's topics continue, succeed, or echo that coverage —
+               but keep the actual discussion for the following parts.
+            Do NOT explain any topic in depth and do NOT read the MEMORY entries
+            verbatim. Keep it to {turn_lo} to {turn_hi} turns, about {cap_words}
+            words total. This part is a bridge, not a topic discussion summary.
+            """
+        elif part_idx == 0:
             enhanced_params["instruction"] = f"""
             You are generating the INTRODUCTION of the podcast.
             Do NOT explain any topic yet. Instead:
@@ -286,6 +353,7 @@ class LongFormContentGenerator:
             2. Give a themed overview: group the topics into 2-3 themes. Weave them together conversationally. Do NOT label themes explicitly ("first theme," "second theme," "third theme"). Use natural connective phrases like "We'll also dive into," "Then we'll cover," "Finally, we'll discuss." For each topic, use a relative clause or flowing sentence that says what it does, not a standalone fragment. Integrate a brief "why it matters" into the theme, not as a separate label. Interleave genuine reactions between themes. One host reacts to the previous theme, the other continues to the next. Do NOT explain mechanisms, cite numbers, or describe how things work. Save those for the topic discussions.
                Example: "In today's episode, we'll cover three major model releases. A, which achieves unprecedented generation speeds. B, which brings multimodal capabilities to a compact architecture. And C, which uses an end-to-end self-improvement loop." [Reaction: "And those are pushing boundaries we didn't think possible a year ago."] "We'll also dive into agent frameworks, covering D's breakthrough in harness scaling and E's flexible navigation. Because raw intelligence doesn't mean much without a reliable environment to operate within." "Right. Finally, we'll discuss major industry news, including F's big acquisition and a shocking audit revealing benchmark cheating."
             3. End with "Let's begin!" or similar.
+            {CONTRAST_CONTINUITY_INTRO}
             Keep this part to {turn_lo} to {turn_hi} turns total, targeting about {cap_words} words. The overview should tease topics by name and significance, woven into flowing sentences, not listed as fragments. No analogy or numbers in the intro.
             """
         elif part_idx == total_parts - 1:
@@ -314,6 +382,7 @@ class LongFormContentGenerator:
 
             Cite at most 1-2 striking numbers per topic. Do NOT recite every metric. Lead with what the number means (the delta, ratio, or comparison), not the raw endpoints. "Jumps 9 points to 85.4" beats "from 76.7 to 85.4." "Doubles to 35.4" beats "from 17.2 to 35.4." Never stack more than two numbers in a single turn. Vivid cost pairs like "$15 vs $574" may stay as-is. The gap is the story.
             If the INPUT contains named case studies, specific models, or concrete behaviors, USE THEM BY NAME. Do not paraphrase them into a generality. For example, if the INPUT says a model ran `git clone` on the writeup repo to read the flag, say which model and say "git clone", not "a model cheated".
+            {CONTRAST_CONTINUITY_MID}
             Keep this part to {turn_lo} to {turn_hi} turns, targeting about {cap_words} words of dialogue. Hitting the target matters: noticeably less leaves the topic thin, noticeably more gets cut. Try to land near {cap_words} words.
             """
 
@@ -348,7 +417,8 @@ class LongFormContentGenerator:
         print(f"Generating {num_parts} parts")
         
         for i, chunk in enumerate(chunks):
-            cap_words = self._part_word_cap(i, num_parts)
+            is_memory = self._is_memory_chunk(chunk)
+            cap_words = self._part_word_cap(i, num_parts, is_memory=is_memory)
             _, _, min_turns = self._turn_range_for_cap(cap_words)
             enhanced_params = self.enhance_prompt_params(
                 prompt_params,
@@ -356,6 +426,7 @@ class LongFormContentGenerator:
                 total_parts=num_parts,
                 chat_context=chat_context,
                 chunk_len=len(chunk),
+                is_memory=is_memory,
             )
             enhanced_params["input_text"] = chunk
             response = self._invoke_with_retry(

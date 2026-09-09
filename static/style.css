@@ -303,12 +303,20 @@ audio { width: 100%; margin: 4px 0 12px; height: 40px; }
   border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
 }
 
+/* cross-episode memory tab */
+.tab-body.markdown .mem-list { display: flex; flex-direction: column; gap: 10px; }
+.tab-body.markdown .mem-topic {
+  padding: 9px 12px; background: var(--bg); border-left: 3px solid var(--border-strong);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+.tab-body.markdown .mem-topic p { margin: 6px 0 0; font-size: 13.5px; color: var(--text); }
+.tab-body.markdown .mem-topic .chip-topic { font-size: 11.5px; }
+
 /* transcript dialogue */
 .tab-body.markdown .trn.turn {
   display: flex; gap: 12px; align-items: flex-start;
   padding: 9px 0; border-bottom: 1px dashed var(--border);
-}
-.tab-body.markdown .trn.turn:last-child { border-bottom: none; }
+}.tab-body.markdown .trn.turn:last-child { border-bottom: none; }
 .trn-speaker {
   flex: 0 0 30px; width: 30px; height: 30px; border-radius: 50%;
   display: inline-flex; align-items: center; justify-content: center;

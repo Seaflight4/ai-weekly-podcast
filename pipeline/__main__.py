@@ -7,7 +7,7 @@ USAGE = ("usage: python -m pipeline run [--only collect|rank|generate|transcribe
          "[--top-k N] [--score-floor F] [--force-label] "
          "[--config <config.yaml>] [--window-start D] [--window-end D] "
          "[--audience LEVEL] [--familiar S] [--topics S] [--steering-alpha F] "
-         "[--length X] [--depth Y]")
+         "[--length X] [--depth Y] [--mem-windows N]")
 STAGES = ("collect", "rank", "generate", "transcribe", "label")
 
 def main(argv: list[str]) -> None:
@@ -34,6 +34,7 @@ def main(argv: list[str]) -> None:
     steering_alpha = None
     length = None
     depth = None
+    mem_windows = None
     rest = []
     while args:
         a = args.pop(0)
@@ -108,6 +109,10 @@ def main(argv: list[str]) -> None:
             if not args:
                 raise SystemExit(f"{USAGE}\n(error: `--depth` needs brief|deep-dive)")
             depth = args.pop(0)
+        elif a == "--mem-windows":
+            if not args:
+                raise SystemExit(f"{USAGE}\n(error: `--mem-windows` needs an int 1-4)")
+            mem_windows = int(args.pop(0))
         else:
             rest.append(a)
     if rest:
@@ -118,7 +123,8 @@ def main(argv: list[str]) -> None:
         config_path=config_path, window_start=window_start, window_end=window_end,
         audience_level=audience_level, familiar_topics=familiar_topics,
         topic_prefs=topic_prefs, steering_alpha=steering_alpha,
-        length=length, depth=depth, force_label=force_label)
+        length=length, depth=depth, mem_windows=mem_windows,
+        force_label=force_label)
 
 if __name__ == "__main__":
     main(sys.argv[1:])

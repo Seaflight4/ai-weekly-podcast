@@ -222,12 +222,17 @@ function renderDetail(run) {
     <div class="tabs" id="detail-tabs" role="tablist">
       <button data-dtab="brief" class="active" role="tab">Brief</button>
       ${run.has_transcript ? `<button data-dtab="transcript" role="tab">Transcript</button>` : ""}
+      ${run.memory ? `<button data-dtab="memory" role="tab">Memory</button>` : ""}
     </div>
     <div class="tab-body markdown" id="brief"></div>
-    <div class="tab-body markdown hidden" id="transcript"></div>`;
+    <div class="tab-body markdown hidden" id="transcript"></div>
+    <div class="tab-body markdown hidden" id="memory"></div>`;
   $("#brief").innerHTML = renderMarkdown(run.brief || "(no brief)");
   if (run.has_transcript) {
     $("#transcript").innerHTML = renderTranscript(run.transcript || "(no transcript)");
+  }
+  if (run.memory) {
+    $("#memory").innerHTML = renderMemory(run.memory);
   }
   $$("#detail-tabs button").forEach((b) =>
     b.onclick = () => switchDetailTab(b.dataset.dtab));
@@ -241,6 +246,20 @@ function switchDetailTab(tab) {
   $("#brief").classList.toggle("hidden", tab !== "brief");
   const tr = $("#transcript");
   if (tr) tr.classList.toggle("hidden", tab !== "transcript");
+  const mem = $("#memory");
+  if (mem) mem.classList.toggle("hidden", tab !== "memory");
+}
+
+// Render the episode's cross-episode memory summary (memory.json).
+function renderMemory(mem) {
+  const topics = (mem.topics || []).map((t) => `
+    <div class="mem-topic">
+      <span class="chip chip-topic" title="${esc(topicLabel(t.topic))}">${esc(topicLabel(t.topic))}</span>
+      <p>${esc(t.summary || "")}</p>
+    </div>`).join("") || '<p class="muted">No topic summaries recorded.</p>';
+  return `
+    <p class="muted">What the next episode may reference back to, per topic (written when this episode was generated).</p>
+    <div class="mem-list">${topics}</div>`;
 }
 
 // Render a podcast transcript into a dialogue. Lines look like:
@@ -594,6 +613,7 @@ function fillSettingsForm() {
   $("#set-window-days").value = podcastConfig.podcast.window_days;
   $("#set-length").value = podcastConfig.podcast.length;
   $("#set-depth").value = podcastConfig.podcast.depth;
+  $("#set-mem-windows").value = podcastConfig.podcast.mem_windows ?? 2;
   updateDerivedMeta("#set-length", "#set-depth", "#set-sources", "#set-minutes");
 }
 
@@ -613,6 +633,7 @@ function readSettingsForm() {
       window_days: parseInt($("#set-window-days").value, 10),
       length: $("#set-length").value,
       depth: $("#set-depth").value,
+      mem_windows: parseInt($("#set-mem-windows").value, 10),
     },
   };
 }
@@ -675,6 +696,7 @@ function openGenerate() {
   $("#gen-window-end").value = isoDate(end);
   $("#gen-length").value = podcastConfig.podcast.length;
   $("#gen-depth").value = podcastConfig.podcast.depth;
+  $("#gen-mem-windows").value = podcastConfig.podcast.mem_windows ?? 2;
   updateDerivedMeta("#gen-length", "#gen-depth", "#gen-sources", "#gen-minutes");
   openModal("modal-generate");
 }
@@ -698,6 +720,7 @@ $("#btn-generate-run").onclick = async () => {
       window_end: $("#gen-window-end").value,
       length: $("#gen-length").value,
       depth: $("#gen-depth").value,
+      mem_windows: parseInt($("#gen-mem-windows").value, 10),
     },
   };
   if (!body.podcast.window_start || !body.podcast.window_end) {

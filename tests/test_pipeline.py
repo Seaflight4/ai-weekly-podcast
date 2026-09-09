@@ -12,6 +12,7 @@ from pipeline import rank, store, generate, transcribe
 from pipeline import config as config_mod
 from pipeline import topics
 from pipeline import label as label_mod
+from pipeline import memory as memory_mod
 
 
 # --- RankedItem -----------------------------------------------------------
@@ -678,7 +679,8 @@ def test_generate_writes_transcript_source_for_podcastfy(tmp_path, monkeypatch):
     )
     class FakeBackend:
         name = "podcastfy"
-        def generate(self, brief, run_dir, chosen, transcript_in=None, config=None):
+        def generate(self, brief, run_dir, chosen, transcript_in=None, config=None,
+                     memory_context=None, items=None):
             return fake_result
     monkeypatch.setattr(generate.audio_mod, "PodcastfyBackend", lambda: FakeBackend())
 
@@ -729,7 +731,8 @@ def test_generate_brief_in_skips_selection_and_uses_edited_brief(tmp_path, monke
     seen_brief = {}
     class FakeBackend:
         name = "podcastfy"
-        def generate(self, brief, run_dir, chosen, transcript_in=None, config=None):
+        def generate(self, brief, run_dir, chosen, transcript_in=None, config=None,
+                     memory_context=None, items=None):
             seen_brief["path"] = brief
             seen_brief["chosen"] = list(chosen)
             return generate.audio_mod.AudioResult(
@@ -760,7 +763,8 @@ def test_generate_no_brief_in_records_auto_selection_source(tmp_path, monkeypatc
     monkeypatch.setattr(generate.store, "run_dir", lambda date=None: tmp_path)
     class FakeBackend:
         name = "podcastfy"
-        def generate(self, brief, run_dir, chosen, transcript_in=None, config=None):
+        def generate(self, brief, run_dir, chosen, transcript_in=None, config=None,
+                     memory_context=None, items=None):
             return generate.audio_mod.AudioResult(
                 audio_path=tmp_path / "episode.mp3",
                 transcript_path=tmp_path / "transcript.md", backend="podcastfy")
@@ -782,7 +786,8 @@ def test_generate_records_duration_and_words(tmp_path, monkeypatch):
 
     class FakeBackend:
         name = "podcastfy"
-        def generate(self, brief, run_dir, chosen, transcript_in=None, config=None):
+        def generate(self, brief, run_dir, chosen, transcript_in=None, config=None,
+                     memory_context=None, items=None):
             (run_dir / "episode.mp3").write_bytes(b"x")
             (run_dir / "transcript.md").write_text(
                 "<Person1>Hello world</Person1>\n<Person2>How are you today</Person2>\n")
@@ -1236,7 +1241,187 @@ def test_cli_accepts_label_stage_and_steering_flags():
     assert "topics" in cli.USAGE and "steering-alpha" in cli.USAGE
 
 
-# --- steering in the rank stage ----------------------------------------------
+# --- cross-episode memory -------------------------------------------------
+
+def test_memory_derive_summary_parses_and_filters(monkeypatch):
+    monkeypatch.setattr(memory_mod, "_chat",
+                        lambda payload: {"topics": [
+                            {"topic": "post_training", "summary": "Covered RLHF follow-ups."},
+                            {"topic": "not_a_topic", "summary": "ignored"},
+                            {"topic": "agents", "summary": 5},
+                        ]})
+    items = [
+        RankedItem(title="A", url="https://a.example", date="2026-09-01",
+                   body="b", source="arxiv", score=0.9, judge_reason="imp",
+                   topics={"post_training": 1.0}),
+        RankedItem(title="B", url="https://b.example", date="2026-09-01",
+                   body="b", source="hn", score=0.8, judge_reason="imp",
+                   topics={"agents": 1.0}),
+    ]
+    out = memory_mod.derive_summary(items, episode_date="2026-09-08")
+    assert out["episode_date"] == "2026-09-08"
+    assert out["topics"] == [
+        {"topic": "post_training", "summary": "Covered RLHF follow-ups."}]
+
+
+def test_memory_derive_falls_back_on_llm_failure(monkeypatch):
+    monkeypatch.setattr(memory_mod, "_chat",
+                        lambda payload: (_ for _ in ()).throw(RuntimeError("boom")))
+    items = [
+        RankedItem(title="A", url="https://a.example", date="2026-09-01",
+                   body="b", source="arxiv", score=0.9,
+                   judge_reason="Importance: major new method.",
+                   topics={"post_training": 1.0}),
+    ]
+    out = memory_mod.derive_summary(items, episode_date="2026-09-08")
+    assert out["topics"][0]["topic"] == "post_training"
+    assert "A" in out["topics"][0]["summary"]
+    assert "major new method" in out["topics"][0]["summary"]
+    # Fallback is deterministic: same input -> same digest.
+    assert memory_mod.derive_summary(items, episode_date="2026-09-08") == out
+
+
+def test_memory_write_idempotent_and_readable(tmp_path, monkeypatch):
+    monkeypatch.setattr(memory_mod.store, "run_dir", lambda date=None: tmp_path)
+    monkeypatch.setattr(memory_mod, "_chat",
+                        lambda payload: {"topics": [
+                            {"topic": "agents", "summary": "Agent arc."}]})
+    items = [RankedItem(title="A", url="u", date="d", body="b", source="hn",
+                        score=0.9, judge_reason="r", topics={"agents": 1.0})]
+    assert memory_mod.write_memory(items, episode_date="2026-09-08", date="2026-09-08")
+    mem = json.loads((tmp_path / memory_mod.MEMORY_FILE).read_text())
+    assert mem["topics"][0]["topic"] == "agents"
+    assert mem["window_end"] == "2026-09-08"
+    # unreadable/missing artifact tolerance
+    assert memory_mod.read_episode_date_memory(tmp_path) == mem
+
+
+def _write_prior_run(root, name, wend, topics, episode_date=None):
+    import yaml
+    d = root / name
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "config.yaml").write_text(
+        yaml.safe_dump({"window": {"end": wend}}, sort_keys=False),
+        encoding="utf-8")
+    eps = [(t, f"{name} covers {t}.") for t in topics]
+    (d / memory_mod.MEMORY_FILE).write_text(json.dumps(
+        {"episode_date": episode_date or name,
+         "topics": [{"topic": t, "summary": s} for t, s in eps]}),
+        encoding="utf-8")
+    return d
+
+
+def test_memory_context_retention_and_topic_match(tmp_path, monkeypatch):
+    monkeypatch.setattr(memory_mod.store, "ROOT", tmp_path / "history")
+    root = tmp_path / "history"
+    _write_prior_run(root, "25-08-2026", "2026-08-25",
+                     ["agents"], episode_date="2026-08-25")
+    _write_prior_run(root, "01-09-2026", "2026-09-01",
+                     ["post_training", "agents"], episode_date="2026-09-01")
+    _write_prior_run(root, "02-09-2026", "2026-09-02",
+                     ["model_release"], episode_date="2026-09-02")
+
+    current = [RankedItem(title="C", url="u", date="2026-09-07", body="b",
+                          source="hn", score=0.9, judge_reason="r",
+                          topics={"agents": 1.0})]
+    ctx = memory_mod.context_for(current, mem_windows=2,
+                                 episode_date="2026-09-08",
+                                 window_span_days=7)
+    # Only agents is wanted among the current items' topics. The retention
+    # window (2 windows back: window-start 08-18) makes BOTH the 25-08 and
+    # 01-09 runs eligible; runs in the CURRENT window (>= 09-02) are excluded,
+    # so the 02-09 run is not a memory source for itself.
+    assert list(ctx.keys()) == ["agents"]
+    entries = ctx["agents"]
+    assert len(entries) == 2
+    assert any("2026-09-01" in e for e in entries)
+    assert any("2026-08-25" in e for e in entries)
+
+
+def test_generate_writes_memory_artifact(tmp_path, monkeypatch):
+    """generate() writes memory.json into the run folder alongside labels."""
+    ranked = [
+        RankedItem(title="t", url="u", date="d", body="b", source="arxiv",
+                   score=0.9, judge_reason="r", topics={"agents": 1.0})
+    ]
+    monkeypatch.setattr(store, "run_dir", lambda date=None: tmp_path)
+    monkeypatch.setattr(generate.store, "run_dir", lambda date=None: tmp_path)
+    monkeypatch.setattr(memory_mod, "_chat",
+                        lambda payload: {"topics": [
+                            {"topic": "agents", "summary": "Agent arc."}]})
+    ep = generate.generate(ranked, make_audio=False)
+    out = json.loads((tmp_path / memory_mod.MEMORY_FILE).read_text())
+    assert out["topics"][0]["topic"] == "agents"
+    assert len(ep.manifest) == 1
+
+
+def test_memory_section_and_ordering():
+    from pipeline.podcastfy.generator import SimplePodcastGenerator
+    gen = object.__new__(SimplePodcastGenerator)
+    gen.memory_context = {"agents": ["2026-09-01: prior agent arc"],
+                          "post_training": []}
+    seg = gen._memory_section()
+    assert "=== MEMORY: PRIOR EPISODES ===" in seg
+    assert "2026-09-01: prior agent arc" in seg
+    assert "TOPIC: agents" in seg
+    assert "TOPIC: post_training" not in seg  # empty topic skipped
+
+    # Ordering: same-theme items adjacent, unlabeled fall back to legacy.
+    class _S:
+        def __init__(self, title, url):
+            self.title, self.url = title, url
+    class _It:
+        def __init__(self, url, topics):
+            self.url, self.topics = url, topics
+    gen.items = [
+        _It("https://a.example", {"post_training": 1.0}),
+        _It("https://b.example", {"agents": 1.0}),
+        _It("https://c.example", {"model_release": 1.0}),
+        _It("https://d.example", {}),  # unlabeled -> legacy fallback
+    ]
+    sources = [_S("Paper A", "https://a.example"),
+               _S("HN B", "https://b.example"),
+               _S("Paper C", "https://c.example"),
+               _S("DiffusionGemma Technical Report", "https://d.example")]
+    ordered = gen._order_sources_thematically(sources)
+    # Labeled items follow the canonical theme order: post_training, then
+    # model_release, then agents. The unlabeled source keeps the legacy order.
+    titles = [s.title for s in ordered]
+    assert titles.index("Paper A") < titles.index("Paper C")
+    assert titles.index("Paper C") < titles.index("HN B")
+    assert titles[-1] == "DiffusionGemma Technical Report"
+
+
+def test_memory_block_chunking_and_part_cap():
+    """The cross-episode MEMORY block is its own chunk with a small word cap
+    and the PRIOR-COVERAGE-SYNC instruction — never a full topic part."""
+    from pipeline.podcastfy.content_generator import LongFormContentGenerator
+    gen = LongFormContentGenerator(None, None, {
+        "per_source_words": 300, "intro_words": 120, "recap_words": 180,
+        "memory_words": 90, "continuity_reference_enabled": True})
+    combined = (
+        "=== INTRO ===\nhi\n=== END INTRO ===\n\n"
+        "=== MEMORY: PRIOR EPISODES ===\nTOPIC: agents\n- 2026-09-01: prior arc\n"
+        "=== END MEMORY ===\n"
+        "=== TOPIC: A ===\nsrc\n=== END TOPIC ===\n"
+        "=== RECAP ===\n1. A\n=== END RECAP ===")
+    chunks = gen.chunk_content(combined, 0)
+    assert len(chunks) == 4
+    assert gen._is_memory_chunk(chunks[1])
+    assert gen._part_word_cap(1, 4, is_memory=True) == 90
+    assert gen._part_word_cap(0, 4) == 120
+    assert gen._part_word_cap(2, 4) == 300
+    assert gen._part_word_cap(3, 4) == 180
+    inst = gen.enhance_prompt_params({"host1_name": "B", "host2_name": "T"},
+                                     1, 4, "", is_memory=True)
+    assert "PRIOR-COVERAGE SYNC" in inst["instruction"]
+    # A topic part (not memory) still gets the continuity guidance.
+    topic = gen.enhance_prompt_params({"host1_name": "B", "host2_name": "T"},
+                                      2, 4, "")
+    assert "CONTINUITY" in topic["instruction"] and "MEMORY" in topic["instruction"]
+
+
+
 
 def _steer_items(n=5):
     return [Item(title=f"t{i}", url=f"https://x{i}.example", date="2026-08-21",
@@ -1338,6 +1523,19 @@ def test_config_resolve_accepts_steering():
     cfg = config_mod.resolve(topic_prefs=["post_training"], steering_alpha=0.5)
     assert cfg.topic_prefs == ["post_training"]
     assert cfg.steering_alpha == 0.5
+
+
+def test_config_resolve_accepts_and_validates_mem_windows():
+    cfg = config_mod.resolve(mem_windows=3)
+    assert cfg.mem_windows == 3
+    assert config_mod.resolve().mem_windows == config_mod.MEM_WINDOWS_DEFAULT
+    # to_dict / to_yaml serialize it for the run's stored config.yaml.
+    assert config_mod.resolve().to_dict()["podcast"]["mem_windows"] == 2
+    assert "mem_windows: 2" in config_mod.resolve().to_yaml()
+    with pytest.raises(ValueError):
+        config_mod.resolve(mem_windows=0)
+    with pytest.raises(ValueError):
+        config_mod.resolve(mem_windows=9)
 
 
 def test_config_rejects_unknown_topic_and_bad_alpha():

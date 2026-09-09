@@ -143,6 +143,7 @@ def _get_run(root: pathlib.Path, date: str) -> dict | None:
     summary["episode"] = _load_json(folder / "episode.json")
     summary["rank"] = _load_json(folder / "rank.json")
     summary["labels"] = _load_json(folder / "labels.json")
+    summary["memory"] = _load_json(folder / "memory.json")
     return summary
 
 

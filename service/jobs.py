@@ -260,7 +260,8 @@ def full_run_cmd(date: str | None = None, no_audio: bool = False,
                       ("audience_level", "--audience"),
                       ("length", "--length"),
                       ("depth", "--depth"),
-                      ("steering_alpha", "--steering-alpha")):
+                      ("steering_alpha", "--steering-alpha"),
+                      ("mem_windows", "--mem-windows")):
         value = (config or {}).get(key)
         if value is not None and value != "":
             cmd += [flag, str(value)]
@@ -295,4 +296,7 @@ def generate_cmd(date: str, brief_in: pathlib.Path,
     familiar = (config or {}).get("familiar_topics")
     if familiar:
         cmd += ["--familiar", ",".join(str(t) for t in familiar)]
+    mem_windows = (config or {}).get("mem_windows")
+    if mem_windows is not None:
+        cmd += ["--mem-windows", str(mem_windows)]
     return cmd

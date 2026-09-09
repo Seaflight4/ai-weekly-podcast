@@ -94,6 +94,14 @@
               <option value="deep-dive">Deep-dive (~2 min/source)</option>
             </select>
           </label>
+          <label>Episode memory lookback
+            <select id="set-mem-windows">
+              <option value="1">1 window (previous episode)</option>
+              <option value="2" selected>2 windows (recommended)</option>
+              <option value="3">3 windows</option>
+              <option value="4">4 windows</option>
+            </select>
+          </label>
         </div>
         <p class="stat-pill">Derived sources: <span id="set-sources">7</span> · est. <span id="set-minutes">18</span> min</p>
       </div>
@@ -127,6 +135,14 @@
           <select id="gen-depth">
             <option value="brief">Brief (~1 min/source)</option>
             <option value="deep-dive">Deep-dive (~2 min/source)</option>
+          </select>
+        </label>
+        <label>Episode memory lookback
+          <select id="gen-mem-windows">
+            <option value="2" selected>2 windows (recommended)</option>
+            <option value="1">1 window</option>
+            <option value="3">3 windows</option>
+            <option value="4">4 windows</option>
           </select>
         </label>
       </div>

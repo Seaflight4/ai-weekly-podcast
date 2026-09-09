@@ -3,6 +3,7 @@ from . import store
 from . import audio as audio_mod
 from . import config as config_mod
 from . import label as label_mod
+from . import memory as memory_mod
 import pathlib, datetime, re, subprocess
 
 
@@ -60,6 +61,31 @@ def generate(ranked: list[RankedItem], make_audio: bool = True,
     if label_mod.write_episode_labels(chosen, date=date):
         print(f"      wrote labels.json (episode topic vector)")
 
+    # Cross-episode memory: derive this episode's per-topic summary NOW (so the
+    # NEXT episode can reference it), and build the continuity context this
+    # episode may use from prior runs within the retention window.
+    _, end = config.resolve_window()
+    episode_date = end.isoformat()
+    try:
+        memory_mod.write_memory(chosen, episode_date=episode_date, date=date)
+        print(f"      wrote {memory_mod.MEMORY_FILE} (per-topic summary)")
+    except Exception as e:
+        print(f"      [warn] memory write failed (episode still generated): {e}")
+    mem_windows = config.mem_windows if config is not None else None
+    if mem_windows is None:
+        mem_windows = config_mod.MEM_WINDOWS_DEFAULT
+    memory_context = {}
+    try:
+        start2, end2 = config.resolve_window()
+        memory_context = memory_mod.context_for(
+            chosen, mem_windows, episode_date=episode_date,
+            window_span_days=(end2 - start2).days)
+        if memory_context:
+            print(f"      memory: {len(memory_context)} topic(s) continued from "
+                  f"prior episodes ({mem_windows} window lookback)")
+    except Exception as e:
+        print(f"      [warn] memory context build failed (continuing without): {e}")
+
     # Forward monitor: surface low gate_score among aired items. A recurring
     # low-score-but-aired item signals the small-model gate is misaligned with
     # the big-LLM judge and the prefilter floor should be relaxed.
@@ -78,6 +104,8 @@ def generate(ranked: list[RankedItem], make_audio: bool = True,
                 brief=brief, run_dir=run, chosen=chosen,
                 transcript_in=pathlib.Path(transcript_in) if transcript_in else None,
                 config=config.podcastfy_overrides(),
+                memory_context=memory_context,
+                items=chosen,
             )
             audio = result.audio_path
             backend_name = result.backend

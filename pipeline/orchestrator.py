@@ -49,6 +49,7 @@ def run(only: str | None = None, no_audio: bool = False,
         topic_prefs: list[str] | None = None,
         steering_alpha: float | None = None,
         length: str | None = None, depth: str | None = None,
+        mem_windows: int | None = None,
         force_label: bool = False):
     """Resolve the run config (defaults < config file < CLI overrides), then
     dispatch to the requested stage(s). ``date`` is the window end / anchor
@@ -57,7 +58,7 @@ def run(only: str | None = None, no_audio: bool = False,
         config_path, date=date, window_start=window_start, window_end=window_end,
         audience_level=audience_level, familiar_topics=familiar_topics,
         topic_prefs=topic_prefs, steering_alpha=steering_alpha,
-        length=length, depth=depth,
+        length=length, depth=depth, mem_windows=mem_windows,
     )
     profile = {t: 1.0 for t in cfg.topic_prefs} or None
     if cfg is not None and cfg.window_end is not None and date is None:

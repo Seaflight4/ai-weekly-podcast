@@ -169,12 +169,16 @@ def submit_generate(date: str, payload: dict = Body(default={})):
         raise HTTPException(404, f"no ranked pool for {date} — cannot re-render")
     brief_path = folder / "podcast_brief.md"
     brief_path.write_text(brief_md, encoding="utf-8")
-    user = podcast_config.load()["user"]
+    stored = podcast_config.load()
+    user = stored["user"]
+    podcast = stored["podcast"]
     run_cfg = folder / "config.yaml"
     cmd = jobs.generate_cmd(
         date, brief_path,
         config={"audience_level": user["audience"],
-                "familiar_topics": user["familiar_topics"]},
+                "familiar_topics": user["familiar_topics"],
+                "mem_windows": podcast.get("mem_windows",
+                                           config_mod.MEM_WINDOWS_DEFAULT)},
         config_path=run_cfg if run_cfg.exists() else None,
     )
     # Scale the ETA to this episode's generate-only work: restore its

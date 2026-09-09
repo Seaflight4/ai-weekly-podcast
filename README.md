@@ -86,6 +86,28 @@ The production labeler is validated against a big reference model with
 `python -m pipeline.eval_labels --pool <items.json> --out data/eval/<name>`
 (see `data/eval/labels__mistral_small__vs__qwen/eval_report.json`).
 
+## Cross-episode memory
+
+Each episode keeps a small per-topic memory summary (`memory.json`) of what it
+covered and the open threads, written when the episode is generated. The next
+episode may reference it back — but only for **real continuations** (a new
+development, a successor release, or a repeated pattern), never a fabricated
+"last episode".
+
+- **Retention** (setting **Episode memory lookback**, 1–4 windows, default 2)
+  controls how far back prior coverage is considered: roughly `mem_windows ×
+  window` days. The current window is never its own memory source.
+- **Injection**: prior summaries matched to this episode's topics are fed to
+  the transcript LLM as a brief "prior coverage sync" part, plus a grounded
+  reference rule (direct/successor/thematic) for each topic part. Items are
+  also ordered topically so related topics sit adjacent (enabling "as we just
+  heard with…" call-backs within the same episode), falling back to the
+  hand-tuned order for unlabeled items.
+- Your editable `podcast_brief.md` never contains memory internals — the
+  **Memory** tab in History shows each episode's summary.
+- Backfilled/offline: an episode generated before this feature has no
+  `memory.json`; it simply isn't a memory source until regenerated.
+
 ## Configuration
 
 Environment variables (`.env`) only carry API keys/endpoints:

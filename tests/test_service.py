@@ -152,11 +152,12 @@ def test_jobs_command_builder():
     cmd = jobs.full_run_cmd(config={
         "window_start": "2026-08-24", "window_end": "2026-08-31",
         "audience_level": "intermediate", "familiar_topics": [],
-        "length": "long", "depth": "brief"})
+        "length": "long", "depth": "brief", "mem_windows": 3})
     assert cmd[cmd.index("--window-start") + 1] == "2026-08-24"
     assert cmd[cmd.index("--audience") + 1] == "intermediate"
     assert cmd[cmd.index("--length") + 1] == "long"
     assert cmd[cmd.index("--depth") + 1] == "brief"
+    assert cmd[cmd.index("--mem-windows") + 1] == "3"
 
 
 def test_jobs_estimate_stages_scales_with_config():
@@ -189,6 +190,7 @@ def test_podcast_config_load_defaults_when_missing(tmp_path, monkeypatch):
     assert cfg["podcast"]["window_days"] == 7
     assert cfg["podcast"]["length"] == "medium"
     assert cfg["podcast"]["depth"] == "deep-dive"
+    assert cfg["podcast"]["mem_windows"] == 2
     assert cfg["user"]["familiar_topics"] == []
 
 
@@ -196,10 +198,12 @@ def test_podcast_config_save_round_trip_and_validation(tmp_path, monkeypatch):
     monkeypatch.setattr(podcast_config, "CONFIG_PATH", tmp_path / "podcast_config.yaml")
     saved = podcast_config.save({
         "user": {"audience": "beginner", "familiar_topics": [" RLHF ", "MoE", ""]},
-        "podcast": {"window_days": 10, "length": "long", "depth": "brief"},
+        "podcast": {"window_days": 10, "length": "long", "depth": "brief",
+                    "mem_windows": 3},
     })
     # normalized: familiar topics trimmed, empties dropped
     assert saved["user"]["familiar_topics"] == ["RLHF", "MoE"]
+    assert saved["podcast"]["mem_windows"] == 3
     assert podcast_config.exists() is True
     assert podcast_config.load() == saved
     # invalid values are rejected before persisting
@@ -214,6 +218,12 @@ def test_podcast_config_save_round_trip_and_validation(tmp_path, monkeypatch):
          "podcast": {"window_days": 7, "length": "medium", "depth": "nope"}},
         {"user": {"audience": "beginner", "familiar_topics": []},
          "podcast": {"window_days": "soon", "length": "medium", "depth": "deep-dive"}},
+        {"user": {"audience": "beginner", "familiar_topics": []},
+         "podcast": {"window_days": 7, "length": "medium", "depth": "deep-dive",
+                     "mem_windows": 6}},
+        {"user": {"audience": "beginner", "familiar_topics": []},
+         "podcast": {"window_days": 7, "length": "medium", "depth": "deep-dive",
+                     "mem_windows": "soon"}},
     ):
         with pytest.raises(ValueError):
             podcast_config.save(bad)
@@ -235,6 +245,7 @@ def test_podcast_config_resolved_run_config_merges_overrides(tmp_path, monkeypat
     assert cfg["depth"] == "brief"
     assert cfg["audience_level"] == "intermediate"
     assert cfg["familiar_topics"] == ["RLHF"]
+    assert cfg["mem_windows"] == 2  # from the saved config (default)
     # Missing override keys fall back to the file; no overrides (auto-run)
     # resolves the rolling window at call time.
     cfg = podcast_config.resolved_run_config()

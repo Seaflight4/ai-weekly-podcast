@@ -45,11 +45,22 @@ WPM = 165.0
 INTRO_RECAP_FRACTION = 0.20
 # Within the intro/recap slice, the intro gets this share (recap = 1 - share).
 INTRO_SHARE = 0.40
+# Word cap for the cross-episode MEMORY part: a brief "prior coverage sync"
+# that connects the episode to prior coverage without becoming a topic.
+MEMORY_WORDS = 90
 
 MIN_SOURCES = 4
 MAX_SOURCES = 30
 MAX_WINDOW_DAYS = 14   # bound arXiv fetch cost (a week is ~1000 papers)
 DEFAULT_WINDOW_DAYS = 7
+
+# Cross-episode memory retention, in multiples of the episode's own window:
+# an episode may reference prior episodes whose window-end falls within
+# ``mem_windows * window_days`` of the current window-end (default 2 windows
+# ~= the last 2 episodes for the default 7-day window).
+MEM_WINDOWS_DEFAULT = 2
+MEM_WINDOWS_MIN = 1
+MEM_WINDOWS_MAX = 4
 
 # --- interest steering ("item selection in the rank stage") ------------------
 # final_score = (1 - alpha) * importance + alpha * personal_match. alpha is
@@ -96,6 +107,8 @@ class RunConfig:
     steering_alpha: float = STEERING_ALPHA
     length: str = "medium"
     depth: str = "deep-dive"
+    # Cross-episode memory retention in episode-windows (see MEM_WINDOWS_*).
+    mem_windows: int = MEM_WINDOWS_DEFAULT
 
     # ------------------------------------------------------------------ utils
 
@@ -177,6 +190,7 @@ class RunConfig:
             "per_source_words": b["per_source_words"],
             "intro_words": b["intro_words"],
             "recap_words": b["recap_words"],
+            "memory_words": MEMORY_WORDS,
             "audience_prompt": self.audience_prompt(),
             "familiar_clause": self.familiar_clause(),
         }
@@ -198,6 +212,7 @@ class RunConfig:
             "podcast": {
                 "length": self.length,
                 "depth": self.depth,
+                "mem_windows": self.mem_windows,
                 "num_sources": self.num_sources(),
                 "target_minutes": self.target_minutes(),
                 "word_budget": self.budget(),
@@ -214,7 +229,8 @@ class RunConfig:
                 "topic_prefs": list(self.topic_prefs),
                 "steering_alpha": self.steering_alpha,
             },
-            "podcast": {"length": self.length, "depth": self.depth},
+            "podcast": {"length": self.length, "depth": self.depth,
+                        "mem_windows": self.mem_windows},
         }
         return yaml.safe_dump(body, sort_keys=False)
 
@@ -230,7 +246,8 @@ def resolve(config_path: str | Path | None = None, *,
             topic_prefs: list[str] | None = None,
             steering_alpha: float | None = None,
             length: str | None = None,
-            depth: str | None = None) -> RunConfig:
+            depth: str | None = None,
+            mem_windows: int | None = None) -> RunConfig:
     """Build a ``RunConfig`` from defaults < config file < explicit overrides.
 
     ``date`` is a back-compat alias for ``window_end`` (the run anchor/end
@@ -253,6 +270,7 @@ def resolve(config_path: str | Path | None = None, *,
         ("steering_alpha", steering_alpha),
         ("length", length),
         ("depth", depth),
+        ("mem_windows", mem_windows),
     ):
         if value is not None:
             setattr(cfg, name, value)
@@ -269,6 +287,9 @@ def _validate(cfg: RunConfig) -> None:
         raise ValueError(f"depth {cfg.depth!r} not in {TOPIC_DEPTH_CHOICES}")
     if not 0.0 <= cfg.steering_alpha <= 1.0:
         raise ValueError(f"steering_alpha {cfg.steering_alpha!r} must be 0..1")
+    if not MEM_WINDOWS_MIN <= cfg.mem_windows <= MEM_WINDOWS_MAX:
+        raise ValueError(
+            f"mem_windows {cfg.mem_windows!r} must be {MEM_WINDOWS_MIN}..{MEM_WINDOWS_MAX}")
     from .topics import TAXONOMY_BY_ID
     bad = [t for t in cfg.topic_prefs if t not in TAXONOMY_BY_ID]
     if bad:
@@ -309,6 +330,11 @@ def _apply_file(cfg: RunConfig, path: str | Path) -> RunConfig:
         out.length = str(podcast["length"])
     if "depth" in podcast and podcast["depth"] is not None:
         out.depth = str(podcast["depth"])
+    if "mem_windows" in podcast and podcast["mem_windows"] is not None:
+        try:
+            out.mem_windows = int(podcast["mem_windows"])
+        except (TypeError, ValueError):
+            pass
     return out
 
 

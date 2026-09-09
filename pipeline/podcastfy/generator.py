@@ -266,8 +266,11 @@ class SimplePodcastGenerator:
         per_source_words: int | None = None,
         intro_words: int | None = None,
         recap_words: int | None = None,
+        memory_words: int | None = None,
         audience_prompt: str | None = None,
         familiar_clause: str = "none",
+        memory_context: Optional[dict] = None,
+        items: Optional[list] = None,
     ):
         """
         Minimal setup: LLM + strategy + TTS.
@@ -295,6 +298,15 @@ class SimplePodcastGenerator:
 
         self.papers_dir = papers_dir or "papers"
         self.web_dir = web_dir or "web"
+
+        # Cross-episode memory: {topic: ["episode_date: summary", ...]} from
+        # prior runs (see pipeline.memory). When a topic in this episode closes
+        # a theme present in a prior episode, a === MEMORY === block is injected
+        # so the transcript model can reference the real continuation.
+        self.memory_context: dict = memory_context or {}
+        # The run's chosen RankedItems, so topic-aware ordering can group
+        # same-theme sources adjacently (within-episode cross-referencing).
+        self.items: list = items or []
 
         # Cap per-part output. DeepSeek-V4-Flash is a lighter-reasoning model,
         # so the thinking preamble is shorter than Pro's. 16000 still gives
@@ -345,6 +357,7 @@ class SimplePodcastGenerator:
         self.per_source_words = per_source_words or 240
         self.intro_words = intro_words or 200
         self.recap_words = recap_words or 280
+        self.memory_words = memory_words or 90
         self.config_conversation = {
             "podcast_name": "AI News Weekly",
             "podcast_tagline": "Latest AI research and news",
@@ -362,12 +375,18 @@ class SimplePodcastGenerator:
             "intro_words": self.intro_words,
             "per_source_words": self.per_source_words,
             "recap_words": self.recap_words,
+            # Word cap for the cross-episode MEMORY part (prior-coverage sync).
+            "memory_words": self.memory_words,
             # Per-source input context scales with depth: brief feeds less so
             # the LLM stays concise, deep-dive feeds more so it can go deeper.
             "per_paper_chars": round(10000 * depth_factor),      # abstract + intro per paper
             "per_paper_tail_chars": round(3000 * depth_factor),  # conclusion tail per paper
             "per_web_chars": round(22000 * depth_factor),        # full text fetched for blog sources
             "depth_factor": depth_factor,
+            # The mid/recap part instructions gain the grounded continuity
+            # reference rules whenever cross-episode memory is available
+            # (see pipeline.memory) or topic-aware ordering ran.
+            "continuity_reference_enabled": bool(self.memory_context),
         }
 
         # Strategy (only long-form for you)
@@ -542,6 +561,7 @@ class SimplePodcastGenerator:
 
         return combined_content
 
+
     # Thematic ordering of topics for narrative flow. Maps source titles
     # (substring match) to their position in the podcast. Grouped into 3 themes:
     #   Model architectures -> Agent frameworks -> Industry & security
@@ -597,7 +617,7 @@ class SimplePodcastGenerator:
         web_by_url = fetch_web_content(sources, target_dir=self.web_dir)
         print(f"[podcastfy] {len(web_by_url)} blog source(s) fetched")
 
-        # Order sources thematically.
+        # Order sources thematically (taxonomy-aware when labels are known).
         ordered = self._order_sources_thematically(sources)
 
         # Build the combined content as topic-delimited blocks.
@@ -606,6 +626,14 @@ class SimplePodcastGenerator:
         combined_content = "=== INTRO ===\n"
         combined_content += "\n".join(intro_lines)
         combined_content += "\n=== END INTRO ===\n"
+
+        # MEMORY block: prior-episode summaries for topics this episode covers
+        # (cross-episode continuity — see pipeline.memory). It becomes its own
+        # chunk/part, listing what was covered before so a topic part can
+        # reference a genuine continuation (and only a genuine one).
+        mem_section = self._memory_section()
+        if mem_section:
+            combined_content += "\n" + mem_section
 
         # Topic blocks.
         per_paper_chars = self.config_conversation.get("per_paper_chars", 20000)
@@ -660,20 +688,109 @@ class SimplePodcastGenerator:
 
         return combined_content
 
-    def _order_sources_thematically(self, sources) -> list:
-        """Order sources by the predefined thematic ordering.
+    def _memory_section(self) -> str:
+        """A ``=== MEMORY ===`` block listing prior-episode coverage for topics
+        this episode covers. Empty string when there is no continuity memory."""
+        if not self.memory_context:
+            return ""
+        lines = ["=== MEMORY: PRIOR EPISODES ===",
+                 "Prior coverage from earlier episodes, matched by topic label. "
+                 "This is the COMPLETE set of prior coverage you may reference. "
+                 "Reference a listed item only when this episode genuinely "
+                 "continues it (new development / successor / repeated pattern). "
+                 "Never invent prior coverage not listed here."]
+        for topic in sorted(self.memory_context):
+            entries = self.memory_context[topic]
+            if not entries:
+                continue
+            lines.append(f"TOPIC: {topic}")
+            for entry in entries:
+                lines.append(f"- {entry}")
+        lines.append("=== END MEMORY ===")
+        return "\n".join(lines)
 
-        Sources are matched to _THEMATIC_ORDER by substring match on title.
-        Unmatched sources are appended at the end.
+    def _order_sources_thematically(self, sources) -> list:
+        """Order sources by topic-aware grouping when per-item labels are
+        available; otherwise fall back to the legacy hardcoded thematic order.
+
+        Within-episode cross-referencing depends on related items being ADJACENT
+        (each part sees only its own input + prior dialogue). So same-theme
+        items are clustered, the theme order follows a stable canonical order,
+        and within a theme items keep their original (rank) order. Sources the
+        run has no label for keep the legacy ``_THEMATIC_ORDER`` behavior, so
+        nothing regresses when labels are absent.
         """
+        items = self.items or []
+        label_by_url = _label_by_url(items)
+        if not label_by_url:
+            return _thematic_order_legacy(sources)
+
+        unmatched = []
+        by_label_text = {}
+        for src in sources:
+            label = label_by_url.get(_src_key(src))
+            if label is None:
+                unmatched.append(src)
+                continue
+            by_label_text.setdefault(label, []).append(src)
+
         ordered = []
-        remaining = list(sources)
-        for target in self._THEMATIC_ORDER:
-            for i, src in enumerate(remaining):
-                if target.lower() in src.title.lower():
-                    ordered.append(src)
-                    remaining.pop(i)
-                    break
-        # Append any unmatched sources at the end.
-        ordered.extend(remaining)
+        for label in _THEME_ORDER:
+            group = by_label_text.pop(label, None)
+            if group:
+                ordered.extend(group)
+        # Remaining labeled buckets (not in the canonical list) append in a
+        # stable (label-alphabetical) order.
+        for label in sorted(by_label_text):
+            ordered.extend(by_label_text[label])
+        # Unlabeled sources keep the legacy fallback ordering.
+        if unmatched:
+            ordered.extend(_thematic_order_legacy(unmatched))
         return ordered
+
+
+# Canonical THEME order (overrides the hardcoded _THEMATIC_ORDER whenever the
+# run carries per-item taxonomy labels). It lists the taxonomy buckets in
+# narrative order, so items of the same (or adjacent) buckets are ordered
+# adjacently — the enabler of within-episode cross-referencing, which needs
+# related items in consecutive parts. A bucket not listed, or a source with no
+# label, keeps the legacy behavior (rank order / substring match).
+_THEME_ORDER: list[str] = [
+    "post_training", "pretraining", "architecture_world_models",
+    "model_release", "agents", "robotics", "multimodal", "safety_alignment",
+    "incident", "policy", "business_economics", "ai_for_science",
+    "benchmarks", "research_theory", "interpretability",
+    "inference_infrastructure", "retrieval_rag",
+]
+
+
+def _src_key(src) -> str:
+    return (src.url or "").strip().rstrip("/").lower()
+
+
+def _label_by_url(items: list) -> dict:
+    """Run-item url (normalized) -> single taxonomy id, from the judges' labels
+    carried on the chosen RankedItems (see pipeline.generate/_brief_text)."""
+    out = {}
+    for it in items:
+        t = getattr(it, "topics", None) or {}
+        tid = next((k for k in t if t[k] > 0), None)
+        if tid:
+            out[(getattr(it, "url", "") or "").strip().rstrip("/").lower()] = tid
+    return out
+
+
+def _thematic_order_legacy(sources) -> list:
+    """The legacy ordering: match sources to _THEMATIC_ORDER by title substring;
+    anything unmatched is appended in its original order (kept for runs without
+    per-item labels and for unmatched/label-less sources)."""
+    ordered = []
+    remaining = list(sources)
+    for target in SimplePodcastGenerator._THEMATIC_ORDER:
+        for i, src in enumerate(remaining):
+            if target.lower() in src.title.lower():
+                ordered.append(src)
+                remaining.pop(i)
+                break
+    ordered.extend(remaining)
+    return ordered

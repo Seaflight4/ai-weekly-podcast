@@ -50,6 +50,7 @@ DEFAULTS: dict = {
         "window_days": 7,
         "length": "medium",
         "depth": "deep-dive",
+        "mem_windows": config_mod.MEM_WINDOWS_DEFAULT,
     },
 }
 
@@ -100,6 +101,11 @@ def load() -> dict:
         cfg["podcast"]["length"] = str(podcast["length"])
     if podcast.get("depth"):
         cfg["podcast"]["depth"] = str(podcast["depth"])
+    try:
+        if podcast.get("mem_windows") is not None:
+            cfg["podcast"]["mem_windows"] = int(podcast["mem_windows"])
+    except (TypeError, ValueError):
+        pass
     return cfg
 
 
@@ -142,6 +148,7 @@ def resolved_run_config(podcast: dict | None = None) -> dict:
         steering_alpha=float(cfg["user"]["steering_alpha"]),
         length=over.get("length") or cfg["podcast"]["length"],
         depth=over.get("depth") or cfg["podcast"]["depth"],
+        mem_windows=int(cfg["podcast"]["mem_windows"]),
     )
     return {
         "window_start": run.window_start,
@@ -152,6 +159,7 @@ def resolved_run_config(podcast: dict | None = None) -> dict:
         "steering_alpha": run.steering_alpha,
         "length": run.length,
         "depth": run.depth,
+        "mem_windows": run.mem_windows,
         "window_days": (run.resolve_window()[1] - run.resolve_window()[0]).days,
         "num_sources": run.num_sources(),
     }
@@ -193,6 +201,14 @@ def _validate(cfg: dict) -> dict:
     depth = str(podcast.get("depth") or "").strip()
     if depth not in config_mod.TOPIC_DEPTH_CHOICES:
         raise ValueError(f"depth {depth!r} not in {config_mod.TOPIC_DEPTH_CHOICES}")
+    mem_min = config_mod.MEM_WINDOWS_MIN
+    mem_max = config_mod.MEM_WINDOWS_MAX
+    try:
+        mem_windows = int(podcast.get("mem_windows", config_mod.MEM_WINDOWS_DEFAULT))
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"mem_windows must be an integer, got {podcast.get('mem_windows')!r}") from e
+    if not mem_min <= mem_windows <= mem_max:
+        raise ValueError(f"mem_windows must be {mem_min}..{mem_max}, got {mem_windows}")
     return {
         "user": {
             "audience": audience,
@@ -204,6 +220,7 @@ def _validate(cfg: dict) -> dict:
             "window_days": window_days,
             "length": length,
             "depth": depth,
+            "mem_windows": mem_windows,
         },
     }
 

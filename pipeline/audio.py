@@ -54,13 +54,18 @@ class AudioResult:
 
 def transcript_fingerprint(brief: pathlib.Path,
                            chosen: list[RankedItem],
-                           config: dict | None) -> str:
+                           config: dict | None,
+                           memory_context: dict | None = None) -> str:
     """Fingerprint of everything that determines the transcript's content.
 
     Covers the brief text, the selected source URLs, and the generator config
     (word budgets, depth, audience, familiar topics). A cached transcript may
     only be reused when this value is unchanged; otherwise the LLM would
     silently re-synthesize audio for a different selection/config.
+
+    Cross-episode memory (``memory_context``) also changes what the transcript
+    says (a continuation thread), so it is part of the fingerprint too — a
+    changed memory never reuses a stale cached transcript.
     """
     brief_text = ""
     try:
@@ -69,7 +74,8 @@ def transcript_fingerprint(brief: pathlib.Path,
         pass
     urls = sorted((c.url or "").strip().lower() for c in chosen)
     cfg = json.dumps(config or {}, sort_keys=True, default=str)
-    payload = f"{brief_text}\x00{urls}\x00{cfg}".encode("utf-8")
+    mem = json.dumps(memory_context or {}, sort_keys=True)
+    payload = f"{brief_text}\x00{urls}\x00{cfg}\x00{mem}".encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
 
 
@@ -128,6 +134,8 @@ class PodcastfyBackend:
         chosen: list[RankedItem],
         transcript_in: pathlib.Path | None = None,
         config: dict | None = None,
+        memory_context: dict | None = None,
+        items: list[RankedItem] | None = None,
     ) -> AudioResult:
         from .podcastfy.generator import SimplePodcastGenerator
 
@@ -143,14 +151,17 @@ class PodcastfyBackend:
         gen = SimplePodcastGenerator(
             papers_dir=str(papers_dir),
             web_dir=str(web_dir),
+            memory_context=memory_context or {},
+            items=items or [],
             **(config or {}),
         )
-        # Marker recording which brief/selection/config produced a cached
+        # Marker recording which brief/selection/config/memory produced a cached
         # transcript; reuse is only allowed when it still matches (so a full
         # re-run of the same date or an edited brief never re-synthesizes
         # audio from a stale transcript).
         marker_path = cache_dir / "transcript.fingerprint"
-        fingerprint = transcript_fingerprint(brief, chosen, config)
+        fingerprint = transcript_fingerprint(brief, chosen, config,
+                                             memory_context=memory_context)
         try:
             # Source fetching only happens when we need the LLM (no cached
             # transcript for these inputs). When reusing a matching transcript
