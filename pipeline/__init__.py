@@ -24,8 +24,9 @@ class Item:
 class RankedItem(Item):
     score: float = 0.0      # 0.0 - 1.0, judge's rubric score (importance)
     judge_reason: str = ""
-    # Topic labels (taxonomy id -> weight), set by the rank-stage label pass
-    # (pipeline/label.py). Empty for items outside the labeling pool or legacy runs.
+    # Topic labels (taxonomy id -> weight). One-hot single label, set by the
+    # rank-stage judge pass (score + reason + label in the same LLM call).
+    # Empty for items the judge returned no valid label for, or legacy runs.
     topics: dict = field(default_factory=dict)
     # Steering scores. personal_score = topic-vector match against the user
     # profile (NEUTRAL 0.5 when unknown); final_score = (1-α)·score + α·personal

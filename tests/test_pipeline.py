@@ -49,7 +49,7 @@ def test_rank_returns_full_pool_sorted(tmp_path, monkeypatch):
         Item(title=f"t{i}", url=f"u{i}", date="2026-08-21", body="b", source="arxiv")
         for i in range(3)
     ]
-    rank._judge_batch = lambda groups, rubric: [(0.9 - i * 0.1, "r") for i in range(len(groups))]
+    rank._judge_batch = lambda groups, rubric: [(0.9 - i * 0.1, "r", None) for i in range(len(groups))]
     monkeypatch.setattr(rank.store, "run_dir", lambda date=None: tmp_path)
     out = rank.rank(items)
     assert len(out) == 3
@@ -1185,7 +1185,13 @@ def _steer_items(n=5):
 
 
 def _steer_judge(n=5):
-    return lambda groups, rubric: [(s, "r") for s in (0.9, 0.8, 0.7, 0.6, 0.2)]
+    scores = (0.9, 0.8, 0.7, 0.6, 0.2)
+
+    def f(groups, rubric):
+        return [(scores[i] if i < len(scores) else 0.5, "r",
+                 "ai_for_science" if i == 0 else "post_training")
+                for i in range(len(groups))]
+    return f
 
 
 def test_rank_steering_reranks_by_profile(tmp_path, monkeypatch):
@@ -1193,15 +1199,6 @@ def test_rank_steering_reranks_by_profile(tmp_path, monkeypatch):
     rank._judge_batch = _steer_judge()
     monkeypatch.setattr(rank.store, "run_dir", lambda date=None: tmp_path)
 
-    def fake_label(items, **kwargs):
-        out = {}
-        for it in items:
-            i = int(it.title[1:])  # "t0" -> 0
-            out[topics.normalize_url(it.url)] = (
-                {"ai_for_science": 0.9} if i == 0 else {"post_training": 0.9})
-        return out
-
-    monkeypatch.setattr(rank.label_mod, "label_items", fake_label)
     out = rank.rank(items, date="07-09-2026",
                     profile={"post_training": 1.0}, alpha=0.5)
     assert [r.url for r in out] == [
@@ -1216,71 +1213,50 @@ def test_rank_steering_off_is_unchanged(tmp_path, monkeypatch):
     items = _steer_items()
     rank._judge_batch = _steer_judge()
     monkeypatch.setattr(rank.store, "run_dir", lambda date=None: tmp_path)
-    calls = {"n": 0}
 
-    def fake_label(items, **kwargs):
-        calls["n"] += 1
-        return {}
-
-    monkeypatch.setattr(rank.label_mod, "label_items", fake_label)
     out = rank.rank(items, date="07-09-2026")  # no profile -> steering off
     assert [r.url for r in out] == [f"https://x{i}.example" for i in range(5)]
-    assert calls["n"] == 0
     assert all(r.final_score == r.score for r in out)
+    # the judge still returned labels; they just don't move anything
+    assert all(r.topics for r in out)
 
 
 def test_rank_steering_alpha_zero_keeps_importance_order(tmp_path, monkeypatch):
     items = _steer_items()
     rank._judge_batch = _steer_judge()
     monkeypatch.setattr(rank.store, "run_dir", lambda date=None: tmp_path)
-    monkeypatch.setattr(
-        rank.label_mod, "label_items",
-        lambda items, **k: {topics.normalize_url(it.url): {"post_training": 0.9}
-                            for it in items})
+
     out = rank.rank(items, date="07-09-2026",
                     profile={"post_training": 1.0}, alpha=0.0)
     assert [r.url for r in out] == [f"https://x{i}.example" for i in range(5)]
     assert all(r.final_score == r.score for r in out)
 
 
-def test_rank_steering_labels_only_top_k_pool(tmp_path, monkeypatch):
+def test_rank_judge_labels_feed_steering_for_all_items(tmp_path, monkeypatch):
     items = _steer_items()
-    rank._judge_batch = _steer_judge()
+    scores = (0.9, 0.8, 0.7, 0.6, 0.2)
+
+    def judge(groups, rubric):
+        out = []
+        for i in range(len(groups)):
+            label = "post_training" if i == 0 else "ai_for_science"
+            if i == 2:  # judge returns no valid label for t2 -> neutral
+                label = None
+            out.append((scores[i], "r", label))
+        return out
+
+    rank._judge_batch = judge
     monkeypatch.setattr(rank.store, "run_dir", lambda date=None: tmp_path)
-    monkeypatch.setattr(
-        rank.label_mod, "label_items",
-        lambda items, **k: {topics.normalize_url(it.url): {"post_training": 0.9}
-                            for it in items})
-    out = rank.rank(items, date="07-09-2026",
-                    profile={"post_training": 1.0}, alpha=0.5,
-                    label_top_n=2)  # only t0, t1 get labeled
-    labeled = {r.url for r in out if r.topics}
-    assert labeled == {"https://x0.example", "https://x1.example"}
-    # unlabeled items are not moved by steering: neutral personal, final == score
-    unlabeled = [r for r in out if not r.topics]
-    assert all(r.personal_score == pytest.approx(0.5) for r in unlabeled)
-    assert all(r.final_score == r.score for r in unlabeled)
 
-
-def test_rank_steering_reuses_item_label_cache(tmp_path, monkeypatch):
-    items = _steer_items()
-    rank._judge_batch = _steer_judge()
-    monkeypatch.setattr(rank.store, "run_dir", lambda date=None: tmp_path)
-    calls = {"n": 0}
-
-    def fake_label(items, **kwargs):
-        calls["n"] += 1
-        return {topics.normalize_url(it.url): {"post_training": 0.9}
-                for it in items}
-
-    monkeypatch.setattr(rank.label_mod, "label_items", fake_label)
-    rank.rank(items, date="07-09-2026", profile={"post_training": 1.0}, alpha=0.5)
-    assert calls["n"] == 1
-    # second run on the same date reuses item_labels.json -> no label calls
     out = rank.rank(items, date="07-09-2026",
                     profile={"post_training": 1.0}, alpha=0.5)
-    assert calls["n"] == 1
-    assert all(r.topics for r in out)
+    # all items carry the judge's label except the deliberately-unlabeled one
+    assert {r.url for r in out if r.topics} == {
+        "https://x0.example", "https://x1.example",
+        "https://x3.example", "https://x4.example"}
+    t2 = [r for r in out if r.url == "https://x2.example"][0]
+    assert t2.personal_score == pytest.approx(0.5)
+    assert t2.final_score == t2.score
 
 
 # --- selection + config ------------------------------------------------------
@@ -1312,14 +1288,12 @@ def test_config_rejects_unknown_topic_and_bad_alpha():
         config_mod.resolve(steering_alpha=1.5)
 
 
-def test_label_pool_size_scales_and_is_bounded():
-    cfg = config_mod.RunConfig(length="short", depth="deep-dive")  # 4 sources
-    assert cfg.label_pool_size() == config_mod.LABEL_POOL_FLOOR
-    cfg2 = config_mod.RunConfig(length="long", depth="brief")
-    assert config_mod.LABEL_POOL_FLOOR <= cfg2.label_pool_size() <= config_mod.LABEL_POOL_CAP
-    cfg3 = config_mod.RunConfig(length="short", depth="deep-dive")
-    cfg3.steering_alpha = 1.0  # even a pathological profile cannot blow the pool
-    assert cfg3.label_pool_size() == config_mod.LABEL_POOL_FLOOR
+def test_label_pool_removed_steering_alpha_defaults_to_constant():
+    # The old top-K label pool is gone — labels ride the judge pass — but the
+    # steering alpha still resolves from its constant, so nothing regresses.
+    cfg = config_mod.RunConfig(length="short", depth="deep-dive")
+    assert cfg.steering_alpha == config_mod.STEERING_ALPHA
+    assert not hasattr(cfg, "label_pool_size")
 
 
 # --- eval harness helpers (no LLM) ------------------------------------------

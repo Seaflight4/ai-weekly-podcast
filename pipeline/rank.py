@@ -2,7 +2,6 @@ from . import Item, RankedItem
 from . import store
 from . import llm
 from . import topics
-from . import label as label_mod
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 
@@ -10,7 +9,7 @@ BATCH_SIZE = 25            # stories per batch-judge request (empirically fastes
 MAX_JUDGE_TRIES = 3       # retries per batch before giving up on malformed JSON
 JUDGE_WORKERS = 8         # concurrent batch-judge calls to the SkAInet backend
 
-UNIFIED_RUBRIC = """You are a senior practitioner at a software consulting firm choosing which
+_UNIFIED_BASE_RUBRIC = """You are a senior practitioner at a software consulting firm choosing which
 items from this week's AI news and research deserve airtime on the internal AI
 podcast. The audience is AI researchers who advise clients and build systems.
 
@@ -66,24 +65,48 @@ Anchor bands: 0.9+ = must-know this week; 0.7-0.89 = useful context; 0.4-0.69
 
 Return ONLY a JSON object with a single key "scores", an array of objects,
 one per item, each with keys "index" (the item's integer index), "score" (a
-float), and "reason" (a one-sentence string). Each index must appear exactly
-once. No prose before or after. No markdown fences.
+float), "reason" (a one-sentence string), and "label" (the single topic id
+from the taxonomy below). Each index must appear exactly once, and "label"
+must be one of the listed ids for every item. No prose before or after. No
+markdown fences.
 """
+
+
+def _label_block() -> str:
+    """Single-label taxonomy section appended to the judge rubric, so the label
+    decision shares the judge's full-body context in the same LLM pass (no
+    separate labeler re-reading the head of the body later)."""
+    lines = [
+        "",
+        "For every item, ALSO assign EXACTLY ONE topic id from this taxonomy:",
+    ]
+    for t in topics.TAXONOMY:
+        lines.append(f"- {t['id']}: {t['description']}")
+    lines += [
+        "",
+        "Label rules: a research paper gets its technical area (post_training, "
+        "benchmarks, ai_for_science, ...) — NOT model_release; an event story "
+        "(launch, incident, deal) gets the event topic (model_release, incident, "
+        "business_economics). If nothing fits, use \"other\".",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+UNIFIED_RUBRIC = _UNIFIED_BASE_RUBRIC + _label_block()
 
 
 def rank(items: list[Item], date: str | None = None,
          top_k: int | None = None, score_floor: float | None = None,
-         profile: dict | None = None, alpha: float = 0.3,
-         label_top_n: int | None = None) -> list[RankedItem]:
-    """Score every item and return the full ranked pool (sorted desc).
+         profile: dict | None = None, alpha: float = 0.3) -> list[RankedItem]:
+    """Score and label every item in one fused judge pass (sorted desc).
 
-    Importance ranking first — every item gets a rubric ``score``. When a user
-    ``profile`` (taxonomy topic weights) is provided, an interest-steering pass
-    follows: the importance top-K pool (``label_top_n``) is topic-labeled with
-    the cheap model, each item gets a ``personal_score`` (cosine match to the
-    profile) and ``final_score = (1-α)·score + α·personal``, and the pool is
-    re-sorted by ``final_score``. No profile => steering is a no-op (final ==
-    importance) and costs no extra LLM calls.
+    Importance ``score`` and a single topic ``label`` come from the SAME LLM
+    call, which reads each item's full body once (the separate labeler pass
+    over the importance top-K pool — and its 2000-char head — is gone). When a
+    user ``profile`` (taxonomy topic weights) is provided, each item gets a
+    ``personal_score`` (cosine match) and ``final_score = (1-α)·score +
+    α·personal``; no profile => steering is a no-op (final == importance).
 
     Optional prefilter (``top_k`` / ``score_floor``) shrinks the big-LLM input
     using the small-model ``gate_score`` set by the collect stage, per source
@@ -101,55 +124,33 @@ def rank(items: list[Item], date: str | None = None,
               f"(top_k={top_k}, floor={score_floor})")
 
     ranked = _rank_pool(items, UNIFIED_RUBRIC)
-    _apply_steering(ranked, date=date, profile=profile or None,
-                    alpha=alpha, label_top_n=label_top_n)
+    _apply_steering(ranked, profile or None, alpha)
     ranked.sort(key=lambda r: (r.final_score, r.score), reverse=True)
     store.write("rank.json", [r.__dict__ for r in ranked], date=date)
     return ranked
 
 
-def _apply_steering(ranked: list[RankedItem], date: str | None,
-                    profile: dict | None, alpha: float,
-                    label_top_n: int | None) -> None:
-    """Add topics + personal/final scores; no-op without a profile.
+def _apply_steering(ranked: list[RankedItem], profile: dict | None,
+                    alpha: float) -> None:
+    """Add personal/final scores from the judge-given topic labels.
 
-    Labels only the importance top-K pool (``label_top_n``, sorted by score so
-    it's already the top slice) to keep the cheap-model pass small; results are
-    cached per run in ``item_labels.json`` so a re-rank doesn't re-label.
-    Items outside the pool (or that the labeler returned nothing for) get a
-    neutral personal match, so the blend never collapses to junk — a
-    low-importance, perfect-match item can still only rise a few slots with a
-    modest α.
+    Labels ride the judge pass (score + reason + label in one LLM call over the
+    full body). No ``profile`` => steering is a no-op (final == importance).
+    Items the judge returned no valid label for keep their importance score
+    (neutral personal), so steering never collapses on unlabeled rows.
     """
     for r in ranked:
         r.final_score = r.score
     if not profile:
         return
-
-    pool = ranked[:label_top_n] if label_top_n else ranked
-    cache = label_mod.load_item_labels(date=date)
-    missing = [r for r in pool
-               if topics.normalize_url(r.url) not in cache]
-    if missing:
-        new = label_mod.label_items(missing)
-        cache.update(new)
-        label_mod.write_item_labels(cache, date=date)
-
     for r in ranked:
-        vec = cache.get(topics.normalize_url(r.url)) or {}
-        r.topics = vec
+        vec = r.topics or {}
         if vec:
             r.personal_score = topics.personal_match(vec, profile)
             r.final_score = topics.final_score(r.score, r.personal_score, alpha)
         else:
-            # Unlabeled (outside the pool / labeler returned nothing): steering
-            # does not move the item — it keeps its importance score.
             r.personal_score = topics.NEUTRAL_PERSONAL
             r.final_score = r.score
-    labeled = sum(1 for r in ranked if r.topics)
-    if pool is not ranked:
-        print(f"      rank: steering labeled {labeled}/{len(pool)} pool items "
-              f"(top {len(pool)} by importance, α={alpha})")
 
 
 def _prefilter_by_gate(items: list[Item], top_k: int | None,
@@ -224,8 +225,8 @@ def _rank_pool(items: list[Item], rubric: str) -> list[RankedItem]:
                 done += 1
                 print(f"      batch {ci + 1}/{len(chunks)} done in {dt:.1f}s ({done}/{len(chunks)} complete)")
     for ci in sorted(results):
-        for (score, reason), item in zip(results[ci], chunks[ci]):
-            ranked.append(_to_ranked(item, score, reason))
+        for (score, reason, label), item in zip(results[ci], chunks[ci]):
+            ranked.append(_to_ranked(item, score, reason, label))
     return ranked
 
 
@@ -250,11 +251,17 @@ def _story_to_dict(group: Item, idx: int) -> dict:
     return d
 
 
-def _judge_batch(groups: list[Item], rubric: str) -> list[tuple[float, str]]:
-    """Judge a batch of stories in one LLM request. Returns (score, reason) per story."""
+def _judge_batch(groups: list[Item], rubric: str) -> list[tuple[float, str, str | None]]:
+    """Judge a batch of stories in one LLM request.
+
+    Returns ``(score, reason, label)`` per story, where ``label`` is a single
+    taxonomy id (None when the model omits/uses an invalid id — label is
+    optional, score+reason are required).
+    """
     import json
     payload = [_story_to_dict(g, i) for i, g in enumerate(groups)]
     user_msg = json.dumps(payload)
+    valid = topics.TAXONOMY_BY_ID
     last_err: ValueError | None = None
     for attempt in range(MAX_JUDGE_TRIES):
         raw = llm.chat(user_msg, rubric)
@@ -262,12 +269,17 @@ def _judge_batch(groups: list[Item], rubric: str) -> list[tuple[float, str]]:
             entries = llm.parse_json(raw).get("scores")
             if not isinstance(entries, list) or not entries:
                 raise ValueError(f"model returned no 'scores' list.\nraw response:\n{raw}")
-            by_index: dict[int, tuple[float, str]] = {}
+            by_index: dict[int, tuple[float, str, str | None]] = {}
             for e in entries:
                 try:
-                    by_index[int(e["index"])] = (float(e["score"]), e["reason"])
+                    idx = int(e["index"])
+                    score = float(e["score"])
                 except (KeyError, TypeError, ValueError):
                     continue
+                label = e.get("label")
+                if not (isinstance(label, str) and label in valid):
+                    label = None
+                by_index[idx] = (score, str(e.get("reason", "")), label)
             out = []
             missing = []
             for i in range(len(groups)):
@@ -285,8 +297,9 @@ def _judge_batch(groups: list[Item], rubric: str) -> list[tuple[float, str]]:
     raise last_err
 
 
-def _to_ranked(item: Item, score: float, reason: str) -> RankedItem:
-    return RankedItem(
-        **item.__dict__,
-        score=score, judge_reason=reason,
-    )
+def _to_ranked(item: Item, score: float, reason: str,
+               label: str | None = None) -> RankedItem:
+    r = RankedItem(**item.__dict__, score=score, judge_reason=reason)
+    if label:
+        r.topics = {label: 1.0}
+    return r

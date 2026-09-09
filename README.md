@@ -61,15 +61,17 @@ Then, all in the browser:
 
 ## Steering by topic
 
-Every candidate item gets EXACTLY ONE coarse topic label from a cheap model
-during the rank stage (a data-derived 18-bucket taxonomy: agents, post_training,
-multimodal, business_economics, ai_for_science, …). When you set **topics
-you're interested in** in Settings, each item's importance score is blended
-with its match to your profile — `final = (1-α)·importance + α·match` — and
-the top sources are chosen from that blended order. α = 0 turns steering off
-(default selection preserved). Labels on the aired episode also power the
-history topic filter. Existing episodes can be labeled for filtering via
-`python -m pipeline run --only label`.
+Every candidate item gets EXACTLY ONE coarse topic label (a data-derived
+18-bucket taxonomy: agents, post_training, multimodal, business_economics,
+ai_for_science, …), assigned by the rank judge in the SAME LLM pass that scores
+importance — score, reason and label share the item's full body, so there is no
+separate labeler with a narrower context. When you set **topics you're
+interested in** in Settings, each item's importance score is blended with its
+match to your profile — `final = (1-α)·importance + α·match` — and the top
+sources are chosen from that blended order. α = 0 turns steering off (default
+selection preserved). Labels on the aired episode also power the history topic
+filter. Episodes aired before judging carried labels can be backfilled for
+filtering via `python -m pipeline run --only label` (offline, cheap model).
 
 The taxonomy itself is derived from a sampled 4-week corpus of AI news and
 verified before adoption: `python -m pipeline.fetch_corpus --out

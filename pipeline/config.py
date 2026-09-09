@@ -55,13 +55,6 @@ DEFAULT_WINDOW_DAYS = 7
 # final_score = (1 - alpha) * importance + alpha * personal_match. alpha is
 # user-configurable (0 disables steering); the defaults below are safe/sane.
 STEERING_ALPHA = 0.3
-# The label pass only covers the importance top-K pool, where K is scaled from
-# the episode's source count: with a modest alpha an item must already be
-# mid-tier in importance to be affected by the blend, so the tail never needs
-# labeling. Constants bound K so huge/small episodes stay sensible.
-LABEL_POOL_FACTOR = 4     # K = factor * num_sources  (e.g. 9 sources -> 36)
-LABEL_POOL_FLOOR = 30
-LABEL_POOL_CAP = 300
 
 # Baseline audience sentence used by the transcript LLM. Researcher wording is
 # the historical default; the others trade explanation depth for accessibility.
@@ -152,17 +145,6 @@ class RunConfig:
     def num_sources(self) -> int:
         """Source count derived from length / per-source depth."""
         return self.budget()["num_sources"]
-
-    def label_pool_size(self) -> int:
-        """Number of top-importance items the rank-stage label pass covers.
-
-        Scaled from the source count (see module constants). Only the items
-        that could plausibly be selected need personalization, so K stays a
-        small multiple of how many sources the episode will air.
-        """
-        return max(LABEL_POOL_FLOOR,
-                   min(LABEL_POOL_CAP,
-                       round(LABEL_POOL_FACTOR * self.num_sources())))
 
     def depth_factor(self) -> float:
         return DEPTH_FACTOR[self.depth]

@@ -1,15 +1,16 @@
-"""Topic labeling of items, plus per-run caches and episode aggregation.
+"""Topic labeling of run items, plus episode aggregation and history backfill.
 
-The production labeler is a cheap model — the same Mistral-Small the collect
-stage uses — constrained to the taxonomy in ``pipeline.topics``. The eval
-harness (``pipeline/eval_labels.py``) compares it against a big reference
-model.
+For NEW runs, topic labels are assigned by the rank-stage judge in the SAME
+LLM pass that scores importance (score + reason + label over the full body,
+see ``rank.UNIFIED_RUBRIC``) — this module no longer runs a labeler during
+ranking.
 
-Where labeling happens:
-- rank, for steering (``rank.py``): labels only the importance top-K pool and
-  caches the result in the run folder as ``item_labels.json``.
-- generate / backfill: aggregates the chosen items' labels into an episode
-  topic vector written as ``labels.json`` (used for history filtering).
+What this module is used for now:
+- ``label_items`` / ``backfill_labels``: label ELIGIBLE already-aired episodes
+  (from their manifests) with the cheap Mistral-Small labeler so the history
+  topic filter works for episodes aired before judging carried labels.
+- ``write_episode_labels`` / ``episode_topics_from_items``: aggregate chosen
+  items' topics (from rank) into the episode ``labels.json`` vector.
 
 Inputs are always the items' already-fetched bodies (in-memory or
 ``collect.json``/``rank.json``) — labeling never re-fetches content.
@@ -154,26 +155,6 @@ def label_items(items: list,
         out.update(results[ci])
     print(f"      label: {len(out)}/{len(items)} items labeled ({model})")
     return out
-
-
-# --- per-item cache (used by the rank stage) --------------------------------
-
-def load_item_labels(date=None) -> dict[str, dict[str, float]]:
-    """Per-run item topic cache. Empty when absent (SystemExit is the store's
-    'missing file' signal)."""
-    try:
-        raw = store.read("item_labels.json", date=date)
-    except SystemExit:
-        return {}
-    if not isinstance(raw, dict):
-        return {}
-    return {topics.normalize_url(k): v for k, v in raw.items()
-            if isinstance(v, dict)}
-
-
-def write_item_labels(labels: dict[str, dict[str, float]], date=None):
-    """Persist the per-run item topic cache (keyed by normalized URL)."""
-    store.write("item_labels.json", {k: v for k, v in labels.items()}, date=date)
 
 
 # --- episode-level labels ----------------------------------------------------

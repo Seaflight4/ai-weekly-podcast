@@ -71,8 +71,7 @@ def run(only: str | None = None, no_audio: bool = False,
         print("[2/3] ranking...")
         ranked = _timed("rank", rank.rank, items, date=date,
                         top_k=top_k, score_floor=score_floor,
-                        profile=profile, alpha=cfg.steering_alpha,
-                        label_top_n=cfg.label_pool_size())
+                        profile=profile, alpha=cfg.steering_alpha)
         print(f"      scored {len(ranked)} items")
 
         print("[3/3] generating...")
@@ -99,8 +98,7 @@ def run(only: str | None = None, no_audio: bool = False,
         print(f"[2/3] ranking {len(items)} cached items...")
         ranked = _timed("rank", rank.rank, items, date=date,
                         top_k=top_k, score_floor=score_floor,
-                        profile=profile, alpha=cfg.steering_alpha,
-                        label_top_n=cfg.label_pool_size())
+                        profile=profile, alpha=cfg.steering_alpha)
         print(f"      scored {len(ranked)} items")
         return
 
