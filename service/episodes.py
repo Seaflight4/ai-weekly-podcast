@@ -109,6 +109,7 @@ def _list_runs(root: pathlib.Path) -> list[dict]:
 def _run_summary(folder: pathlib.Path) -> dict:
     ep = _load_json(folder / "episode.json")
     audio = folder / "episode.mp3"
+    labels = _load_json(folder / "labels.json")
     if ep is None:
         status = "empty"
     elif not audio.exists():
@@ -127,6 +128,7 @@ def _run_summary(folder: pathlib.Path) -> dict:
         "created_at": ep.get("created_at") if ep else None,
         "duration_sec": ep.get("duration_sec") if ep else None,
         "transcript_words": ep.get("transcript_words") if ep else None,
+        "topics": (labels or {}).get("episode_topics") or [],
     }
 
 
@@ -140,6 +142,7 @@ def _get_run(root: pathlib.Path, date: str) -> dict | None:
     summary["transcript"] = _read_text(folder / "transcript.md")
     summary["episode"] = _load_json(folder / "episode.json")
     summary["rank"] = _load_json(folder / "rank.json")
+    summary["labels"] = _load_json(folder / "labels.json")
     return summary
 
 
@@ -163,8 +166,20 @@ def _read_text(path: pathlib.Path) -> str | None:
 
 # --- public API -----------------------------------------------------------
 
-def list_runs() -> list[dict]:
-    return _list_runs(DATA_ROOT)
+def list_runs(topics: list[str] | None = None) -> list[dict]:
+    """All runs, newest first. With ``topics``, keep only runs whose topic
+    labels cover any of the given topic ids (OR-match)."""
+    runs = _list_runs(DATA_ROOT)
+    if topics:
+        wanted = {t.strip().lower() for t in topics if t.strip()}
+        if wanted:
+            runs = [r for r in runs if _covers(r, wanted)]
+    return runs
+
+
+def _covers(run: dict, wanted: set[str]) -> bool:
+    ids = {t.get("topic", "").lower() for t in (run.get("topics") or [])}
+    return bool(ids & wanted)
 
 
 def get_run(date: str) -> dict | None:
@@ -186,6 +201,12 @@ def brief_path(date: str) -> pathlib.Path | None:
 def transcript_path(date: str) -> pathlib.Path | None:
     folder = DATA_ROOT / _normalize_date(date)
     p = folder / "transcript.md"
+    return p if p.exists() else None
+
+
+def labels_path(date: str) -> pathlib.Path | None:
+    folder = DATA_ROOT / _normalize_date(date)
+    p = folder / "labels.json"
     return p if p.exists() else None
 
 

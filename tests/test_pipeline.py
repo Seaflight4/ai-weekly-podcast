@@ -10,6 +10,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from pipeline import Item, RankedItem
 from pipeline import rank, store, generate, transcribe
 from pipeline import config as config_mod
+from pipeline import topics
+from pipeline import label as label_mod
 
 
 # --- RankedItem -----------------------------------------------------------
@@ -24,8 +26,10 @@ def test_rankeditem_round_trips():
 
 
 def test_rankeditem_legacy_load_ignores_unknown_keys():
-    # Old caches may carry removed Phase-2 fields (personal_score, final_score,
-    # alpha). The tolerant loaders filter to known dataclass fields.
+    # Old caches may carry fields the schema has never had (alpha) — the
+    # tolerant loaders filter to known dataclass fields. personal_score /
+    # final_score / topics are legitimate fields again (steering), so they
+    # load with their stored values.
     legacy = {"title": "t", "url": "u", "date": "d", "body": "b",
               "source": "arxiv", "score": 0.8, "judge_reason": "r",
               "personal_score": 0.6, "alpha": 0.7, "final_score": 0.74}
@@ -33,8 +37,9 @@ def test_rankeditem_legacy_load_ignores_unknown_keys():
     known = {f.name for f in dataclasses.fields(RankedItem)}
     r = RankedItem(**{k: v for k, v in legacy.items() if k in known})
     assert r.score == 0.8
-    assert not hasattr(r, "personal_score")
-    assert not hasattr(r, "final_score")
+    assert r.personal_score == 0.6
+    assert r.final_score == 0.74
+    assert not hasattr(r, "alpha")
 
 
 # --- rank writes the full scored pool, sorted -----------------------------
@@ -1044,3 +1049,343 @@ def test_source_part_prompt_targets_words():
         part_idx=1, total_parts=3, chat_context="", chunk_len=500)
     assert "targeting about 100 words of dialogue" in p["instruction"]
     assert "at most 100 words" not in p["instruction"]
+
+
+# --- topic taxonomy + steering helpers --------------------------------------
+
+def test_personal_match_neutral_when_no_profile():
+    # No profile => neutral 0.5 so the blend is a no-op (final == importance).
+    assert topics.personal_match({"post_training": 0.9}, {}) == 0.5
+
+
+def test_personal_match_cosine_overlap():
+    vec = {"post_training": 0.9, "agents_tool_use": 0.1}
+    pref = {"post_training": 1.0}
+    v = topics.personal_match(vec, pref)
+    assert abs(v - (0.9 / (0.9 ** 2 + 0.1 ** 2) ** 0.5)) < 1e-9
+    assert 0.0 < v <= 1.0
+    assert topics.personal_match({"agents_tool_use": 1.0}, pref) == 0.0
+    assert topics.personal_match({}, pref) == 0.0
+
+
+def test_final_score_interpolated_blend():
+    assert abs(topics.final_score(0.8, 1.0, 0.3) - 0.86) < 1e-9
+    assert topics.final_score(0.8, 0.9, 0.0) == 0.8
+    assert topics.final_score(0.8, 0.9, 1.0) == 0.9
+
+
+def test_episode_vector_spans_full_taxonomy_and_normalizes():
+    vec = topics.episode_vector(
+        [{"post_training": 0.9}, {"model_release": 0.8}], weights=[1.0, 1.0])
+    assert set(vec) == set(topics.TAXONOMY_IDS)
+    assert abs(sum(vec.values()) - 1.0) < 1e-9
+    assert vec["post_training"] > 0 and vec["model_release"] > 0
+    assert vec["safety_alignment"] == 0.0
+
+
+def test_validate_topic_map():
+    assert topics.validate_topic_map({"post_training": 0.9}) == []
+    assert "bogus" in topics.validate_topic_map({"post_training": 0.9, "bogus": 1.0})
+    assert topics.validate_topic_map("nope")
+
+    ids = set(topics.TAXONOMY_IDS)
+    assert len(ids) == len(topics.TAXONOMY)  # unique ids
+    assert "other" in ids
+
+
+# --- label pass --------------------------------------------------------------
+
+def test_label_items_parses_and_filters_taxonomy(monkeypatch):
+    monkeypatch.setattr(label_mod, "_chat", lambda payload, model: json.dumps({
+        "labels": [
+            # valid primary at reduced weight, a good technical weight,
+            # an off-taxonomy id (dropped), a non-positive weight (dropped)
+            {"index": 0, "primary": "model_release",
+             "technical": {"post_training": 0.8, "bogus": 1.0},
+             "application": {"coding": -0.5}},
+            # primary-only item (empty facets still yields a label)
+            {"index": 1, "primary": "research_findings",
+             "technical": {}, "application": {}},
+            # invalid primary + empty facets -> nothing
+            {"index": 2, "primary": "not_a_type",
+             "technical": {}, "application": {}},
+        ]
+    }))
+    items = [
+        Item(title="a", url="https://A.example/", date="d", body="b", source="arxiv"),
+        Item(title="b", url="https://b.example", date="d", body="b", source="arxiv"),
+        Item(title="c", url="https://c.example", date="d", body="b", source="arxiv"),
+    ]
+    out = label_mod.label_items(items, workers=1)
+    assert out == {
+        "https://a.example": {"model_release": topics.PRIMARY_WEIGHT,
+                              "post_training": 0.8},
+        "https://b.example": {"research_findings": topics.PRIMARY_WEIGHT},
+    }
+    assert "https://c.example" not in out
+
+
+def test_flatten_label_clamps_and_axis_checks():
+    entry = {
+        "primary": "model_release",
+        "technical": {"post_training": 1.7, "inference_efficiency": 0.4},
+        "application": {},
+    }
+    flat = label_mod._flatten_label(entry)
+    assert flat["post_training"] == 1.0      # clamped
+    assert flat["inference_efficiency"] == 0.4
+    assert flat["model_release"] == topics.PRIMARY_WEIGHT
+    assert label_mod._flatten_label({"primary": "post_training",  # wrong axis
+                                     "technical": {}, "application": {}}) == {}
+    assert label_mod._flatten_label({"primary": "model_release",
+                                     "technical": {}, "application": {}}) \
+        == {"model_release": topics.PRIMARY_WEIGHT}
+
+
+def test_label_items_malformed_batch_yields_nothing(monkeypatch):
+    monkeypatch.setattr(label_mod, "_chat",
+                        lambda payload, model: "not json at all")
+    items = [Item(title="a", url="https://a.example", date="d", body="b", source="arxiv")]
+    assert label_mod.label_items(items, workers=1) == {}
+
+
+def test_chunk_by_chars_respects_budget():
+    items = [Item(title=f"t{i}", url=f"u{i}", date="d", body="x" * 500,
+                  source="arxiv") for i in range(10)]
+    chunks = label_mod._chunk_by_chars(items, max_chars=1200)
+    assert sum(len(c) for c in chunks) == 10
+    assert len(chunks) > 1
+
+
+def test_backfill_labels_writes_episode_labels(tmp_path, monkeypatch):
+    root = tmp_path / "history"
+    run = root / "05-09-2026"
+    run.mkdir(parents=True)
+    (run / "episode.json").write_text(json.dumps({"manifest": [
+        {"title": "a", "url": "https://a.example", "date": "d", "body": "b",
+         "source": "arxiv", "score": 0.8},
+        {"title": "b", "url": "https://b.example", "date": "d", "body": "b",
+         "source": "arxiv", "score": 0.5},
+    ]}))
+    monkeypatch.setattr(label_mod.store, "ROOT", root)
+    monkeypatch.setattr(
+        label_mod, "label_items",
+        lambda items, **k: {topics.normalize_url(it.url): {"post_training": 0.9}
+                            for it in items})
+
+    touched = label_mod.backfill_labels()
+    assert touched == ["05-09-2026"]
+    labels = json.loads((run / "labels.json").read_text())
+    assert labels["episode_topics"][0]["topic"] == "post_training"
+    # already present -> skipped, nothing relabeled
+    assert label_mod.backfill_labels() == []
+
+
+def test_cli_accepts_label_stage_and_steering_flags():
+    import pytest as _pt  # noqa: F401
+    from pipeline import __main__ as cli
+    # --only label is a valid stage; --topics/--steering-alpha parse into run args.
+    # We only exercise argument parsing (no LLM/network): a bogus stage raises.
+    with pytest.raises(SystemExit):
+        cli.main(["run", "--only", "not_a_stage"])
+    assert "label" in cli.STAGES
+    assert "topics" in cli.USAGE and "steering-alpha" in cli.USAGE
+
+
+# --- steering in the rank stage ----------------------------------------------
+
+def _steer_items(n=5):
+    return [Item(title=f"t{i}", url=f"https://x{i}.example", date="2026-08-21",
+                 body="body", source="arxiv") for i in range(n)]
+
+
+def _steer_judge(n=5):
+    return lambda groups, rubric: [(s, "r") for s in (0.9, 0.8, 0.7, 0.6, 0.2)]
+
+
+def test_rank_steering_reranks_by_profile(tmp_path, monkeypatch):
+    items = _steer_items()
+    rank._judge_batch = _steer_judge()
+    monkeypatch.setattr(rank.store, "run_dir", lambda date=None: tmp_path)
+
+    def fake_label(items, **kwargs):
+        out = {}
+        for it in items:
+            i = int(it.title[1:])  # "t0" -> 0
+            out[topics.normalize_url(it.url)] = (
+                {"agents_tool_use": 0.9} if i == 0 else {"post_training": 0.9})
+        return out
+
+    monkeypatch.setattr(rank.label_mod, "label_items", fake_label)
+    out = rank.rank(items, date="07-09-2026",
+                    profile={"post_training": 1.0}, alpha=0.5)
+    assert [r.url for r in out] == [
+        "https://x1.example", "https://x2.example", "https://x3.example",
+        "https://x4.example", "https://x0.example"]  # t0 (top importance) demoted
+    assert out[0].personal_score == pytest.approx(1.0)
+    assert out[-1].personal_score == pytest.approx(0.0)
+    assert out[1].final_score > out[-1].final_score
+
+
+def test_rank_steering_off_is_unchanged(tmp_path, monkeypatch):
+    items = _steer_items()
+    rank._judge_batch = _steer_judge()
+    monkeypatch.setattr(rank.store, "run_dir", lambda date=None: tmp_path)
+    calls = {"n": 0}
+
+    def fake_label(items, **kwargs):
+        calls["n"] += 1
+        return {}
+
+    monkeypatch.setattr(rank.label_mod, "label_items", fake_label)
+    out = rank.rank(items, date="07-09-2026")  # no profile -> steering off
+    assert [r.url for r in out] == [f"https://x{i}.example" for i in range(5)]
+    assert calls["n"] == 0
+    assert all(r.final_score == r.score for r in out)
+
+
+def test_rank_steering_alpha_zero_keeps_importance_order(tmp_path, monkeypatch):
+    items = _steer_items()
+    rank._judge_batch = _steer_judge()
+    monkeypatch.setattr(rank.store, "run_dir", lambda date=None: tmp_path)
+    monkeypatch.setattr(
+        rank.label_mod, "label_items",
+        lambda items, **k: {topics.normalize_url(it.url): {"post_training": 0.9}
+                            for it in items})
+    out = rank.rank(items, date="07-09-2026",
+                    profile={"post_training": 1.0}, alpha=0.0)
+    assert [r.url for r in out] == [f"https://x{i}.example" for i in range(5)]
+    assert all(r.final_score == r.score for r in out)
+
+
+def test_rank_steering_labels_only_top_k_pool(tmp_path, monkeypatch):
+    items = _steer_items()
+    rank._judge_batch = _steer_judge()
+    monkeypatch.setattr(rank.store, "run_dir", lambda date=None: tmp_path)
+    monkeypatch.setattr(
+        rank.label_mod, "label_items",
+        lambda items, **k: {topics.normalize_url(it.url): {"post_training": 0.9}
+                            for it in items})
+    out = rank.rank(items, date="07-09-2026",
+                    profile={"post_training": 1.0}, alpha=0.5,
+                    label_top_n=2)  # only t0, t1 get labeled
+    labeled = {r.url for r in out if r.topics}
+    assert labeled == {"https://x0.example", "https://x1.example"}
+    # unlabeled items are not moved by steering: neutral personal, final == score
+    unlabeled = [r for r in out if not r.topics]
+    assert all(r.personal_score == pytest.approx(0.5) for r in unlabeled)
+    assert all(r.final_score == r.score for r in unlabeled)
+
+
+def test_rank_steering_reuses_item_label_cache(tmp_path, monkeypatch):
+    items = _steer_items()
+    rank._judge_batch = _steer_judge()
+    monkeypatch.setattr(rank.store, "run_dir", lambda date=None: tmp_path)
+    calls = {"n": 0}
+
+    def fake_label(items, **kwargs):
+        calls["n"] += 1
+        return {topics.normalize_url(it.url): {"post_training": 0.9}
+                for it in items}
+
+    monkeypatch.setattr(rank.label_mod, "label_items", fake_label)
+    rank.rank(items, date="07-09-2026", profile={"post_training": 1.0}, alpha=0.5)
+    assert calls["n"] == 1
+    # second run on the same date reuses item_labels.json -> no label calls
+    out = rank.rank(items, date="07-09-2026",
+                    profile={"post_training": 1.0}, alpha=0.5)
+    assert calls["n"] == 1
+    assert all(r.topics for r in out)
+
+
+# --- selection + config ------------------------------------------------------
+
+def test_select_sources_sorts_by_final_score():
+    items = [
+        RankedItem(title="a", url="https://a.example", date="d", body="b",
+                   source="arxiv", score=0.6, final_score=0.9),
+        RankedItem(title="b", url="https://b.example", date="d", body="b",
+                   source="arxiv", score=0.9, final_score=0.61),
+        RankedItem(title="c", url="https://c.example", date="d", body="b",
+                   source="arxiv", score=0.8, final_score=0.8),
+    ]
+    chosen = generate.select_sources(items, target_n=4)
+    assert [c.url for c in chosen] == ["https://a.example", "https://c.example",
+                                       "https://b.example"]
+
+
+def test_config_resolve_accepts_steering():
+    cfg = config_mod.resolve(topic_prefs=["post_training"], steering_alpha=0.5)
+    assert cfg.topic_prefs == ["post_training"]
+    assert cfg.steering_alpha == 0.5
+
+
+def test_config_rejects_unknown_topic_and_bad_alpha():
+    with pytest.raises(ValueError):
+        config_mod.resolve(topic_prefs=["bogus_topic"])
+    with pytest.raises(ValueError):
+        config_mod.resolve(steering_alpha=1.5)
+
+
+def test_label_pool_size_scales_and_is_bounded():
+    cfg = config_mod.RunConfig(length="short", depth="deep-dive")  # 4 sources
+    assert cfg.label_pool_size() == config_mod.LABEL_POOL_FLOOR
+    cfg2 = config_mod.RunConfig(length="long", depth="brief")
+    assert config_mod.LABEL_POOL_FLOOR <= cfg2.label_pool_size() <= config_mod.LABEL_POOL_CAP
+    cfg3 = config_mod.RunConfig(length="short", depth="deep-dive")
+    cfg3.steering_alpha = 1.0  # even a pathological profile cannot blow the pool
+    assert cfg3.label_pool_size() == config_mod.LABEL_POOL_FLOOR
+
+
+# --- eval harness helpers (no LLM) ------------------------------------------
+
+def test_eval_labels_metrics():
+    from pipeline import eval_labels
+    assert eval_labels._jaccard({"a": 0.9}, {"a": 0.8, "b": 0.2}) == pytest.approx(0.5)
+    assert eval_labels._jaccard({}, {}) == 1.0
+    # perfect & imperfect agreement on binary raters
+    assert eval_labels.cohen_kappa([1, 1, 0, 0], [1, 1, 0, 0]) == pytest.approx(1.0)
+    assert eval_labels.cohen_kappa([1, 1, 0, 0], [0, 0, 1, 1]) == pytest.approx(-1.0)
+    assert 0.0 <= eval_labels.cohen_kappa([], []) <= 1.0
+
+
+def test_eval_labels_load_pool(tmp_path):
+    from pipeline import eval_labels
+    f = tmp_path / "pool.json"
+    f.write_text(json.dumps({"papers": [
+        {"title": "A", "url": "https://a.example", "abstract": "x"},
+        {"title": "B", "arxiv_id": "2501.00001", "abstract": "y"},
+    ]}))
+    items = eval_labels.load_pool([str(f)])
+    assert {it.url for it in items} == {"https://a.example", "https://arxiv.org/abs/2501.00001"}
+    assert items[0].body == "x"
+    assert eval_labels.load_pool([]) == []
+    # raw-list pool (e.g. rank.json) also loads
+    raw = tmp_path / "rank.json"
+    raw.write_text(json.dumps([
+        {"title": "C", "url": "https://c.example", "body": "z", "score": 0.9},
+    ]))
+    assert "https://c.example" in {it.url for it in eval_labels.load_pool([str(raw)])}
+
+
+def test_eval_labels_primary_id():
+    from pipeline import eval_labels
+    assert eval_labels._primary_id({"research_findings": 0.5, "post_training": 0.8}) == "research_findings"
+    assert eval_labels._primary_id({"post_training": 0.8}) is None
+    assert eval_labels._primary_id({}) is None
+
+
+def test_eval_labels_axis_stats_uses_prevalent_topics():
+    from pipeline import eval_labels
+    items = [types.SimpleNamespace(url=f"https://x{i}.example", title=f"t{i}", body="b")
+             for i in range(2)]
+    small = {"https://x0.example": {"model_release": topics.PRIMARY_WEIGHT, "post_training": 0.9},
+             "https://x1.example": {"research_findings": topics.PRIMARY_WEIGHT}}
+    big = {"https://x0.example": {"model_release": topics.PRIMARY_WEIGHT},
+           "https://x1.example": {"research_findings": topics.PRIMARY_WEIGHT}}
+    stats, kappa, match = eval_labels._axis_stats(items, small, big, "primary")
+    # both items: primary agrees (model_release, research_findings) -> kappa 1.0
+    assert kappa == 1.0
+    assert stats["model_release"]["prevalence"] == 0.5
+    # post_training is on the TECHNICAL axis, never counted in 'primary'
+    assert "post_training" not in stats

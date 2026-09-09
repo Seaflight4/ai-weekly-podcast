@@ -1,6 +1,8 @@
 from . import Item, RankedItem
 from . import store
 from . import llm
+from . import topics
+from . import label as label_mod
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 
@@ -70,10 +72,18 @@ once. No prose before or after. No markdown fences.
 
 
 def rank(items: list[Item], date: str | None = None,
-         top_k: int | None = None, score_floor: float | None = None) -> list[RankedItem]:
+         top_k: int | None = None, score_floor: float | None = None,
+         profile: dict | None = None, alpha: float = 0.3,
+         label_top_n: int | None = None) -> list[RankedItem]:
     """Score every item and return the full ranked pool (sorted desc).
 
-    Pure importance ranking — there is no personalization pass.
+    Importance ranking first — every item gets a rubric ``score``. When a user
+    ``profile`` (taxonomy topic weights) is provided, an interest-steering pass
+    follows: the importance top-K pool (``label_top_n``) is topic-labeled with
+    the cheap model, each item gets a ``personal_score`` (cosine match to the
+    profile) and ``final_score = (1-α)·score + α·personal``, and the pool is
+    re-sorted by ``final_score``. No profile => steering is a no-op (final ==
+    importance) and costs no extra LLM calls.
 
     Optional prefilter (``top_k`` / ``score_floor``) shrinks the big-LLM input
     using the small-model ``gate_score`` set by the collect stage, per source
@@ -91,9 +101,55 @@ def rank(items: list[Item], date: str | None = None,
               f"(top_k={top_k}, floor={score_floor})")
 
     ranked = _rank_pool(items, UNIFIED_RUBRIC)
-    ranked.sort(key=lambda r: r.score, reverse=True)
+    _apply_steering(ranked, date=date, profile=profile or None,
+                    alpha=alpha, label_top_n=label_top_n)
+    ranked.sort(key=lambda r: (r.final_score, r.score), reverse=True)
     store.write("rank.json", [r.__dict__ for r in ranked], date=date)
     return ranked
+
+
+def _apply_steering(ranked: list[RankedItem], date: str | None,
+                    profile: dict | None, alpha: float,
+                    label_top_n: int | None) -> None:
+    """Add topics + personal/final scores; no-op without a profile.
+
+    Labels only the importance top-K pool (``label_top_n``, sorted by score so
+    it's already the top slice) to keep the cheap-model pass small; results are
+    cached per run in ``item_labels.json`` so a re-rank doesn't re-label.
+    Items outside the pool (or that the labeler returned nothing for) get a
+    neutral personal match, so the blend never collapses to junk — a
+    low-importance, perfect-match item can still only rise a few slots with a
+    modest α.
+    """
+    for r in ranked:
+        r.final_score = r.score
+    if not profile:
+        return
+
+    pool = ranked[:label_top_n] if label_top_n else ranked
+    cache = label_mod.load_item_labels(date=date)
+    missing = [r for r in pool
+               if topics.normalize_url(r.url) not in cache]
+    if missing:
+        new = label_mod.label_items(missing)
+        cache.update(new)
+        label_mod.write_item_labels(cache, date=date)
+
+    for r in ranked:
+        vec = cache.get(topics.normalize_url(r.url)) or {}
+        r.topics = vec
+        if vec:
+            r.personal_score = topics.personal_match(vec, profile)
+            r.final_score = topics.final_score(r.score, r.personal_score, alpha)
+        else:
+            # Unlabeled (outside the pool / labeler returned nothing): steering
+            # does not move the item — it keeps its importance score.
+            r.personal_score = topics.NEUTRAL_PERSONAL
+            r.final_score = r.score
+    labeled = sum(1 for r in ranked if r.topics)
+    if pool is not ranked:
+        print(f"      rank: steering labeled {labeled}/{len(pool)} pool items "
+              f"(top {len(pool)} by importance, α={alpha})")
 
 
 def _prefilter_by_gate(items: list[Item], top_k: int | None,

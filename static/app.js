@@ -16,6 +16,50 @@ let lastProgress = null;
 let podcastConfig = null;
 let firstRun = true;
 
+// Mirror of pipeline/topics.py TAXONOMY (id -> human label) for chip/filter display.
+const TAXONOMY = {
+  // primary
+  model_release: "Model releases",
+  research_findings: "Research findings",
+  evaluation: "Evaluation",
+  safety_risk: "Safety & risk",
+  incident: "Incident",
+  infrastructure: "Infrastructure",
+  open_source: "Open source",
+  business: "Business",
+  policy: "Policy",
+  other: "Other",
+  // technical
+  pretraining: "Pretraining",
+  post_training: "Post-training",
+  inference_efficiency: "Inference & efficiency",
+  agents_tool_use: "Agents & tool use",
+  multimodality: "Multimodal (vision/audio/video)",
+  robotics_embodied: "Robotics & embodied",
+  ai_for_science: "AI for science",
+  safety_alignment: "Safety & alignment",
+  benchmarks_evals: "Benchmarks & evals",
+  // application
+  coding: "Coding",
+  enterprise: "Enterprise",
+  healthcare: "Healthcare",
+  finance: "Finance",
+  education: "Education",
+  government: "Government & public",
+  science: "Science",
+  creative_media: "Creative & media",
+  consumer: "Consumer",
+};
+
+function topicLabel(id) { return TAXONOMY[id] || id; }
+
+function topicChips(topics, max = 3) {
+  if (!topics || topics.length === 0) return "";
+  return topics.slice(0, max).map((t) =>
+    `<span class="chip chip-topic" title="${esc(topicLabel(t.topic))}">${esc(topicLabel(t.topic))}</span>`
+  ).join(" ");
+}
+
 // --- brief parsing ---------------------------------------------------------
 // Brief format (see pipeline/generate.py _brief_text):
 //   ## arXiv papers (N)
@@ -93,14 +137,27 @@ function fmtClock(sec) {
 
 // --- episodes list (single history) ----------------------------------------
 
+let topicFilter = "";
+
+function matchesTopicFilter(ep) {
+  const q = topicFilter.trim().toLowerCase();
+  if (!q) return true;
+  const ids = (ep.topics || []).map((t) => t.topic.toLowerCase());
+  const labels = (ep.topics || []).map((t) => topicLabel(t.topic).toLowerCase());
+  return ids.some((id) => id.includes(q)) || labels.some((l) => l.includes(q));
+}
+
 async function loadEpisodes() {
   const ul = $("#episodes");
   ul.innerHTML = "";
   const res = await fetch("/api/episodes");
-  const eps = await res.json();
+  const all = await res.json();
+  const eps = all.filter(matchesTopicFilter);
   $("#episode-count").textContent = String(eps.length);
   if (eps.length === 0) {
-    ul.innerHTML = '<li class="muted empty-hint">No episodes yet. Generate one above.</li>';
+    ul.innerHTML = `<li class="muted empty-hint">${all.length === 0
+      ? "No episodes yet. Generate one above."
+      : "No episodes match this topic filter."}</li>`;
     return;
   }
   for (const ep of eps) {
@@ -116,7 +173,8 @@ async function loadEpisodes() {
     if (ep.has_transcript) meta.push("· transcript");
     li.innerHTML = `
       <div class="ep-date">${ep.date_label || ep.date} <span class="badge badge-${badge}">${ep.status}</span></div>
-      <div class="ep-meta">${meta.join(" ")}</div>`;
+      <div class="ep-meta">${meta.join(" ")}</div>
+      ${ep.topics && ep.topics.length ? `<div class="ep-topics">${topicChips(ep.topics, 2)}</div>` : ""}`;
     li.onclick = () => selectEpisode(ep.date);
     ul.appendChild(li);
   }
@@ -155,6 +213,8 @@ function renderDetail(run) {
   const durChip = dur ? `<span class="chip" title="Measured duration">${dur}</span>` : "";
   const srcChip = run.selection_source
     ? `<span class="chip chip-${esc(run.selection_source)}">${esc(run.selection_source)}</span>` : "";
+  const topicRow = run.topics && run.topics.length
+    ? `<div class="topic-chips">${topicChips(run.topics, 8)}</div>` : "";
   body.innerHTML = `
     <div class="hero">
       <div class="detail-head">
@@ -163,6 +223,7 @@ function renderDetail(run) {
         ${srcChip}
         ${durChip}
       </div>
+      ${topicRow}
       ${audio}
       <div class="hero-actions">
         <button id="btn-personalize" class="ghost">Edit brief</button>
@@ -514,6 +575,8 @@ function updateDerivedMeta(lengthSel, depthSel, sourcesId, minutesId) {
 function fillSettingsForm() {
   $("#set-audience").value = podcastConfig.user.audience;
   $("#set-familiar").value = (podcastConfig.user.familiar_topics || []).join(", ");
+  $("#set-topics").value = (podcastConfig.user.topic_prefs || []).join(", ");
+  $("#set-alpha").value = podcastConfig.user.steering_alpha ?? 0.3;
   $("#set-window-days").value = podcastConfig.podcast.window_days;
   $("#set-length").value = podcastConfig.podcast.length;
   $("#set-depth").value = podcastConfig.podcast.depth;
@@ -521,10 +584,13 @@ function fillSettingsForm() {
 }
 
 function readSettingsForm() {
+  const alpha = parseFloat($("#set-alpha").value);
   return {
     user: {
       audience: $("#set-audience").value,
       familiar_topics: $("#set-familiar").value.split(",").map((s) => s.trim()).filter(Boolean),
+      topic_prefs: $("#set-topics").value.split(",").map((s) => s.trim()).filter(Boolean),
+      steering_alpha: isFinite(alpha) ? alpha : 0.3,
     },
     podcast: {
       window_days: parseInt($("#set-window-days").value, 10),
@@ -640,3 +706,11 @@ loadEpisodes();
 showEmptyState();
 // refresh episode list periodically; manual runs appear here too.
 setInterval(loadEpisodes, 10000);
+
+// topic filter on history: re-render locally as the user types.
+let topicFilterTimer = null;
+$("#topic-filter").addEventListener("input", (e) => {
+  topicFilter = e.target.value;
+  clearTimeout(topicFilterTimer);
+  topicFilterTimer = setTimeout(loadEpisodes, 150);
+});

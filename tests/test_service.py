@@ -279,3 +279,94 @@ def test_jobs_submit_passes_env_to_subprocess(tmp_path, reset_jobs):
     job._thread.join(timeout=10)
     assert job.status == "done"
     assert "/tmp/whatever" in "\n".join(job.log_lines)
+
+
+# --- topic labels: summary, filtering, config --------------------------------
+
+def test_episodes_summary_includes_topics_and_filter(tmp_path, monkeypatch):
+    monkeypatch.setattr(episodes, "DATA_ROOT", tmp_path)
+    for name, labels in [
+        ("01-09-2026", {"episode_topics": [{"topic": "model_release", "weight": 0.9}]}),
+        ("02-09-2026", {"episode_topics": [{"topic": "post_training", "weight": 0.9}]}),
+    ]:
+        d = tmp_path / name
+        d.mkdir()
+        (d / "episode.json").write_text(json.dumps(
+            {"manifest": [{"url": "u"}], "created_at": "2026-09-01T09:00:00Z"}))
+        (d / "episode.mp3").write_bytes(b"")
+        (d / "labels.json").write_text(json.dumps(labels))
+
+    runs = episodes.list_runs()
+    assert len(runs) == 2
+    by_date = {r["date"]: r for r in runs}
+    assert by_date["01-09-2026"]["topics"] == [{"topic": "model_release", "weight": 0.9}]
+
+    only = episodes.list_runs(topics=["post_training"])
+    assert [r["date"] for r in only] == ["02-09-2026"]
+    both = episodes.list_runs(topics=["model_release", "post_training"])
+    assert len(both) == 2
+    assert episodes.list_runs(topics=["does_not_exist"]) == []
+    assert episodes.list_runs(topics=[""]) == runs
+
+
+def test_episodes_get_run_includes_labels(tmp_path, monkeypatch):
+    monkeypatch.setattr(episodes, "DATA_ROOT", tmp_path)
+    d = tmp_path / "01-09-2026"
+    d.mkdir()
+    (d / "episode.json").write_text(json.dumps({"manifest": [{"url": "u"}]}))
+    (d / "labels.json").write_text(json.dumps(
+        {"episode_topics": [{"topic": "post_training", "weight": 0.9}],
+         "topics": {"post_training": 1.0}}))
+    run = episodes.get_run("01-09-2026")
+    assert run["labels"]["episode_topics"][0]["topic"] == "post_training"
+
+
+def test_podcast_config_validates_topic_prefs_and_alpha(tmp_path, monkeypatch):
+    monkeypatch.setattr(podcast_config, "CONFIG_PATH", tmp_path / "podcast_config.yaml")
+    base = {"user": {"audience": "researcher"},
+            "podcast": {"window_days": 7, "length": "short", "depth": "brief"}}
+    with pytest.raises(ValueError):
+        podcast_config.save({**base, "user": {"audience": "researcher",
+                                              "topic_prefs": ["not_a_topic"]}})
+    with pytest.raises(ValueError):
+        podcast_config.save({**base, "user": {"audience": "researcher",
+                                              "steering_alpha": 1.7}})
+
+    stored = podcast_config.save({
+        **base,
+        "user": {"audience": "researcher",
+                 "topic_prefs": ["post_training", "agents_tool_use"],
+                 "steering_alpha": 0.4},
+    })
+    assert stored["user"]["topic_prefs"] == ["post_training", "agents_tool_use"]
+    assert stored["user"]["steering_alpha"] == 0.4
+    # default alpha when unspecified
+    defaulted = podcast_config.save({**base, "user": {"audience": "researcher"}})
+    assert defaulted["user"]["steering_alpha"] == 0.3
+
+
+def test_resolved_run_config_carries_topic_prefs(tmp_path, monkeypatch):
+    monkeypatch.setattr(podcast_config, "CONFIG_PATH", tmp_path / "podcast_config.yaml")
+    podcast_config.save({
+        "user": {"audience": "researcher",
+                 "topic_prefs": ["post_training"], "steering_alpha": 0.5},
+        "podcast": {"window_days": 2, "length": "short", "depth": "brief"},
+    })
+    rc = podcast_config.resolved_run_config({})
+    assert rc["topic_prefs"] == ["post_training"]
+    assert rc["steering_alpha"] == 0.5
+
+
+def test_full_run_cmd_carries_steering_flags():
+    cmd = jobs.full_run_cmd(config={
+        "topic_prefs": ["post_training"],
+        "steering_alpha": 0.4,
+    })
+    assert "--topics" in cmd
+    assert cmd[cmd.index("--topics") + 1] == "post_training"
+    assert "--steering-alpha" in cmd
+    assert cmd[cmd.index("--steering-alpha") + 1] == "0.4"
+    # no prefs -> no steering flags at all
+    clean = jobs.full_run_cmd(config={"length": "short"})
+    assert "--topics" not in clean
+    assert "--steering-alpha" not in clean

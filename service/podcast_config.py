@@ -33,6 +33,7 @@ import pathlib
 import yaml
 
 from pipeline import config as config_mod
+from pipeline import topics as topics_mod
 
 CONFIG_PATH = pathlib.Path("data/podcast_config.yaml")
 
@@ -42,6 +43,8 @@ DEFAULTS: dict = {
     "user": {
         "audience": "researcher",
         "familiar_topics": [],
+        "topic_prefs": [],
+        "steering_alpha": config_mod.STEERING_ALPHA,
     },
     "podcast": {
         "window_days": 7,
@@ -78,6 +81,16 @@ def load() -> dict:
         cfg["user"]["familiar_topics"] = [
             str(t) for t in (ft if isinstance(ft, list) else [ft]) if str(t).strip()
         ]
+    if user.get("topic_prefs") is not None:
+        tp = user["topic_prefs"]
+        cfg["user"]["topic_prefs"] = [
+            str(t) for t in (tp if isinstance(tp, list) else [tp]) if str(t).strip()
+        ]
+    try:
+        if user.get("steering_alpha") is not None:
+            cfg["user"]["steering_alpha"] = float(user["steering_alpha"])
+    except (TypeError, ValueError):
+        pass
     try:
         if podcast.get("window_days") is not None:
             cfg["podcast"]["window_days"] = int(podcast["window_days"])
@@ -125,6 +138,8 @@ def resolved_run_config(podcast: dict | None = None) -> dict:
         window_end=str(end),
         audience_level=cfg["user"]["audience"],
         familiar_topics=[str(t) for t in cfg["user"]["familiar_topics"]],
+        topic_prefs=[str(t) for t in cfg["user"]["topic_prefs"]],
+        steering_alpha=float(cfg["user"]["steering_alpha"]),
         length=over.get("length") or cfg["podcast"]["length"],
         depth=over.get("depth") or cfg["podcast"]["depth"],
     )
@@ -133,6 +148,8 @@ def resolved_run_config(podcast: dict | None = None) -> dict:
         "window_end": run.window_end,
         "audience_level": run.audience_level,
         "familiar_topics": list(run.familiar_topics),
+        "topic_prefs": list(run.topic_prefs),
+        "steering_alpha": run.steering_alpha,
         "length": run.length,
         "depth": run.depth,
         "window_days": (run.resolve_window()[1] - run.resolve_window()[0]).days,
@@ -151,6 +168,19 @@ def _validate(cfg: dict) -> dict:
     ft = user.get("familiar_topics") or []
     if not isinstance(ft, list):
         raise ValueError("familiar_topics must be a list of strings")
+    tp = user.get("topic_prefs") or []
+    if not isinstance(tp, list):
+        raise ValueError("topic_prefs must be a list of strings")
+    bad = [str(t) for t in tp if str(t).strip() and str(t).strip() not in topics_mod.TAXONOMY_BY_ID]
+    if bad:
+        raise ValueError(f"unknown topic_prefs {bad!r} — valid ids: "
+                         f"{sorted(topics_mod.TAXONOMY_BY_ID)}")
+    try:
+        alpha = float(user.get("steering_alpha", config_mod.STEERING_ALPHA))
+    except (TypeError, ValueError):
+        raise ValueError("steering_alpha must be a number 0..1")
+    if not 0.0 <= alpha <= 1.0:
+        raise ValueError(f"steering_alpha must be 0..1, got {alpha}")
     try:
         window_days = int(podcast.get("window_days", DEFAULTS["podcast"]["window_days"]))
     except (TypeError, ValueError) as e:
@@ -167,6 +197,8 @@ def _validate(cfg: dict) -> dict:
         "user": {
             "audience": audience,
             "familiar_topics": [str(t).strip() for t in ft if str(t).strip()],
+            "topic_prefs": [str(t).strip() for t in tp if str(t).strip()],
+            "steering_alpha": alpha,
         },
         "podcast": {
             "window_days": window_days,

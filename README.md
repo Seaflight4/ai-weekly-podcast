@@ -38,6 +38,8 @@ On first open, the **Set up your podcast** dialog appears:
 
 - **Audience** (knowledge level) and **familiar topics** — the episode is
   tailored to these.
+- **Topics you're interested in** and **steering strength (α)** — interests
+  steer which items make it into each episode (see *Steering by topic* below).
 - **Episode shape** — rolling window in days, podcast length, and topic depth
   per source.
 
@@ -49,11 +51,31 @@ Then, all in the browser:
   starts. The panel tracks progress and shows the live log; one run at a time.
   Generating twice in one day keeps **both** episodes — history is
   time-stamped, so a new episode never overwrites an earlier one.
-- **History** — every episode, newest first, with ready/draft badges. Click one
-  to play the audio and read the **Brief** and **Transcript** tabs.
+- **History** — every episode, newest first, with ready/draft badges. The topic
+  filter box narrows the list to episodes covering a topic you care about, and
+  each episode shows its topic chips. Click one to play the audio and read the
+  **Brief** and **Transcript** tabs.
 - **Edit brief** — remove or restore sources, then re-render the audio. The
   episode is replaced in place with your selection.
 - **Delete** — removes an episode from history entirely.
+
+## Steering by topic
+
+Every candidate item gets topic labels from a cheap model during the rank stage,
+across three axes: a headline **type** (model_release, research_findings,
+evaluation, incident, business, …), a **technical** area (post_training,
+agents_tool_use, inference_efficiency, safety_alignment, …) and an
+**application** domain (coding, healthcare, finance, …). When you set
+**topics you're interested in** in Settings, each item's importance score is
+blended with its match to your profile —
+`final = (1-α)·importance + α·match` — and the top sources are chosen from that
+blended order. α = 0 turns steering off (default selection preserved). Labels
+on the aired episode also power the history topic filter. Existing episodes can
+be labeled for filtering via `python -m pipeline run --only label`.
+
+The cheap labeler is validated against a big reference model with
+`python -m pipeline.eval_labels --pool <items.json> --out data/eval/<name>`
+(see `data/eval/labels__mistral_small__vs__qwen/eval_report.json`).
 
 ## Configuration
 

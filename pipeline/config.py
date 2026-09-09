@@ -51,6 +51,18 @@ MAX_SOURCES = 30
 MAX_WINDOW_DAYS = 14   # bound arXiv fetch cost (a week is ~1000 papers)
 DEFAULT_WINDOW_DAYS = 7
 
+# --- interest steering ("item selection in the rank stage") ------------------
+# final_score = (1 - alpha) * importance + alpha * personal_match. alpha is
+# user-configurable (0 disables steering); the defaults below are safe/sane.
+STEERING_ALPHA = 0.3
+# The label pass only covers the importance top-K pool, where K is scaled from
+# the episode's source count: with a modest alpha an item must already be
+# mid-tier in importance to be affected by the blend, so the tail never needs
+# labeling. Constants bound K so huge/small episodes stay sensible.
+LABEL_POOL_FACTOR = 4     # K = factor * num_sources  (e.g. 9 sources -> 36)
+LABEL_POOL_FLOOR = 30
+LABEL_POOL_CAP = 300
+
 # Baseline audience sentence used by the transcript LLM. Researcher wording is
 # the historical default; the others trade explanation depth for accessibility.
 AUDIENCE_PROMPTS = {
@@ -84,6 +96,11 @@ class RunConfig:
     window_end: str | None = None
     audience_level: str = "researcher"
     familiar_topics: list[str] = field(default_factory=list)
+    # Topics the user is interested in (taxonomy ids). Empty = steering off.
+    # Drives the rank-stage personal score: personal = cosine(item_topics,
+    # profile), final = (1-alpha)*importance + alpha*personal.
+    topic_prefs: list[str] = field(default_factory=list)
+    steering_alpha: float = STEERING_ALPHA
     length: str = "medium"
     depth: str = "deep-dive"
 
@@ -136,6 +153,17 @@ class RunConfig:
         """Source count derived from length / per-source depth."""
         return self.budget()["num_sources"]
 
+    def label_pool_size(self) -> int:
+        """Number of top-importance items the rank-stage label pass covers.
+
+        Scaled from the source count (see module constants). Only the items
+        that could plausibly be selected need personalization, so K stays a
+        small multiple of how many sources the episode will air.
+        """
+        return max(LABEL_POOL_FLOOR,
+                   min(LABEL_POOL_CAP,
+                       round(LABEL_POOL_FACTOR * self.num_sources())))
+
     def depth_factor(self) -> float:
         return DEPTH_FACTOR[self.depth]
 
@@ -182,6 +210,8 @@ class RunConfig:
             "audience": {
                 "level": self.audience_level,
                 "familiar_topics": list(self.familiar_topics),
+                "topic_prefs": list(self.topic_prefs),
+                "steering_alpha": self.steering_alpha,
             },
             "podcast": {
                 "length": self.length,
@@ -199,6 +229,8 @@ class RunConfig:
             "audience": {
                 "level": self.audience_level,
                 "familiar_topics": list(self.familiar_topics),
+                "topic_prefs": list(self.topic_prefs),
+                "steering_alpha": self.steering_alpha,
             },
             "podcast": {"length": self.length, "depth": self.depth},
         }
@@ -213,6 +245,8 @@ def resolve(config_path: str | Path | None = None, *,
             window_end: str | None = None,
             audience_level: str | None = None,
             familiar_topics: list[str] | None = None,
+            topic_prefs: list[str] | None = None,
+            steering_alpha: float | None = None,
             length: str | None = None,
             depth: str | None = None) -> RunConfig:
     """Build a ``RunConfig`` from defaults < config file < explicit overrides.
@@ -233,6 +267,8 @@ def resolve(config_path: str | Path | None = None, *,
         ("window_end", window_end),
         ("audience_level", audience_level),
         ("familiar_topics", familiar_topics),
+        ("topic_prefs", topic_prefs),
+        ("steering_alpha", steering_alpha),
         ("length", length),
         ("depth", depth),
     ):
@@ -249,6 +285,12 @@ def _validate(cfg: RunConfig) -> None:
         raise ValueError(f"podcast length {cfg.length!r} not in {PODCAST_LENGTH_CHOICES}")
     if cfg.depth not in TOPIC_DEPTH_CHOICES:
         raise ValueError(f"depth {cfg.depth!r} not in {TOPIC_DEPTH_CHOICES}")
+    if not 0.0 <= cfg.steering_alpha <= 1.0:
+        raise ValueError(f"steering_alpha {cfg.steering_alpha!r} must be 0..1")
+    from .topics import TAXONOMY_BY_ID
+    bad = [t for t in cfg.topic_prefs if t not in TAXONOMY_BY_ID]
+    if bad:
+        raise ValueError(f"unknown topic_prefs {bad!r} — valid ids: {sorted(TAXONOMY_BY_ID)}")
     cfg.resolve_window()
 
 
@@ -272,6 +314,14 @@ def _apply_file(cfg: RunConfig, path: str | Path) -> RunConfig:
     if "familiar_topics" in audience and audience["familiar_topics"] is not None:
         ft = audience["familiar_topics"]
         out.familiar_topics = [str(t) for t in (ft if isinstance(ft, list) else [ft])]
+    if "topic_prefs" in audience and audience["topic_prefs"] is not None:
+        tp = audience["topic_prefs"]
+        out.topic_prefs = [str(t) for t in (tp if isinstance(tp, list) else [tp])]
+    if "steering_alpha" in audience and audience["steering_alpha"] is not None:
+        try:
+            out.steering_alpha = float(audience["steering_alpha"])
+        except (TypeError, ValueError):
+            pass
     podcast = raw.get("podcast") or {}
     if "length" in podcast and podcast["length"] is not None:
         out.length = str(podcast["length"])

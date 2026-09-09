@@ -24,6 +24,15 @@ class Item:
 class RankedItem(Item):
     score: float = 0.0      # 0.0 - 1.0, judge's rubric score (importance)
     judge_reason: str = ""
+    # Topic labels (taxonomy id -> weight), set by the rank-stage label pass
+    # (pipeline/label.py). Empty for items outside the labeling pool or legacy runs.
+    topics: dict = field(default_factory=dict)
+    # Steering scores. personal_score = topic-vector match against the user
+    # profile (NEUTRAL 0.5 when unknown); final_score = (1-α)·score + α·personal
+    # for labeled items, or the plain importance score when steering is off /
+    # the item is unlabeled (steering never pushes unlabeled items).
+    personal_score: float = 0.0
+    final_score: float = 0.0
 
 @dataclass
 class Episode:

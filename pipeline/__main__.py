@@ -1,13 +1,14 @@
 import sys
 from .orchestrator import run
 
-USAGE = ("usage: python -m pipeline run [--only collect|rank|generate|transcribe] "
+USAGE = ("usage: python -m pipeline run [--only collect|rank|generate|transcribe|label] "
          "[--no-audio] [--transcript-in <path>] [--brief-in <path>] "
          "[--from-cache <rank.json>] [--date YYYY-MM-DD] "
          "[--top-k N] [--score-floor F] "
          "[--config <config.yaml>] [--window-start D] [--window-end D] "
-         "[--audience LEVEL] [--familiar S] [--length X] [--depth Y]")
-STAGES = ("collect", "rank", "generate", "transcribe")
+         "[--audience LEVEL] [--familiar S] [--topics S] [--steering-alpha F] "
+         "[--length X] [--depth Y]")
+STAGES = ("collect", "rank", "generate", "transcribe", "label")
 
 def main(argv: list[str]) -> None:
     if not argv:
@@ -28,6 +29,8 @@ def main(argv: list[str]) -> None:
     window_end = None
     audience_level = None
     familiar_topics = None
+    topic_prefs = None
+    steering_alpha = None
     length = None
     depth = None
     rest = []
@@ -86,6 +89,14 @@ def main(argv: list[str]) -> None:
             if not args:
                 raise SystemExit(f"{USAGE}\n(error: `--familiar` needs a comma-separated list)")
             familiar_topics = [t.strip() for t in args.pop(0).split(",") if t.strip()]
+        elif a == "--topics":
+            if not args:
+                raise SystemExit(f"{USAGE}\n(error: `--topics` needs a comma-separated list)")
+            topic_prefs = [t.strip() for t in args.pop(0).split(",") if t.strip()]
+        elif a == "--steering-alpha":
+            if not args:
+                raise SystemExit(f"{USAGE}\n(error: `--steering-alpha` needs 0..1)")
+            steering_alpha = float(args.pop(0))
         elif a == "--length":
             if not args:
                 raise SystemExit(f"{USAGE}\n(error: `--length` needs short|medium|long)")
@@ -103,6 +114,7 @@ def main(argv: list[str]) -> None:
         brief_in=brief_in, top_k=top_k, score_floor=score_floor,
         config_path=config_path, window_start=window_start, window_end=window_end,
         audience_level=audience_level, familiar_topics=familiar_topics,
+        topic_prefs=topic_prefs, steering_alpha=steering_alpha,
         length=length, depth=depth)
 
 if __name__ == "__main__":

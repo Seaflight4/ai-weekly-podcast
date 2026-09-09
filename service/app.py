@@ -25,8 +25,11 @@ app = FastAPI(title="AI Weekly Podcast")
 # --- episodes ---------------------------------------------------------------
 
 @app.get("/api/episodes")
-def list_episodes():
-    return episodes.list_runs()
+def list_episodes(topics: str = ""):
+    """Episode history, newest first. ``?topics=model_release,agents`` keeps
+    only episodes whose topic labels cover any of those topic ids."""
+    wanted = [t.strip() for t in topics.split(",") if t.strip()]
+    return episodes.list_runs(topics=wanted or None)
 
 
 @app.get("/api/episodes/{date}")

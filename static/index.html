@@ -28,6 +28,9 @@
         <h2>History</h2>
         <span id="episode-count" class="count-chip">0</span>
       </div>
+      <div class="list-filter">
+        <input id="topic-filter" type="text" placeholder="Filter by topic…" autocomplete="off">
+      </div>
       <ul id="episodes"></ul>
     </aside>
 
@@ -61,6 +64,12 @@
           </label>
           <label>Familiar topics (comma-separated)
             <input type="text" id="set-familiar" placeholder="e.g. transformers, RLHF">
+          </label>
+          <label>Topics you're interested in (comma-separated topic ids)
+            <input type="text" id="set-topics" placeholder="e.g. post_training, agents_tool_use">
+          </label>
+          <label>Steering strength α (0–1)
+            <input type="number" id="set-alpha" min="0" max="1" step="0.05">
           </label>
         </div>
       </div>

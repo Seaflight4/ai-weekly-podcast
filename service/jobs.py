@@ -259,13 +259,17 @@ def full_run_cmd(date: str | None = None, no_audio: bool = False,
                       ("window_end", "--window-end"),
                       ("audience_level", "--audience"),
                       ("length", "--length"),
-                      ("depth", "--depth")):
+                      ("depth", "--depth"),
+                      ("steering_alpha", "--steering-alpha")):
         value = (config or {}).get(key)
-        if value:
+        if value is not None and value != "":
             cmd += [flag, str(value)]
     familiar = (config or {}).get("familiar_topics")
     if familiar:
         cmd += ["--familiar", ",".join(str(t) for t in familiar)]
+    topic_prefs = (config or {}).get("topic_prefs")
+    if topic_prefs:
+        cmd += ["--topics", ",".join(str(t) for t in topic_prefs)]
     return cmd
 
 

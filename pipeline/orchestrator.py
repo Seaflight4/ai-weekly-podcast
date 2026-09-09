@@ -1,6 +1,7 @@
 from . import Item, RankedItem, collect, rank, generate, transcribe
 from . import store
 from . import config as config_mod
+from . import label as label_mod
 import dataclasses, os, pathlib, time
 
 def _load_env():
@@ -35,7 +36,7 @@ def _timed(label: str, fn, *args, **kwargs):
     print(f"      [{label} took {dt:.1f}s]")
     return result
 
-STAGES = ("collect", "rank", "generate", "transcribe")
+STAGES = ("collect", "rank", "generate", "transcribe", "label")
 
 def run(only: str | None = None, no_audio: bool = False,
         from_cache: str | None = None, date: str | None = None,
@@ -45,6 +46,8 @@ def run(only: str | None = None, no_audio: bool = False,
         window_start: str | None = None, window_end: str | None = None,
         audience_level: str | None = None,
         familiar_topics: list[str] | None = None,
+        topic_prefs: list[str] | None = None,
+        steering_alpha: float | None = None,
         length: str | None = None, depth: str | None = None):
     """Resolve the run config (defaults < config file < CLI overrides), then
     dispatch to the requested stage(s). ``date`` is the window end / anchor
@@ -52,8 +55,10 @@ def run(only: str | None = None, no_audio: bool = False,
     cfg = config_mod.resolve(
         config_path, date=date, window_start=window_start, window_end=window_end,
         audience_level=audience_level, familiar_topics=familiar_topics,
+        topic_prefs=topic_prefs, steering_alpha=steering_alpha,
         length=length, depth=depth,
     )
+    profile = {t: 1.0 for t in cfg.topic_prefs} or None
     if cfg is not None and cfg.window_end is not None and date is None:
         date = cfg.window_end
     if only is None:
@@ -64,7 +69,9 @@ def run(only: str | None = None, no_audio: bool = False,
 
         print("[2/3] ranking...")
         ranked = _timed("rank", rank.rank, items, date=date,
-                        top_k=top_k, score_floor=score_floor)
+                        top_k=top_k, score_floor=score_floor,
+                        profile=profile, alpha=cfg.steering_alpha,
+                        label_top_n=cfg.label_pool_size())
         print(f"      scored {len(ranked)} items")
 
         print("[3/3] generating...")
@@ -90,7 +97,9 @@ def run(only: str | None = None, no_audio: bool = False,
         items = _load("collect", Item, date=date)
         print(f"[2/3] ranking {len(items)} cached items...")
         ranked = _timed("rank", rank.rank, items, date=date,
-                        top_k=top_k, score_floor=score_floor)
+                        top_k=top_k, score_floor=score_floor,
+                        profile=profile, alpha=cfg.steering_alpha,
+                        label_top_n=cfg.label_pool_size())
         print(f"      scored {len(ranked)} items")
         return
 
@@ -111,6 +120,12 @@ def run(only: str | None = None, no_audio: bool = False,
         print("[transcribe] transcribing episode...")
         out = _timed("transcribe", transcribe.transcribe, date=date)
         print(f"      transcript -> {out}")
+        return
+
+    if only == "label":
+        print("[label] backfilling episode topic labels from manifests...")
+        touched = label_mod.backfill_labels(date=date)
+        print(f"      labeled {len(touched)} run(s)")
         return
 
     raise SystemExit(f"unknown stage: {only!r} (expected {', '.join(STAGES)})")

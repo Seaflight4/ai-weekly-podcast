@@ -2,6 +2,7 @@ from . import RankedItem, Episode
 from . import store
 from . import audio as audio_mod
 from . import config as config_mod
+from . import label as label_mod
 import pathlib, datetime, re, subprocess
 
 
@@ -53,6 +54,11 @@ def generate(ranked: list[RankedItem], make_audio: bool = True,
                                      episode_date=end.isoformat()), encoding="utf-8")
 
     by_source = _group_by_source(chosen)
+
+    # Episode topic labels, aggregated from the chosen items' labels. Skipped
+    # (leaving any backfilled labels.json) when the items carry no topics.
+    if label_mod.write_episode_labels(chosen, date=date):
+        print(f"      wrote labels.json (episode topic vector)")
 
     # Forward monitor: surface low gate_score among aired items. A recurring
     # low-score-but-aired item signals the small-model gate is misaligned with
@@ -158,7 +164,7 @@ def select_sources(ranked: list[RankedItem],
     floor we air fewer (no padding with junk). ``target_n`` defaults to the
     derived count of the default config when omitted.
     """
-    sorted_items = sorted(ranked, key=lambda r: r.score, reverse=True)
+    sorted_items = sorted(ranked, key=lambda r: (r.final_score, r.score), reverse=True)
     if not sorted_items:
         return []
     if target_n is None:
