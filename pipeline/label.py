@@ -84,9 +84,9 @@ def _chunk_by_chars(items: list, max_chars: int = LABEL_BATCH_CHARS) -> list[lis
 def _label_chunk(chunk: list, model: str) -> dict[str, dict[str, float]]:
     """One labeler request. Returns ``{normalized_url: {topic: weight}}``.
 
-    The response uses the three-axis shape (primary / technical / application,
-    see ``topics.label_prompt``); facets are flattened into one sparse vector
-    of globally-unique ids. On a malformed response the whole chunk yields no
+    The response uses the single-label shape (one ``label`` id per item, see
+    ``topics.label_prompt``); it is flattened into a one-hot vector of the
+    globally-unique id. On a malformed response the whole chunk yields no
     labels (items stay neutral for steering) rather than failing the run.
     """
     payload = [item_payload(it, i) for i, it in enumerate(chunk)]
@@ -117,33 +117,15 @@ def _label_chunk(chunk: list, model: str) -> dict[str, dict[str, float]]:
 
 
 def _flatten_label(entry: dict) -> dict[str, float]:
-    """Flatten one three-axis label entry into a sparse flat vector.
+    """Flatten one single-label entry into a one-hot flat vector.
 
-    primary (single id) is carried at ``topics.PRIMARY_WEIGHT`` so the generic
-    type never dominates the technical facets in steering/episode vectors;
-    technical/application keep their 0..1 weights. Off-taxonomy or non-positive
+    The label id is carried at weight 1.0 (single label per item). Off-taxonomy
     entries are dropped.
     """
-    cleaned: dict[str, float] = {}
-
-    primary = entry.get("primary")
-    if isinstance(primary, str) and primary in topics.TAXONOMY_BY_ID \
-            and topics.AXIS_OF.get(primary) == "primary":
-        cleaned[primary] = topics.PRIMARY_WEIGHT
-
-    for facet in (entry.get("technical"), entry.get("application")):
-        if not isinstance(facet, dict):
-            continue
-        for k, v in facet.items():
-            if k not in topics.TAXONOMY_BY_ID:
-                continue
-            try:
-                w = float(v)
-            except (TypeError, ValueError):
-                continue
-            if w > 0:
-                cleaned[k] = max(0.0, min(1.0, w))
-    return cleaned
+    tid = entry.get("label")
+    if isinstance(tid, str) and tid in topics.TAXONOMY_BY_ID:
+        return {tid: 1.0}
+    return {}
 
 
 def label_items(items: list,

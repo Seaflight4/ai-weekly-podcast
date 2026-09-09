@@ -4,7 +4,7 @@ from .orchestrator import run
 USAGE = ("usage: python -m pipeline run [--only collect|rank|generate|transcribe|label] "
          "[--no-audio] [--transcript-in <path>] [--brief-in <path>] "
          "[--from-cache <rank.json>] [--date YYYY-MM-DD] "
-         "[--top-k N] [--score-floor F] "
+         "[--top-k N] [--score-floor F] [--force-label] "
          "[--config <config.yaml>] [--window-start D] [--window-end D] "
          "[--audience LEVEL] [--familiar S] [--topics S] [--steering-alpha F] "
          "[--length X] [--depth Y]")
@@ -18,6 +18,7 @@ def main(argv: list[str]) -> None:
     args = argv[1:]
     only = None
     no_audio = False
+    force_label = False
     transcript_in = None
     brief_in = None
     from_cache = None
@@ -38,6 +39,8 @@ def main(argv: list[str]) -> None:
         a = args.pop(0)
         if a == "--no-audio":
             no_audio = True
+        elif a == "--force-label":
+            force_label = True
         elif a == "--transcript-in":
             if not args:
                 raise SystemExit(f"{USAGE}\n(error: `--transcript-in` needs a path)")
@@ -115,7 +118,7 @@ def main(argv: list[str]) -> None:
         config_path=config_path, window_start=window_start, window_end=window_end,
         audience_level=audience_level, familiar_topics=familiar_topics,
         topic_prefs=topic_prefs, steering_alpha=steering_alpha,
-        length=length, depth=depth)
+        length=length, depth=depth, force_label=force_label)
 
 if __name__ == "__main__":
     main(sys.argv[1:])

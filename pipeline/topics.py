@@ -1,105 +1,60 @@
-"""Three-axis topic taxonomy + shared helpers for item/episode labels.
+"""Single-label topic taxonomy + shared helpers for item/episode labels.
 
-Labels live on three orthogonal axes so item/episode vectors are comparable
-and steerable by interest:
+The taxonomy is derived from the news itself (``pipeline.derive_taxonomy.py``:
+free-form label a 4-week corpus sample -> cluster -> verify) and curated by
+hand. Every item gets EXACTLY ONE topic id, so the rest of the pipeline treats
+a label set as a one-hot flat ``{id: 1.0}`` vector: cosine ``personal_match``,
+the ranking blend, episode aggregation and history filtering all work unchanged.
 
-- ``PRIMARY``  — the headline *kind* of news (single choice per item).
-- ``TECHNICAL`` — the *technical area* the item is actually about (multi-topic,
-  weighted). This is the main steering signal.
-- ``APPLICATION`` — the *domain* it serves (multi-topic, weighted).
-
-Every id is globally unique across axes, so the rest of the pipeline treats a
-label set as one flat ``{id: weight}`` vector: cosine ``personal_match``, the
-ranking blend, episode aggregation and history filtering all work unchanged.
-
-Axes are split deliberately: at eval time we can measure per-axis agreement
-(small model vs a big reference), and the small production labeler only has to
-choose within a homogeneous set per axis instead of over one mixed list — the
-main cause of its earlier mislabels (research papers tagged ``model_release``).
+Keeping one label per item is a deliberate choice: it keeps the small
+production labeler reliable, the chips readable and the steering signal sharp
+(the most salient facet of each item).
 """
 from __future__ import annotations
 
 import math
 
-# Primary axis: single, most-salient headline type. Carried at reduced weight
-# (PRIMARY_WEIGHT) in the flat vector so a generic type like "research_findings"
-# never swamps the technical facets for steering or episode chips; it stays
-# first-class for filtering.
-PRIMARY_WEIGHT = 0.5
-
-PRIMARY = [
-    {"id": "model_release", "label": "Model releases",
-     "description": "A new or updated model is announced/released (incl. capability, pricing or availability notes)."},
-    {"id": "research_findings", "label": "Research findings",
-     "description": "A research paper/result presenting a method or empirical finding."},
-    {"id": "evaluation", "label": "Evaluation",
-     "description": "A benchmark, eval, leaderboard or measurement study."},
-    {"id": "safety_risk", "label": "Safety & risk",
-     "description": "Analysis/report of safety, alignment or risk (not a live incident)."},
-    {"id": "incident", "label": "Incident",
-     "description": "A concrete incident: breach, escape, outage, real-world failure."},
-    {"id": "infrastructure", "label": "Infrastructure",
-     "description": "Hardware, chips, data centers, training/serving infra news."},
-    {"id": "open_source", "label": "Open source",
-     "description": "Open-weights/model hub/licensing/community platform news."},
-    {"id": "business", "label": "Business",
-     "description": "M&A, funding, pricing, partnerships, company/market news."},
-    {"id": "policy", "label": "Policy",
-     "description": "Regulation, law, standards, governance, international coordination."},
-    {"id": "other", "label": "Other",
-     "description": "Relevant but fits no primary type."},
-]
-
-TECHNICAL = [
-    {"id": "pretraining", "label": "Pretraining",
-     "description": "Pretraining runs, scaling laws, data quality/curation, compute, architecture."},
+TAXONOMY: tuple[dict, ...] = (
+    {"id": "agents", "label": "AI Agents",
+     "description": "Autonomous or semi-autonomous AI systems that plan, act, and interact with environments."},
+    {"id": "ai_for_science", "label": "AI for Science",
+     "description": "Applications of AI methods to scientific discovery, simulation, and research domains."},
+    {"id": "safety_alignment", "label": "Safety & Alignment",
+     "description": "Research and practice focused on making AI systems safe, aligned, and controllable."},
+    {"id": "benchmarks", "label": "Benchmarks & Evaluation",
+     "description": "Standardized tests, leaderboards, and evaluation methodologies for AI models."},
+    {"id": "inference_infrastructure", "label": "Inference & Infrastructure",
+     "description": "Hardware, serving stacks, and infrastructure for running AI models at scale."},
+    {"id": "multimodal", "label": "Multimodal",
+     "description": "Models and techniques spanning text, vision, audio, and cross-modal understanding."},
+    {"id": "robotics", "label": "Robotics",
+     "description": "AI-driven robotic systems, manipulation, navigation, and embodied intelligence."},
+    {"id": "business_economics", "label": "Business & AI Economics",
+     "description": "Commercial, market, and economic aspects of the AI industry."},
     {"id": "post_training", "label": "Post-training",
-     "description": "Fine-tuning, RLHF/RLVR, SFT, DPO, synthetic data, alignment tuning."},
-    {"id": "inference_efficiency", "label": "Inference & efficiency",
-     "description": "Inference speed/cost, quantization, speculative decoding, serving, kernels."},
-    {"id": "agents_tool_use", "label": "Agents & tool use",
-     "description": "Agentic systems, tool/computer use, long-horizon tasks, agent scaffolding."},
-    {"id": "multimodality", "label": "Multimodal (vision/audio/video)",
-     "description": "Image/video/audio/speech models, vision-language, generation, perception."},
-    {"id": "robotics_embodied", "label": "Robotics & embodied",
-     "description": "Robotics, embodied agents, manipulation, world models for control."},
-    {"id": "ai_for_science", "label": "AI for science",
-     "description": "AI used for scientific discovery, formal verification, proofs, research automation."},
-    {"id": "safety_alignment", "label": "Safety & alignment research",
-     "description": "Research on alignment, interpretability, misuse, jailbreaks, system governance."},
-    {"id": "benchmarks_evals", "label": "Benchmarks & evals",
-     "description": "New benchmarks, evaluation methodology, red-teaming, measurement."},
-]
-
-APPLICATION = [
-    {"id": "coding", "label": "Coding", "description": "Software engineering, code generation, dev tooling."},
-    {"id": "enterprise", "label": "Enterprise", "description": "Business/workplace software, agents-for-work, integration."},
-    {"id": "healthcare", "label": "Healthcare", "description": "Clinical, biomedical, health applications."},
-    {"id": "finance", "label": "Finance", "description": "Financial, trading, fintech applications."},
-    {"id": "education", "label": "Education", "description": "Learning, tutoring, education applications."},
-    {"id": "government", "label": "Government & public", "description": "Public sector, defense, civic applications."},
-    {"id": "science", "label": "Science", "description": "Scientific domains (bio, chem, physics...) as application."},
-    {"id": "creative_media", "label": "Creative & media", "description": "Art, music, video, content creation, games."},
-    {"id": "consumer", "label": "Consumer", "description": "Consumer products, assistants, apps for general users."},
-]
-
-AXES: dict[str, list[dict]] = {
-    "primary": PRIMARY,
-    "technical": TECHNICAL,
-    "application": APPLICATION,
-}
-
-# Flattened view: {id: {id, label, description, axis}} + ordered tuples.
-TAXONOMY: tuple[dict, ...] = tuple(
-    {**t, "axis": axis}
-    for axis, entries in AXES.items()
-    for t in entries
+     "description": "Fine-tuning, RLHF/RL, alignment, and other post-training methods applied after base pretraining."},
+    {"id": "pretraining", "label": "Pretraining & Scaling",
+     "description": "Base-model pretraining, scaling laws, and training data."},
+    {"id": "policy", "label": "Policy & Regulation",
+     "description": "Government, regulatory, and institutional policy affecting AI development and deployment."},
+    {"id": "model_release", "label": "Model Releases",
+     "description": "Announcements and launches of new AI models or major model updates."},
+    {"id": "interpretability", "label": "Interpretability",
+     "description": "Methods and research for understanding, explaining, and probing internal model representations."},
+    {"id": "incident", "label": "Incidents & Failures",
+     "description": "Notable AI system failures, outages, or operational incidents."},
+    {"id": "research_theory", "label": "Research & Theory",
+     "description": "Fundamental AI research, theoretical results, and representation learning."},
+    {"id": "architecture_world_models", "label": "Architecture & World Models",
+     "description": "Novel model architectures and world-model approaches for AI systems."},
+    {"id": "retrieval_rag", "label": "Retrieval & RAG",
+     "description": "Retrieval-augmented generation and information retrieval techniques for AI systems."},
+    {"id": "other", "label": "Other",
+     "description": "Relevant but fits no named topic."},
 )
+
 TAXONOMY_IDS = tuple(t["id"] for t in TAXONOMY)
 TAXONOMY_BY_ID = {t["id"]: t for t in TAXONOMY}
-AXIS_OF = {t["id"]: t["axis"] for t in TAXONOMY}
-AXIS_IDS = {axis: tuple(t["id"] for t in entries)
-            for axis, entries in AXES.items()}
 
 # personal_match for an item when no user profile is configured (steering off):
 # the blend is neutral, so final == importance.
@@ -108,8 +63,8 @@ NEUTRAL_PERSONAL = 0.5
 
 def label_prompt() -> str:
     """System prompt shared by the production labeler and the eval reference
-    model. Lists each axis separately so the model picks within one facet at a
-    time, and asks for the exact JSON shape the labeler parses."""
+    model. Lists the single-label taxonomy and asks for the exact JSON shape
+    the labeler parses."""
     lines = [
         "You label AI news items and research papers for a weekly AI podcast.",
         "",
@@ -117,37 +72,24 @@ def label_prompt() -> str:
         "\"title\", a \"url\", and a \"body\" (an abstract for arxiv, extracted "
         "page text for hn — it may be long; the head usually suffices).",
         "",
-        "For EACH item, pick one PRIMARY type and assign weights to the "
-        "relevant TECHNICAL and APPLICATION topics. Use ONLY these ids.",
-        "",
-        "PRIMARY (pick EXACTLY ONE — the most salient headline type):",
+        "For EACH item pick EXACTLY ONE topic id from this taxonomy:",
     ]
-    for t in PRIMARY:
-        lines.append(f"- {t['id']}: {t['description']}")
-    lines += ["", "TECHNICAL (0.0-1.0 weights; only include what the item is "
-                    "about, weight>0, may be empty):"]
-    for t in TECHNICAL:
-        lines.append(f"- {t['id']}: {t['description']}")
-    lines += ["", "APPLICATION (0.0-1.0 weights; the domain it serves, "
-                    "weight>0, may be empty):"]
-    for t in APPLICATION:
+    for t in TAXONOMY:
         lines.append(f"- {t['id']}: {t['description']}")
     lines += [
         "",
         "Rules:",
-        "- primary must be exactly one id from the PRIMARY list.",
-        "- technical/application weights say how much of the item is about that "
-          "topic (1.0 = almost entirely); omit zero-weight topics (sparse).",
-        "- A research paper is research_findings (or evaluation for benchmark/"
-          "measurement work) — NOT model_release.",
-        "- If nothing fits, use \"other\" for primary.",
+        "- Pick the single most important label for the item; give only one id.",
+        "- A research paper gets its technical area (e.g. post_training, "
+          "benchmarks) — NOT model_release.",
+        "- An event story (launch, incident, deal) gets the event topic "
+          "(model_release, incident, business_economics).",
+        "- If nothing fits, use \"other\".",
         "",
         "Return ONLY a JSON object with a single key \"labels\": an array of "
         "objects, one per item in input order, each with \"index\" (the item's "
-        "integer index), \"primary\" (a string id), \"technical\" (a JSON "
-        "object mapping ids to weights) and \"application\" (a JSON object "
-        "mapping ids to weights). Every index must appear exactly once. No "
-        "prose before or after. No markdown fences.",
+        "integer index) and \"label\" (a string id). Every index must appear "
+        "exactly once. No prose before or after. No markdown fences.",
     ]
     return "\n".join(lines)
 

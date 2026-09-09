@@ -1059,12 +1059,12 @@ def test_personal_match_neutral_when_no_profile():
 
 
 def test_personal_match_cosine_overlap():
-    vec = {"post_training": 0.9, "agents_tool_use": 0.1}
+    vec = {"post_training": 0.9, "ai_for_science": 0.1}
     pref = {"post_training": 1.0}
     v = topics.personal_match(vec, pref)
     assert abs(v - (0.9 / (0.9 ** 2 + 0.1 ** 2) ** 0.5)) < 1e-9
     assert 0.0 < v <= 1.0
-    assert topics.personal_match({"agents_tool_use": 1.0}, pref) == 0.0
+    assert topics.personal_match({"ai_for_science": 1.0}, pref) == 0.0
     assert topics.personal_match({}, pref) == 0.0
 
 
@@ -1098,17 +1098,12 @@ def test_validate_topic_map():
 def test_label_items_parses_and_filters_taxonomy(monkeypatch):
     monkeypatch.setattr(label_mod, "_chat", lambda payload, model: json.dumps({
         "labels": [
-            # valid primary at reduced weight, a good technical weight,
-            # an off-taxonomy id (dropped), a non-positive weight (dropped)
-            {"index": 0, "primary": "model_release",
-             "technical": {"post_training": 0.8, "bogus": 1.0},
-             "application": {"coding": -0.5}},
-            # primary-only item (empty facets still yields a label)
-            {"index": 1, "primary": "research_findings",
-             "technical": {}, "application": {}},
-            # invalid primary + empty facets -> nothing
-            {"index": 2, "primary": "not_a_type",
-             "technical": {}, "application": {}},
+            # valid label
+            {"index": 0, "label": "post_training"},
+            # valid label with extra ignored keys
+            {"index": 1, "label": "agents", "weight": 0.5},
+            # off-taxonomy id -> nothing
+            {"index": 2, "label": "not_a_type"},
         ]
     }))
     items = [
@@ -1118,28 +1113,18 @@ def test_label_items_parses_and_filters_taxonomy(monkeypatch):
     ]
     out = label_mod.label_items(items, workers=1)
     assert out == {
-        "https://a.example": {"model_release": topics.PRIMARY_WEIGHT,
-                              "post_training": 0.8},
-        "https://b.example": {"research_findings": topics.PRIMARY_WEIGHT},
+        "https://a.example": {"post_training": 1.0},
+        "https://b.example": {"agents": 1.0},
     }
     assert "https://c.example" not in out
 
 
-def test_flatten_label_clamps_and_axis_checks():
-    entry = {
-        "primary": "model_release",
-        "technical": {"post_training": 1.7, "inference_efficiency": 0.4},
-        "application": {},
-    }
-    flat = label_mod._flatten_label(entry)
-    assert flat["post_training"] == 1.0      # clamped
-    assert flat["inference_efficiency"] == 0.4
-    assert flat["model_release"] == topics.PRIMARY_WEIGHT
-    assert label_mod._flatten_label({"primary": "post_training",  # wrong axis
-                                     "technical": {}, "application": {}}) == {}
-    assert label_mod._flatten_label({"primary": "model_release",
-                                     "technical": {}, "application": {}}) \
-        == {"model_release": topics.PRIMARY_WEIGHT}
+def test_flatten_label_single_label():
+    assert label_mod._flatten_label({"index": 0, "label": "post_training"}) \
+        == {"post_training": 1.0}
+    assert label_mod._flatten_label({"label": "not_a_type"}) == {}
+    assert label_mod._flatten_label({"label": 5}) == {}
+    assert label_mod._flatten_label({}) == {}
 
 
 def test_label_items_malformed_batch_yields_nothing(monkeypatch):
@@ -1213,7 +1198,7 @@ def test_rank_steering_reranks_by_profile(tmp_path, monkeypatch):
         for it in items:
             i = int(it.title[1:])  # "t0" -> 0
             out[topics.normalize_url(it.url)] = (
-                {"agents_tool_use": 0.9} if i == 0 else {"post_training": 0.9})
+                {"ai_for_science": 0.9} if i == 0 else {"post_training": 0.9})
         return out
 
     monkeypatch.setattr(rank.label_mod, "label_items", fake_label)
@@ -1368,24 +1353,25 @@ def test_eval_labels_load_pool(tmp_path):
     assert "https://c.example" in {it.url for it in eval_labels.load_pool([str(raw)])}
 
 
-def test_eval_labels_primary_id():
+def test_eval_labels_label_id():
     from pipeline import eval_labels
-    assert eval_labels._primary_id({"research_findings": 0.5, "post_training": 0.8}) == "research_findings"
-    assert eval_labels._primary_id({"post_training": 0.8}) is None
-    assert eval_labels._primary_id({}) is None
+    assert eval_labels._label_id({"post_training": 1.0}) == "post_training"
+    assert eval_labels._label_id({"post_training": 1.0, "agents": 0.0}) == "post_training"
+    assert eval_labels._label_id({}) is None
 
 
-def test_eval_labels_axis_stats_uses_prevalent_topics():
+def test_eval_labels_label_stats_uses_prevalent_topics():
     from pipeline import eval_labels
     items = [types.SimpleNamespace(url=f"https://x{i}.example", title=f"t{i}", body="b")
              for i in range(2)]
-    small = {"https://x0.example": {"model_release": topics.PRIMARY_WEIGHT, "post_training": 0.9},
-             "https://x1.example": {"research_findings": topics.PRIMARY_WEIGHT}}
-    big = {"https://x0.example": {"model_release": topics.PRIMARY_WEIGHT},
-           "https://x1.example": {"research_findings": topics.PRIMARY_WEIGHT}}
-    stats, kappa, match = eval_labels._axis_stats(items, small, big, "primary")
-    # both items: primary agrees (model_release, research_findings) -> kappa 1.0
+    small = {"https://x0.example": {"post_training": 1.0},
+             "https://x1.example": {"agents": 1.0}}
+    big = {"https://x0.example": {"post_training": 1.0},
+           "https://x1.example": {"agents": 1.0}}
+    stats, kappa, match = eval_labels._label_stats(items, small, big)
+    # both items agree (post_training, agents) -> kappa 1.0
     assert kappa == 1.0
-    assert stats["model_release"]["prevalence"] == 0.5
-    # post_training is on the TECHNICAL axis, never counted in 'primary'
-    assert "post_training" not in stats
+    assert match == 1.0
+    assert stats["post_training"]["prevalence"] == 0.5
+    # 'other' was never marked by the reference -> excluded from the mean kappa
+    assert stats["other"]["prevalence"] == 0.0

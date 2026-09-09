@@ -38,7 +38,13 @@ _client = None
 
 
 def get_client() -> OpenAI:
-    """Lazy singleton OpenAI client pointed at the SkAInet backend."""
+    """Lazy singleton OpenAI client pointed at the SkAInet backend.
+
+    A generous client-wide timeout prevents a stalled gateway request from
+    hanging the process forever (a stuck request otherwise blocks with no
+    bound); per-call ``timeout`` overrides can still be passed where a
+    tighter bound is wanted.
+    """
     global _client
     if _client is None:
         cfg = _config()
@@ -46,6 +52,7 @@ def get_client() -> OpenAI:
             base_url=cfg["base_url"],
             api_key=cfg["api_key"],
             default_headers={"x-user-agent": "tng/practice-judge"},
+            timeout=300.0,
         )
     return _client
 

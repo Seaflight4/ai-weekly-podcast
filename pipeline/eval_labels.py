@@ -3,7 +3,8 @@
 Labels the same items with two models (identical taxonomy prompt from
 ``pipeline.topics``) and reports how well the small model agrees with the big
 one, so you can decide whether Mistral-Small's labels are good enough for
-steering (acceptance: mean per-topic Cohen's kappa ~>= 0.6).
+steering (acceptance: exact-match ~>= 0.6 and mean per-topic Cohen's kappa
+~>= 0.6 over the prevalent topics).
 
 Run manually (no service involvement):
 
@@ -14,15 +15,15 @@ Run manually (no service involvement):
         --out data/eval/labels__small__vs__big
 
 Writes ``data/eval/<name>/eval_report.json`` with per-item label-set agreement
-(Jaccard/IoU), per-topic Cohen's kappa (big = reference), weight agreement, and
-qualitative disagreement samples. Per-model results are cached to disk under
-``<out>/`` so re-running with new metrics doesn't re-call the LLMs.
+(Jaccard/IoU), top-label exact match, per-topic Cohen's kappa (big =
+reference), and qualitative disagreement samples. Per-model results are cached
+to disk under ``<out>/`` so re-running with new metrics doesn't re-call the
+LLMs.
 """
 from __future__ import annotations
 
 import argparse
 import json
-import math
 import os
 import pathlib
 import types
@@ -107,20 +108,6 @@ def cohen_kappa(a: list, b: list) -> float:
     return (po - pa) / (1 - pa)
 
 
-def _pearson(x: list[float], y: list[float]) -> float:
-    n = len(x)
-    if n < 2:
-        return 0.0
-    mx = sum(x) / n
-    my = sum(y) / n
-    num = sum((a - mx) * (b - my) for a, b in zip(x, y))
-    d1 = math.sqrt(sum((a - mx) ** 2 for a in x))
-    d2 = math.sqrt(sum((b - my) ** 2 for b in y))
-    if d1 == 0 or d2 == 0:
-        return 0.0
-    return num / (d1 * d2)
-
-
 def _load_env() -> None:
     """Read a local .env (API key) so the script works like `python -m pipeline run`."""
     env = pathlib.Path(".env")
@@ -134,15 +121,16 @@ def _load_env() -> None:
         os.environ.setdefault(k.strip(), v.strip())
 
 
-def _axis_stats(items, small, big, axis: str) -> tuple[dict, float, float]:
-    """Per-topic and axis-level agreement within one axis.
+def _label_stats(items, small, big) -> tuple[dict, float, float]:
+    """Per-topic and overall agreement for the single-label taxonomy.
 
     Returns (topic_stats, used_kappa, used_match_frac). ``used_kappa`` averages
     only topics the reference model actually marked (prevalence > 0) — rare
     facets otherwise drag down an imbalance-biased kappa.
     """
     topic_stats: dict = {}
-    for tid in topics.AXIS_IDS[axis]:
+    for t in topics.TAXONOMY:
+        tid = t["id"]
         a = [1 if tid in small.get(topics.normalize_url(it.url), {}) else 0
              for it in items]
         b = [1 if tid in big.get(topics.normalize_url(it.url), {}) else 0
@@ -159,9 +147,9 @@ def _axis_stats(items, small, big, axis: str) -> tuple[dict, float, float]:
     return topic_stats, round(mean_kappa, 3), round(mean_match, 3)
 
 
-def _primary_id(vector: dict) -> str | None:
-    """The single primary id in a flat vector (primary is 1-hot, weight>0)."""
-    for tid in topics.AXIS_IDS["primary"]:
+def _label_id(vector: dict) -> str | None:
+    """The single label id in a one-hot flat vector (weight > 0)."""
+    for tid in topics.TAXONOMY_IDS:
         if vector.get(tid, 0.0) > 0:
             return tid
     return None
@@ -187,63 +175,46 @@ def main(argv: list[str] | None = None) -> None:
     small = _labels_or_cache(items, args.small, out / f"{_slug(args.small)}.cache.json")
     big = _labels_or_cache(items, args.big, out / f"{_slug(args.big)}.cache.json")
 
-    # Per-item IoU over the non-zero topic sets + primary exact-match.
+    # Per-item IoU over the non-zero topic sets + top-label exact match.
     ious = []
-    primary_hits = 0
+    exact_hits = 0
     samples_bad, samples_good = [], []
     for it in items:
         sa = small.get(topics.normalize_url(it.url), {})
         sb = big.get(topics.normalize_url(it.url), {})
         iou = _jaccard(sa, sb)
         ious.append(iou)
-        if _primary_id(sa) == _primary_id(sb):
-            primary_hits += 1
+        if _label_id(sa) == _label_id(sb):
+            exact_hits += 1
         row = {"title": it.title[:120], "small": dict(sa), "big": dict(sb)}
         (samples_bad if iou < 0.5 else samples_good).append((iou, row))
     samples_bad.sort(key=lambda t: t[0])
     samples_good.sort(key=lambda t: -t[0])
 
-    # Per-axis agreement (primary is the gate-adjacent single-choice axis;
-    # technical is the steering axis we gate adoption on).
-    per_axis_metrics = {}
+    # Single-label agreement (exact match is the gate metric; kappa over the
+    # prevalent topics is the reliability check).
+    stats, mean_kappa, mean_match = _label_stats(items, small, big)
     gate = {
-        "primary_exact_match": round(primary_hits / len(items), 3),
+        "exact_match": round(exact_hits / len(items), 3),
+        "mean_kappa": mean_kappa,
+        "mean_match": mean_match,
     }
-    for axis in ("primary", "technical", "application"):
-        stats, mean_kappa, mean_match = _axis_stats(items, small, big, axis)
-        per_axis_metrics[axis] = {"mean_kappa": mean_kappa,
-                                  "mean_match": mean_match,
-                                  "topics": stats}
-        gate[f"{axis}_kappa"] = mean_kappa
-        gate[f"{axis}_match_frac"] = mean_match
-
-    # Weight agreement on topic/item pairs either labeler marked (>0).
-    xs, ys = [], []
-    for it in items:
-        sa = small.get(topics.normalize_url(it.url), {})
-        sb = big.get(topics.normalize_url(it.url), {})
-        for tid in set(sa) | set(sb):
-            xs.append(sa.get(tid, 0.0))
-            ys.append(sb.get(tid, 0.0))
-    corr = _pearson(xs, ys) if xs else 0.0
-    mean_abs_diff = (sum(abs(a - b) for a, b in zip(xs, ys)) / len(xs)) if xs else 0.0
+    per_label = {"topics": stats}
 
     report = {
         "run_id": out.name,
         "config": {
             "small": args.small,
             "big": args.big,
-            "prompt": "topics.label_prompt (builtin, 3-axis)",
+            "prompt": "topics.label_prompt (builtin, single-label)",
             "pools": list(args.pool),
         },
         "n_items": len(items),
         "gate_metrics": gate,
         "aggregated_metrics": {
             "label_set_iou": {"mean": round(sum(ious) / len(ious), 3)},
-            "weight_corr": round(corr, 3),
-            "weight_mean_abs_diff": round(mean_abs_diff, 3),
         },
-        "per_axis_metrics": per_axis_metrics,
+        "per_label": per_label,
         "samples": {
             "worst_5": [{"iou": round(i, 3), **r} for i, r in samples_bad[:5]],
             "best_5": [{"iou": round(i, 3), **r} for i, r in samples_good[:5]],
@@ -254,9 +225,8 @@ def main(argv: list[str] | None = None) -> None:
         json.dumps(report, indent=2), encoding="utf-8")
     print(f"      eval_labels: {len(items)} items, {args.small} vs {args.big}")
     g = report["gate_metrics"]
-    print(f"      gate: technical_kappa={g['technical_kappa']} "
-          f"primary_exact_match={g['primary_exact_match']} "
-          f"application_kappa={g['application_kappa']} "
+    print(f"      gate: exact_match={g['exact_match']} mean_kappa={g['mean_kappa']} "
+          f"mean_match={g['mean_match']} "
           f"IoU={report['aggregated_metrics']['label_set_iou']['mean']}")
     print(f"      wrote {out / 'eval_report.json'}")
 

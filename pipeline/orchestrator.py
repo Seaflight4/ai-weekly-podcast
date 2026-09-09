@@ -48,7 +48,8 @@ def run(only: str | None = None, no_audio: bool = False,
         familiar_topics: list[str] | None = None,
         topic_prefs: list[str] | None = None,
         steering_alpha: float | None = None,
-        length: str | None = None, depth: str | None = None):
+        length: str | None = None, depth: str | None = None,
+        force_label: bool = False):
     """Resolve the run config (defaults < config file < CLI overrides), then
     dispatch to the requested stage(s). ``date`` is the window end / anchor
     (back-compat with ``--date``)."""
@@ -124,7 +125,7 @@ def run(only: str | None = None, no_audio: bool = False,
 
     if only == "label":
         print("[label] backfilling episode topic labels from manifests...")
-        touched = label_mod.backfill_labels(date=date)
+        touched = label_mod.backfill_labels(date=date, force=force_label)
         print(f"      labeled {len(touched)} run(s)")
         return
 

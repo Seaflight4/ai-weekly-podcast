@@ -335,10 +335,10 @@ def test_podcast_config_validates_topic_prefs_and_alpha(tmp_path, monkeypatch):
     stored = podcast_config.save({
         **base,
         "user": {"audience": "researcher",
-                 "topic_prefs": ["post_training", "agents_tool_use"],
+                 "topic_prefs": ["post_training", "ai_for_science"],
                  "steering_alpha": 0.4},
     })
-    assert stored["user"]["topic_prefs"] == ["post_training", "agents_tool_use"]
+    assert stored["user"]["topic_prefs"] == ["post_training", "ai_for_science"]
     assert stored["user"]["steering_alpha"] == 0.4
     # default alpha when unspecified
     defaulted = podcast_config.save({**base, "user": {"audience": "researcher"}})
