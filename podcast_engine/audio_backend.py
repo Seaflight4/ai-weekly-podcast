@@ -6,10 +6,9 @@ a two-host transcript is generated via an OpenAI-compatible LLM (DeepSeek on
 the SkaiNet gateway — same ``SKAINET_API_KEY`` the pipeline already uses), and
 voice-cloned audio is synthesized via the TNG qwen3 TTS service.
 
-The backend takes a written ``podcast_brief.md`` + the chosen source items +
-the run directory, produces an ``episode.mp3`` and a ground-truth
-``transcript.md`` (so the ``transcribe`` stage is a no-op), and returns an
-:class:`AudioResult`.
+The backend takes the chosen source items + the run directory, produces an
+``episode.mp3`` and a ground-truth ``transcript.md`` (so the ``transcribe``
+stage is a no-op), and returns an :class:`AudioResult`.
 """
 from __future__ import annotations
 
@@ -20,8 +19,10 @@ import pathlib
 import re
 import time
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-from . import RankedItem
+if TYPE_CHECKING:
+    from pipeline import RankedItem
 
 logger = logging.getLogger(__name__)
 
@@ -52,27 +53,28 @@ class AudioResult:
     backend: str
 
 
-def transcript_fingerprint(brief: pathlib.Path,
-                           chosen: list[RankedItem],
+def transcript_fingerprint(chosen: list,
                            config: dict | None,
-                           memory_context: dict | None = None) -> str:
+                           memory_context: dict | None = None,
+                           sources: list | None = None) -> str:
     """Fingerprint of everything that determines the transcript's content.
 
-    Covers the brief text, the selected source URLs, and the generator config
-    (word budgets, depth, audience, familiar topics). A cached transcript may
-    only be reused when this value is unchanged; otherwise the LLM would
-    silently re-synthesize audio for a different selection/config.
+    Covers the source URLs/titles, the generator config (word budgets, depth,
+    audience, familiar topics). A cached transcript may only be reused when
+    this value is unchanged; otherwise the LLM would silently re-synthesize
+    audio for a different selection/config.
 
     Cross-episode memory (``memory_context``) also changes what the transcript
     says (a continuation thread), so it is part of the fingerprint too — a
     changed memory never reuses a stale cached transcript.
     """
     brief_text = ""
-    try:
-        brief_text = brief.read_text(encoding="utf-8")
-    except OSError:
-        pass
-    urls = sorted((c.url or "").strip().lower() for c in chosen)
+    if sources is not None:
+        brief_text = "\n".join(
+            f"{getattr(s, 'title', '')}|{getattr(s, 'url', '')}"
+            for s in sorted(sources, key=lambda s: (getattr(s, "url", "") or "").strip().lower())
+        )
+    urls = sorted((getattr(c, "url", "") or "").strip().lower() for c in chosen)
     cfg = json.dumps(config or {}, sort_keys=True, default=str)
     mem = json.dumps(memory_context or {}, sort_keys=True)
     payload = f"{brief_text}\x00{urls}\x00{cfg}\x00{mem}".encode("utf-8")
@@ -129,15 +131,16 @@ class PodcastfyBackend:
 
     def generate(
         self,
-        brief: pathlib.Path,
         run_dir: pathlib.Path,
-        chosen: list[RankedItem],
+        chosen: list | None = None,
         transcript_in: pathlib.Path | None = None,
         config: dict | None = None,
         memory_context: dict | None = None,
-        items: list[RankedItem] | None = None,
+        items: list | None = None,
+        sources: list | None = None,
+        intro_text: str = "",
     ) -> AudioResult:
-        from .podcastfy.generator import SimplePodcastGenerator
+        from .generator import SimplePodcastGenerator
 
         audio_out = run_dir / "episode.mp3"
         transcript_out = run_dir / "transcript.md"
@@ -160,8 +163,9 @@ class PodcastfyBackend:
         # re-run of the same date or an edited brief never re-synthesizes
         # audio from a stale transcript).
         marker_path = cache_dir / "transcript.fingerprint"
-        fingerprint = transcript_fingerprint(brief, chosen, config,
-                                             memory_context=memory_context)
+        fingerprint = transcript_fingerprint(chosen or [], config,
+                                             memory_context=memory_context,
+                                             sources=sources)
         try:
             # Source fetching only happens when we need the LLM (no cached
             # transcript for these inputs). When reusing a matching transcript
@@ -187,15 +191,16 @@ class PodcastfyBackend:
             else:
                 use_pipeline = True
                 t0 = time.perf_counter()
-                print("[podcastfy] loading brief and fetching sources...")
-                combined = gen.load_brief_and_sources(str(brief))
+                print("[podcastfy] fetching provided sources...")
+                combined = gen.build_combined_content(sources,
+                                                      intro_text=intro_text)
                 t_fetch = time.perf_counter() - t0
                 print(f"[podcastfy] fetched sources in {t_fetch:.1f}s")
 
                 # Build TTS early (health check + voice loading) BEFORE
                 # transcript so audio synthesis can overlap with LLM calls.
-                from .podcastfy.text_to_speech import TextToSpeech
-                from .podcastfy.tts.providers.tng import TNGTTS
+                from .text_to_speech import TextToSpeech
+                from .tts.providers.tng import TNGTTS
                 import os as _os
                 from concurrent.futures import ThreadPoolExecutor
 
@@ -289,7 +294,7 @@ class PodcastfyBackend:
                 # Serial TTS (cached transcript: no pipeline overlap needed).
                 t0 = time.perf_counter()
                 print("[podcastfy] checking TTS service health...")
-                from .podcastfy.tts.providers.tng import TNGTTS
+                from .tts.providers.tng import TNGTTS
                 import os as _os
                 TNGTTS.wait_until_healthy(_os.environ.get("SKAINET_API_KEY", ""))
                 t_health = time.perf_counter() - t0

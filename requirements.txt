@@ -13,3 +13,4 @@ python-dotenv
 PyYAML
 fastapi>=0.110
 uvicorn[standard]>=0.27
+mcp>=2.0

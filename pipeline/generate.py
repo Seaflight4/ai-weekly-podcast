@@ -1,6 +1,7 @@
 from . import RankedItem, Episode
 from . import store
-from . import audio as audio_mod
+from podcast_engine import generate_podcast as _generate_podcast
+from podcast_engine import Source as EngineSource, EngineConfig
 from . import config as config_mod
 from . import label as label_mod
 from . import memory as memory_mod
@@ -100,16 +101,18 @@ def generate(ranked: list[RankedItem], make_audio: bool = True,
     backend_name: str | None = None
     if make_audio:
         try:
-            result = audio_mod.PodcastfyBackend().generate(
-                brief=brief, run_dir=run, chosen=chosen,
-                transcript_in=pathlib.Path(transcript_in) if transcript_in else None,
-                config=config.podcastfy_overrides(),
+            engine_sources = [_ranked_to_source(r) for r in chosen]
+            engine_config = _engine_config(config)
+            result = _generate_podcast(
+                sources=engine_sources,
+                config=engine_config,
+                run_dir=run,
                 memory_context=memory_context,
-                items=chosen,
+                transcript_in=pathlib.Path(transcript_in) if transcript_in else None,
             )
             audio = result.audio_path
             backend_name = result.backend
-            if result.transcript_path is not None:
+            if result.transcript_path is not None and result.transcript_path.exists():
                 transcript_path = result.transcript_path
                 transcript_source = "generated"
         except Exception as e:
@@ -290,3 +293,40 @@ def _audio_duration_sec(path: pathlib.Path) -> float | None:
 def _transcript_words(text: str) -> int:
     """Spoken-word count of a tagged transcript (``<PersonN>`` stripped)."""
     return len(re.sub(r"</?Person\d+>", "", text).split())
+
+
+# --- engine adapters: RankedItem -> Source, RunConfig -> EngineConfig --------
+
+def _ranked_to_source(item: RankedItem) -> EngineSource:
+    """Convert a pipeline RankedItem to an engine Source."""
+    pdf_url = _paper_pdf_url(item)
+    if pdf_url:
+        kind = "arxiv"
+    elif item.source == "arxiv":
+        kind = "arxiv"
+    else:
+        kind = "blog"
+    return EngineSource(
+        title=item.title,
+        url=item.url,
+        pdf_url=pdf_url,
+        excerpt=(item.body or "")[:500],
+        kind=kind,
+    )
+
+
+def _engine_config(config: config_mod.RunConfig) -> EngineConfig:
+    """Build an EngineConfig from the pipeline's RunConfig."""
+    return EngineConfig(
+        podcast_topic="recent AI research and industry news",
+        podcast_name="AI News Weekly",
+        podcast_tagline="Latest AI research and news",
+        host1_name="Brian",
+        host2_name="Tina",
+        roles_person1="AI researcher",
+        roles_person2="AI researcher",
+        audience=config.audience_prompt(),
+        familiar_topics=config.familiar_topics,
+        length=config.length,
+        depth=config.depth,
+    )

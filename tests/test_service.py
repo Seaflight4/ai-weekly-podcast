@@ -3,13 +3,13 @@
 No network, no LLM, no real subprocess. The pipeline subprocess is either
 mocked (jobs) or replaced with a trivial command that exits immediately.
 """
-import json, pathlib, sys, time
+import asyncio, json, pathlib, queue, sys
 
 import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from service import episodes, jobs, podcast_config
+from service import episodes, events, jobs, podcast_config
 
 
 # --- episodes scan + status badges -----------------------------------------
@@ -109,6 +109,7 @@ def reset_jobs():
     """Reset jobs module-global state between tests."""
     jobs._active = None
     jobs._recent.clear()
+    jobs._ticker = None
     yield
     # wait for any lingering thread to finish
     a = jobs._active
@@ -119,6 +120,7 @@ def reset_jobs():
         a._thread.join(timeout=5)
     jobs._active = None
     jobs._recent.clear()
+    jobs._ticker = None
 
 
 def test_jobs_second_submit_while_active_returns_busy(reset_jobs):
@@ -381,3 +383,124 @@ def test_full_run_cmd_carries_steering_flags():
     clean = jobs.full_run_cmd(config={"length": "short"})
     assert "--topics" not in clean
     assert "--steering-alpha" not in clean
+
+
+# --- events: SSE push hub ----------------------------------------------------
+
+@pytest.fixture
+def reset_events():
+    with events._subs_lock:
+        events._subs.clear()
+    yield
+    with events._subs_lock:
+        events._subs.clear()
+
+
+def test_events_broadcast_reaches_every_subscriber(reset_events):
+    q1 = events.subscribe()
+    q2 = events.subscribe()
+    try:
+        events.broadcast({"type": "run_progress", "job": {"id": "a"}})
+        assert q1.get_nowait() == {"type": "run_progress", "job": {"id": "a"}}
+        assert q2.get_nowait() == {"type": "run_progress", "job": {"id": "a"}}
+        # unsubscribe stops delivery to that client only.
+        events.unsubscribe(q1)
+        events.broadcast({"type": "episodes_changed"})
+        assert q2.get_nowait()["type"] == "episodes_changed"
+        with pytest.raises(queue.Empty):
+            q1.get_nowait()
+    finally:
+        for q in (q1, q2):
+            events.unsubscribe(q)
+
+
+def test_events_broadcast_drops_for_full_queue_not_crash(reset_events):
+    q = events.subscribe()
+    try:
+        # Fill to the cap, then one more: the oldest is dropped, newest lands.
+        for i in range(events._MAX_QUEUED + 5):
+            events.broadcast({"type": "episodes_changed", "i": i})
+        payload = None
+        while True:
+            try:
+                payload = q.get_nowait()
+            except queue.Empty:
+                break
+        assert payload is not None
+        assert payload["i"] in range(events._MAX_QUEUED, events._MAX_QUEUED + 5)
+    finally:
+        events.unsubscribe(q)
+
+
+def test_events_frames_formats_sse_event(reset_events):
+    q = events.subscribe()
+    try:
+        events.broadcast({"type": "run_finished", "job": {"id": "x"}})
+        frame = _first_frame(q)
+        assert frame == (
+            'event: run_finished\n'
+            'data: {"type": "run_finished", "job": {"id": "x"}}\n\n')
+    finally:
+        events.unsubscribe(q)
+
+
+def _first_frame(q: queue.Queue) -> str:
+    async def _g():
+        agen = events.frames(q)
+        return await agen.__anext__()
+    return asyncio.run(_g())
+
+
+def test_sse_endpoint_streams_events(tmp_path, monkeypatch, reset_events):
+    # NOTE: starlette's TestClient transport buffers the whole body, so an
+    # infinite SSE stream cannot be consumed via client.stream. Drive the
+    # endpoint's StreamingResponse generator directly instead.
+    from service.app import sse_events
+
+    resp = asyncio.run(sse_events())
+    assert resp.media_type == "text/event-stream"
+    assert resp.headers["cache-control"] == "no-cache"
+
+    async def _drive():
+        events.broadcast({"type": "episodes_changed"})
+        frame = await resp.body_iterator.__anext__()
+        await resp.body_iterator.aclose()  # triggers the unsubscribe path
+        return frame
+
+    frame = asyncio.run(_drive())
+    assert 'event: episodes_changed\n' in frame
+    assert '"type": "episodes_changed"' in frame
+    # The ended stream left no subscriber behind.
+    assert events._subs == []
+
+
+# --- jobs: SSE broadcast on completion + progress ticker ---------------------
+
+def test_jobs_broadcasts_run_finished_on_completion(tmp_path, reset_jobs, monkeypatch):
+    sent = []
+    monkeypatch.setattr(jobs.events, "broadcast", sent.append)
+    cmd = [sys.executable, "-c", "print('ok')"]
+    job, err = jobs.submit("full", cmd, date="2026-08-31")
+    assert err == ""
+    job._thread.join(timeout=10)
+    assert job.status == "done"
+    finished = [p for p in sent if p["type"] == "run_finished"]
+    assert len(finished) == 1
+    assert finished[0]["job"]["status"] == "done"
+    assert finished[0]["job"]["date"] == "2026-08-31"
+
+
+def test_jobs_ticker_pushes_progress_then_finish(tmp_path, reset_jobs, monkeypatch):
+    sent = []
+    monkeypatch.setattr(jobs.events, "broadcast", sent.append)
+    monkeypatch.setattr(jobs, "PROGRESS_INTERVAL", 0.05)
+    cmd = [sys.executable, "-c", "import time; time.sleep(0.4)"]
+    job, err = jobs.submit("full", cmd, date=None)
+    assert err == ""
+    job._thread.join(timeout=10)
+    assert job.status == "done"
+    progress = [p for p in sent if p["type"] == "run_progress"]
+    finished = [p for p in sent if p["type"] == "run_finished"]
+    assert len(progress) >= 1
+    assert len(finished) == 1
+    assert all(p["job"]["id"] == job.id for p in progress)

@@ -1,23 +1,8 @@
 """Source ingestion for podcast generation.
 
-Parses a podcast brief markdown file into structured source entries and
-downloads arXiv PDFs so they can be fed to the transcript-generation LLM
-via the existing PyMuPDF extraction path. Also fetches full main-article
-text for blog (non-arXiv) sources via trafilatura.
-
-Brief format (see pipeline/generate.py `_brief_text`):
-    ## arXiv papers (N)
-
-    - [Title](https://arxiv.org/abs/XXXX.XXXXX) · [PDF](https://arxiv.org/pdf/XXXX.XXXXX) — score 0.88 · post_training
-      > Excerpt paragraph.
-
-    ## Hacker News stories (N)
-
-    - [Title](https://example.com/path) — score 0.85
-      > Excerpt paragraph.
-
-The trailing ``· <topic_id>`` is optional (legacy briefs and items the judge
-failed to label omit it) and is not used for generation.
+Downloads arXiv PDFs and fetches web page text for blog sources so they can
+be fed to the transcript-generation LLM. Provides the :class:`Source`
+dataclass used by both the engine and the MCP server.
 """
 
 import logging
@@ -30,18 +15,6 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-# Matches a markdown bullet with a title link, optional · [PDF](url), a score,
-# and an optional trailing topic id (e.g. "— score 0.88 · agents").
-_BULLET_RE = re.compile(
-    r"^- \[(?P<title>[^\]]+)\]\((?P<url>[^)]+)\)"  # [Title](url)
-    r"(?:\s*·\s*\[PDF\]\((?P<pdf_url>[^)]+)\))?"   # optional · [PDF](pdf_url)
-    r"(?:\s*—\s*score\s*[\d.]+)?"                  # optional — score 0.XX
-    r"(?:\s*·\s*(?P<label>[\w-]+))?"               # optional · topic_id
-    r"\s*$",
-    re.MULTILINE,
-)
-# Matches the blockquote excerpt immediately following a bullet (indented '> ...').
-_QUOTE_RE = re.compile(r"^\s*>\s*(.+)$", re.MULTILINE)
 # Extracts an arXiv ID (e.g. 2608.15089) from an arxiv.org URL.
 _ARXIV_ID_RE = re.compile(r"arxiv\.org/(?:abs|pdf)/([0-9]{4}\.[0-9]+)")
 
@@ -49,10 +22,11 @@ _ARXIV_ID_RE = re.compile(r"arxiv\.org/(?:abs|pdf)/([0-9]{4}\.[0-9]+)")
 @dataclass
 class Source:
     title: str
-    url: str
-    pdf_url: Optional[str]
-    excerpt: str
-    kind: str  # "arxiv" or "blog"
+    url: str = ""
+    pdf_url: Optional[str] = None
+    excerpt: str = ""
+    kind: str = "blog"  # "arxiv", "blog", or "pdf"
+    local_path: Optional[str] = None  # already-on-disk PDF (kind="pdf")
 
     @property
     def arxiv_id(self) -> Optional[str]:
@@ -60,32 +34,6 @@ class Source:
             return None
         m = _ARXIV_ID_RE.search(self.pdf_url)
         return m.group(1) if m else None
-
-
-def parse_brief(brief_path: str) -> List[Source]:
-    """Parse a podcast brief markdown file into a list of Source entries."""
-    with open(brief_path, "r") as f:
-        text = f.read()
-
-    sources: List[Source] = []
-    for m in _BULLET_RE.finditer(text):
-        # Find the nearest following blockquote for the excerpt.
-        after = text[m.end():]
-        qm = _QUOTE_RE.match(after)
-        excerpt = qm.group(1).strip() if qm else ""
-        pdf_url = m.group("pdf_url")
-        kind = "arxiv" if pdf_url else "blog"
-        sources.append(
-            Source(
-                title=m.group("title").strip(),
-                url=m.group("url").strip(),
-                pdf_url=pdf_url,
-                excerpt=excerpt,
-                kind=kind,
-            )
-        )
-    logger.info("Parsed %d sources from %s", len(sources), brief_path)
-    return sources
 
 
 def download_arxiv_pdfs(sources: List[Source], target_dir: str = "papers") -> List[str]:
@@ -139,7 +87,7 @@ def fetch_web_content(sources: List[Source], target_dir: str = "web") -> dict:
     os.makedirs(target_dir, exist_ok=True)
     fetched: dict = {}
     for src in sources:
-        if src.kind == "arxiv":
+        if src.kind == "arxiv" or src.kind == "pdf":
             continue
         dest = os.path.join(target_dir, f"{_slugify(src.url)}.txt")
         if os.path.exists(dest) and os.path.getsize(dest) > 0:

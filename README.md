@@ -90,8 +90,9 @@ The production labeler is validated against a big reference model with
 
 Each episode keeps a small per-topic memory summary (`memory.json`) of what it
 covered and the open threads, written when the episode is generated. The next
-episode may reference it back — but only for **real continuations** (a new
-development, a successor release, or a repeated pattern), never a fabricated
+episode may reference it back — but only for **direct continuations** (the
+same product/model/paper/news thread with a new development or successor
+release), never a same-topic-but-different-story bridge and never a fabricated
 "last episode".
 
 - **Retention** (setting **Episode memory lookback**, 1–4 windows, default 2)
@@ -99,7 +100,8 @@ development, a successor release, or a repeated pattern), never a fabricated
   window` days. The current window is never its own memory source.
 - **Injection**: prior summaries matched to this episode's topics are fed to
   the transcript LLM as a brief "prior coverage sync" part, plus a grounded
-  reference rule (direct/successor/thematic) for each topic part. Items are
+  reference rule (direct continuation / successor only) for each topic part.
+  Items are
   also ordered topically so related topics sit adjacent (enabling "as we just
   heard with…" call-backs within the same episode), falling back to the
   hand-tuned order for unlabeled items.

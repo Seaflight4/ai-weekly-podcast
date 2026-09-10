@@ -13,6 +13,7 @@ from pipeline import config as config_mod
 from pipeline import topics
 from pipeline import label as label_mod
 from pipeline import memory as memory_mod
+from podcast_engine import EpisodeResult
 
 
 # --- RankedItem -----------------------------------------------------------
@@ -402,32 +403,6 @@ def test_generate_brief_groups_by_source(tmp_path, monkeypatch):
     assert "hn.example/x) — score 0.80\n" in text
 
 
-def test_sources_parse_brief_accepts_label_token(tmp_path):
-    from pipeline.podcastfy import sources as pfsources
-    brief = tmp_path / "brief.md"
-    brief.write_text(
-        "# AI News Digest\n\n"
-        "## arXiv papers (2)\n\n"
-        "- [Old](https://arxiv.org/abs/2601.00001) — score 0.88\n"
-        "  > Excerpt A.\n"
-        "- [New](https://arxiv.org/abs/2601.00002) "
-        "· [PDF](https://arxiv.org/pdf/2601.00002) — score 0.9 · post_training\n"
-        "  > Excerpt B.\n\n"
-        "## Hacker News stories (1)\n\n"
-        "- [Blog](https://example.com/x) — score 0.85 · agents\n",
-        encoding="utf-8",
-    )
-    sources = pfsources.parse_brief(str(brief))
-    assert len(sources) == 3
-    assert [s.title for s in sources] == ["Old", "New", "Blog"]
-    # The label token must not change how sources are classified.
-    assert sources[0].pdf_url is None and sources[0].kind == "blog"
-    assert sources[1].pdf_url == "https://arxiv.org/pdf/2601.00002"
-    assert sources[1].kind == "arxiv"
-    assert sources[1].arxiv_id == "2601.00002"
-    assert sources[2].excerpt == ""
-
-
 def test_generate_writes_episode(tmp_path, monkeypatch):
     # 3 items at 0.9 + 20 at the floor. Default target (medium+deep) = 7:
     # top 7 by score above the 0.5 floor -> 3 x 0.9 + 4 x 0.5, no padding.
@@ -451,7 +426,7 @@ def test_generate_writes_episode(tmp_path, monkeypatch):
 # --- audio result ----------------------------------------------------------
 
 def test_audio_result_dataclass():
-    from pipeline import audio
+    from podcast_engine import audio_backend as audio
     r = audio.AudioResult(
         audio_path=pathlib.Path("a.mp3"),
         transcript_path=pathlib.Path("t.md"),
@@ -465,7 +440,7 @@ def test_part_audio_ok_rejects_garbled_oversized_part(tmp_path):
     """The part-audio sanity check accepts duration consistent with the part's
     word count and rejects a part that is many multiples longer — the garbled
     TTS signature seen in production (e.g. part_006: 442s for ~350 words)."""
-    from pipeline import audio
+    from podcast_engine import audio_backend as audio
     from pydub import AudioSegment
 
     # ~20 words with ~2s of audio: well within the word-derived ceiling.
@@ -486,7 +461,7 @@ def test_podcastfy_backend_generate_writes_audio_and_transcript(tmp_path, monkey
     """PodcastfyBackend.generate drives SimplePodcastGenerator (mocked) and
     writes episode.mp3 + transcript.md into the run dir, returning a result
     with transcript_path set so the transcribe stage can skip Whisper."""
-    from pipeline import audio
+    from podcast_engine import audio_backend as audio
 
     # Fake SimplePodcastGenerator that avoids the langchain/openai deps.
     class FakeGenerator:
@@ -494,27 +469,25 @@ def test_podcastfy_backend_generate_writes_audio_and_transcript(tmp_path, monkey
             self.papers_dir = papers_dir
             self.web_dir = web_dir
             self.tts_model = kw.get("tts_model", "tng")
-        def load_brief_and_sources(self, brief_path):
+        def build_combined_content(self, sources, intro_text=""):
             return "=== INTRO ===\n=== END INTRO ==="
         def generate_transcript(self, combined, on_part=None):
             return "<Person1>hello</Person1>\n<Person2>world</Person2>"
         def generate_audio(self, transcript, output_path, temp_audio_dir=None):
             pathlib.Path(output_path).write_bytes(b"FAKE_MP3")
 
-    # Inject a fake pipeline.podcastfy.generator module so the lazy import
+    # Inject a fake podcast_engine.generator module so the lazy import
     # inside PodcastfyBackend.generate picks up FakeGenerator without needing
     # the langchain/openai optional deps installed.
-    fake_mod = types.ModuleType("pipeline.podcastfy.generator")
+    fake_mod = types.ModuleType("podcast_engine.generator")
     fake_mod.SimplePodcastGenerator = FakeGenerator
-    monkeypatch.setitem(sys.modules, "pipeline.podcastfy.generator", fake_mod)
+    monkeypatch.setitem(sys.modules, "podcast_engine.generator", fake_mod)
 
-    brief = tmp_path / "podcast_brief.md"
-    brief.write_text("# AI News Digest")
     chosen = [RankedItem(title="t", url="u", date="d", body="b", source="arxiv",
                          score=0.9)]
 
     result = audio.PodcastfyBackend().generate(
-        brief=brief, run_dir=tmp_path, chosen=chosen,
+        run_dir=tmp_path, chosen=chosen, sources=chosen,
     )
     assert result.backend == "podcastfy"
     assert result.audio_path == tmp_path / "episode.mp3"
@@ -528,10 +501,8 @@ def test_podcastfy_backend_generate_writes_audio_and_transcript(tmp_path, monkey
 # --- transcript cache: fingerprint-gated reuse (fix stale-transcript reuse) --
 
 def test_transcript_fingerprint_stable_and_sensitive(tmp_path):
-    from pipeline import audio
+    from podcast_engine import audio_backend as audio
 
-    brief = tmp_path / "podcast_brief.md"
-    brief.write_text("# AI News Digest\n\n- [A](https://arxiv.org/abs/1)")
     chosen = [
         RankedItem(title="A", url="https://arxiv.org/abs/1", date="d", body="b",
                    source="arxiv", score=0.9),
@@ -539,28 +510,25 @@ def test_transcript_fingerprint_stable_and_sensitive(tmp_path):
                    source="arxiv", score=0.8),
     ]
     cfg = {"per_source_words": 330, "depth_factor": 1.6}
-    fp1 = audio.transcript_fingerprint(brief, chosen, cfg)
+    fp1 = audio.transcript_fingerprint(chosen, cfg, sources=chosen)
     # Deterministic: same inputs -> same fingerprint (url order is sorted).
-    assert fp1 == audio.transcript_fingerprint(brief, list(reversed(chosen)), cfg)
-    # Sensitive: brief change, selection change, or config change all invalidate.
-    brief.write_text("# AI News Digest v2\n\n- [A](https://arxiv.org/abs/1)")
-    assert audio.transcript_fingerprint(brief, chosen, cfg) != fp1
-    brief.write_text("# AI News Digest\n\n- [A](https://arxiv.org/abs/1)")
+    assert fp1 == audio.transcript_fingerprint(list(reversed(chosen)), cfg,
+                                               sources=list(reversed(chosen)))
+    # Sensitive: selection change or config change invalidate.
     other = [chosen[0]]
-    assert audio.transcript_fingerprint(brief, other, cfg) != fp1
-    assert audio.transcript_fingerprint(brief, chosen, {**cfg, "familiar_clause": "x"}) != fp1
+    assert audio.transcript_fingerprint(other, cfg, sources=other) != fp1
+    assert audio.transcript_fingerprint(chosen, {**cfg, "familiar_clause": "x"},
+                                        sources=chosen) != fp1
 
 
 def test_podcastfy_backend_reuses_transcript_on_fingerprint_match(tmp_path, monkeypatch):
     """A cached transcript.md is reused only when its stored fingerprint still
-    matches the current brief/selection/config (fast TTS-retry path)."""
-    from pipeline import audio
+    matches the current selection/config (fast TTS-retry path)."""
+    from podcast_engine import audio_backend as audio
 
     transcript_text = "<Person1>cached content</Person1>"
     (tmp_path / "transcript.md").write_text(transcript_text, encoding="utf-8")
 
-    brief = tmp_path / "podcast_brief.md"
-    brief.write_text("# AI News Digest\n\n- [A](https://arxiv.org/abs/1)")
     chosen = [RankedItem(title="A", url="https://arxiv.org/abs/1", date="d",
                          body="b", source="arxiv", score=0.9)]
     cfg = {"per_source_words": 330, "depth_factor": 1.6}
@@ -570,24 +538,25 @@ def test_podcastfy_backend_reuses_transcript_on_fingerprint_match(tmp_path, monk
             self.papers_dir = papers_dir
             self.web_dir = web_dir
             self.tts_model = kw.get("tts_model", "tng")
-        def load_brief_and_sources(self, brief_path):
+        def build_combined_content(self, sources, intro_text=""):
             raise AssertionError("LLM path must not run for a matching cache")
         def generate_transcript(self, combined, on_part=None):
             raise AssertionError("LLM path must not run for a matching cache")
         def generate_audio(self, transcript, output_path, temp_audio_dir=None):
             pathlib.Path(output_path).write_bytes(b"FAKE_MP3")
 
-    fake_mod = types.ModuleType("pipeline.podcastfy.generator")
+    fake_mod = types.ModuleType("podcast_engine.generator")
     fake_mod.SimplePodcastGenerator = FakeGenerator
-    monkeypatch.setitem(sys.modules, "pipeline.podcastfy.generator", fake_mod)
+    monkeypatch.setitem(sys.modules, "podcast_engine.generator", fake_mod)
 
     # Write the marker matching the current inputs (as a real run would).
     (tmp_path / ".podcastfy-cache").mkdir(parents=True, exist_ok=True)
     (tmp_path / ".podcastfy-cache" / "transcript.fingerprint").write_text(
-        audio.transcript_fingerprint(brief, chosen, cfg), encoding="utf-8")
+        audio.transcript_fingerprint(chosen, cfg, sources=chosen), encoding="utf-8")
 
-    result = audio.PodcastfyBackend().generate(brief=brief, run_dir=tmp_path,
-                                               chosen=chosen, config=cfg)
+    result = audio.PodcastfyBackend().generate(run_dir=tmp_path,
+                                               chosen=chosen, sources=chosen,
+                                               config=cfg)
     assert result.audio_path.exists()
     # Transcript is untouched: the cached one was reused, not regenerated.
     assert result.transcript_path.read_text(encoding="utf-8") == transcript_text
@@ -595,14 +564,12 @@ def test_podcastfy_backend_reuses_transcript_on_fingerprint_match(tmp_path, monk
 
 def test_podcastfy_backend_regenerates_when_transcript_stale(tmp_path, monkeypatch):
     """A transcript.md without (or with a stale) fingerprint is REGENERATED —
-    e.g. a fresh full run on the same date or an edited brief must not reuse
-    audio for the old selection."""
-    from pipeline import audio
+    e.g. a fresh full run on the same date must not reuse audio for the old
+    selection."""
+    from podcast_engine import audio_backend as audio
 
     (tmp_path / "transcript.md").write_text("<Person1>STALE nine-topic transcript</Person1>")
 
-    brief = tmp_path / "podcast_brief.md"
-    brief.write_text("# AI News Digest\n\n- [A](https://arxiv.org/abs/1)")
     chosen = [RankedItem(title="A", url="https://arxiv.org/abs/1", date="d",
                          body="b", source="arxiv", score=0.9)]
     cfg = {"per_source_words": 330, "depth_factor": 1.6}
@@ -614,47 +581,46 @@ def test_podcastfy_backend_regenerates_when_transcript_stale(tmp_path, monkeypat
             self.papers_dir = papers_dir
             self.web_dir = web_dir
             self.tts_model = kw.get("tts_model", "tng")
-        def load_brief_and_sources(self, brief_path):
+        def build_combined_content(self, sources, intro_text=""):
             return "=== INTRO ===\n=== END INTRO ==="
         def generate_transcript(self, combined, on_part=None):
             calls["transcripts"] += 1
             return "<Person1>fresh short transcript</Person1>"
 
-    fake_mod = types.ModuleType("pipeline.podcastfy.generator")
+    fake_mod = types.ModuleType("podcast_engine.generator")
     fake_mod.SimplePodcastGenerator = FakeGenerator
-    monkeypatch.setitem(sys.modules, "pipeline.podcastfy.generator", fake_mod)
+    monkeypatch.setitem(sys.modules, "podcast_engine.generator", fake_mod)
 
-    result = audio.PodcastfyBackend().generate(brief=brief, run_dir=tmp_path,
-                                               chosen=chosen, config=cfg)
+    result = audio.PodcastfyBackend().generate(run_dir=tmp_path,
+                                               chosen=chosen, sources=chosen,
+                                               config=cfg)
     assert calls["transcripts"] == 1
     assert result.transcript_path.read_text(encoding="utf-8") == "<Person1>fresh short transcript</Person1>"
     # And a fingerprint marker is persisted for the next run.
     marker = tmp_path / ".podcastfy-cache" / "transcript.fingerprint"
-    assert marker.read_text(encoding="utf-8") == audio.transcript_fingerprint(brief, chosen, cfg)
+    assert marker.read_text(encoding="utf-8") == audio.transcript_fingerprint(chosen, cfg, sources=chosen)
 
 
 def test_podcastfy_backend_failure_returns_empty_audio(tmp_path, monkeypatch):
-    """On exception, the backend returns an empty audio_path (brief is the
-    guaranteed product) and any partial transcript."""
-    from pipeline import audio
+    """On exception, the backend returns an empty audio_path and any partial
+    transcript."""
+    from podcast_engine import audio_backend as audio
 
     class FakeGenerator:
         def __init__(self, papers_dir=None, web_dir=None, **kw):
             pass
-        def load_brief_and_sources(self, brief_path):
+        def build_combined_content(self, sources, intro_text=""):
             raise RuntimeError("boom")
 
-    fake_mod = types.ModuleType("pipeline.podcastfy.generator")
+    fake_mod = types.ModuleType("podcast_engine.generator")
     fake_mod.SimplePodcastGenerator = FakeGenerator
-    monkeypatch.setitem(sys.modules, "pipeline.podcastfy.generator", fake_mod)
+    monkeypatch.setitem(sys.modules, "podcast_engine.generator", fake_mod)
 
-    brief = tmp_path / "podcast_brief.md"
-    brief.write_text("# AI News Digest")
     chosen = [RankedItem(title="t", url="u", date="d", body="b", source="arxiv",
                          score=0.9)]
 
     result = audio.PodcastfyBackend().generate(
-        brief=brief, run_dir=tmp_path, chosen=chosen,
+        run_dir=tmp_path, chosen=chosen, sources=chosen,
     )
     assert str(result.audio_path) == "."
     assert result.backend == "podcastfy"
@@ -672,17 +638,14 @@ def test_generate_writes_transcript_source_for_podcastfy(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "run_dir", lambda date=None: tmp_path)
     monkeypatch.setattr(generate.store, "run_dir", lambda date=None: tmp_path)
 
-    fake_result = generate.audio_mod.AudioResult(
+    (tmp_path / "transcript.md").write_text("<Person1>hi</Person1>", encoding="utf-8")
+    fake_result = EpisodeResult(
+        run_dir=tmp_path,
         audio_path=tmp_path / "episode.mp3",
         transcript_path=tmp_path / "transcript.md",
         backend="podcastfy",
     )
-    class FakeBackend:
-        name = "podcastfy"
-        def generate(self, brief, run_dir, chosen, transcript_in=None, config=None,
-                     memory_context=None, items=None):
-            return fake_result
-    monkeypatch.setattr(generate.audio_mod, "PodcastfyBackend", lambda: FakeBackend())
+    monkeypatch.setattr(generate, "_generate_podcast", lambda **kw: fake_result)
 
     ep = generate.generate(ranked, make_audio=True)
     assert ep.audio_path == str(tmp_path / "episode.mp3")
@@ -728,25 +691,23 @@ def test_generate_brief_in_skips_selection_and_uses_edited_brief(tmp_path, monke
     monkeypatch.setattr(store, "run_dir", lambda date=None: tmp_path)
     monkeypatch.setattr(generate.store, "run_dir", lambda date=None: tmp_path)
 
-    seen_brief = {}
-    class FakeBackend:
-        name = "podcastfy"
-        def generate(self, brief, run_dir, chosen, transcript_in=None, config=None,
-                     memory_context=None, items=None):
-            seen_brief["path"] = brief
-            seen_brief["chosen"] = list(chosen)
-            return generate.audio_mod.AudioResult(
-                audio_path=tmp_path / "episode.mp3",
-                transcript_path=tmp_path / "transcript.md",
-                backend="podcastfy",
-            )
-    monkeypatch.setattr(generate.audio_mod, "PodcastfyBackend", lambda: FakeBackend())
+    seen_kw = {}
+    (tmp_path / "transcript.md").write_text("<Person1>hi</Person1>", encoding="utf-8")
+    fake_result = EpisodeResult(
+        run_dir=tmp_path,
+        audio_path=tmp_path / "episode.mp3",
+        transcript_path=tmp_path / "transcript.md",
+        backend="podcastfy",
+    )
+    def _fake_gen(**kw):
+        seen_kw.update(kw)
+        return fake_result
+    monkeypatch.setattr(generate, "_generate_podcast", _fake_gen)
 
     # The run-dir brief must NOT pre-exist (so we can prove we don't write it).
     assert not (tmp_path / "podcast_brief.md").exists()
     ep = generate.generate(ranked, make_audio=True, brief_in=str(brief_path))
-    # The audio backend was pointed at the edited brief path (not overwritten).
-    assert seen_brief["path"] == tmp_path / "podcast_brief.md"
+    # The run-dir brief was written with the edited content.
     assert (tmp_path / "podcast_brief.md").read_text() == edited
     # Manifest reconstructed from the brief: only Paper A.
     assert [r.url for r in ep.manifest] == ["https://arxiv.org/abs/2601.00001"]
@@ -761,14 +722,14 @@ def test_generate_no_brief_in_records_auto_selection_source(tmp_path, monkeypatc
     ]
     monkeypatch.setattr(store, "run_dir", lambda date=None: tmp_path)
     monkeypatch.setattr(generate.store, "run_dir", lambda date=None: tmp_path)
-    class FakeBackend:
-        name = "podcastfy"
-        def generate(self, brief, run_dir, chosen, transcript_in=None, config=None,
-                     memory_context=None, items=None):
-            return generate.audio_mod.AudioResult(
-                audio_path=tmp_path / "episode.mp3",
-                transcript_path=tmp_path / "transcript.md", backend="podcastfy")
-    monkeypatch.setattr(generate.audio_mod, "PodcastfyBackend", lambda: FakeBackend())
+    (tmp_path / "transcript.md").write_text("<Person1>hi</Person1>", encoding="utf-8")
+    fake_result = EpisodeResult(
+        run_dir=tmp_path,
+        audio_path=tmp_path / "episode.mp3",
+        transcript_path=tmp_path / "transcript.md",
+        backend="podcastfy",
+    )
+    monkeypatch.setattr(generate, "_generate_podcast", lambda **kw: fake_result)
     generate.generate(ranked, make_audio=True)
     manifest = json.loads((tmp_path / "episode.json").read_text())
     assert manifest["selection_source"] == "auto"
@@ -784,17 +745,17 @@ def test_generate_records_duration_and_words(tmp_path, monkeypatch):
     monkeypatch.setattr(generate.store, "run_dir", lambda date=None: tmp_path)
     monkeypatch.setattr(generate, "_audio_duration_sec", lambda p: 754.5)
 
-    class FakeBackend:
-        name = "podcastfy"
-        def generate(self, brief, run_dir, chosen, transcript_in=None, config=None,
-                     memory_context=None, items=None):
-            (run_dir / "episode.mp3").write_bytes(b"x")
-            (run_dir / "transcript.md").write_text(
-                "<Person1>Hello world</Person1>\n<Person2>How are you today</Person2>\n")
-            return generate.audio_mod.AudioResult(
-                audio_path=run_dir / "episode.mp3",
-                transcript_path=run_dir / "transcript.md", backend="podcastfy")
-    monkeypatch.setattr(generate.audio_mod, "PodcastfyBackend", lambda: FakeBackend())
+    (tmp_path / "episode.mp3").write_bytes(b"x")
+    (tmp_path / "transcript.md").write_text(
+        "<Person1>Hello world</Person1>\n<Person2>How are you today</Person2>\n",
+        encoding="utf-8")
+    fake_result = EpisodeResult(
+        run_dir=tmp_path,
+        audio_path=tmp_path / "episode.mp3",
+        transcript_path=tmp_path / "transcript.md",
+        backend="podcastfy",
+    )
+    monkeypatch.setattr(generate, "_generate_podcast", lambda **kw: fake_result)
 
     generate.generate(ranked, make_audio=True)
     manifest = json.loads((tmp_path / "episode.json").read_text())
@@ -876,7 +837,7 @@ def test_config_budget_table():
         ("long", "brief"): 24,
         ("long", "deep-dive"): 12,
     }
-    targets = {"short": 10.0, "medium": 17.5, "long": 30.0}
+    targets = {"short": 10.0, "medium": 17.6, "long": 30.0}
     for (length, depth), n in expected.items():
         rc = config_mod.RunConfig(length=length, depth=depth)
         b = rc.budget()
@@ -887,14 +848,6 @@ def test_config_budget_table():
         # Deep-dive double-inflation is gone: per-source words only depend on
         # depth, total words only on length.
         assert b["total_words"] == round(config_mod.LENGTH_MINUTES[length] * config_mod.WPM)
-
-
-def test_config_budget_podcastfy_overrides_carries_caps():
-    rc = config_mod.RunConfig(length="medium", depth="deep-dive")
-    o = rc.podcastfy_overrides()
-    assert o["per_source_words"] == 330
-    assert o["intro_words"] + o["recap_words"] == 578
-    assert o["max_num_chunks"] == 7
 
 
 def test_config_budget_clamps_source_count(monkeypatch):
@@ -935,7 +888,7 @@ def test_judge_model_is_fixed_not_env_configurable(monkeypatch):
 
 
 def test_content_trim_enforces_word_cap():
-    from pipeline.podcastfy.content_generator import ContentCleanerMixin
+    from podcast_engine.content_generator import ContentCleanerMixin
     txt = ("<Person1>One two three four. Five six seven eight nine ten.</Person1>\n"
            "<Person2>Hello world. This is a longer turn with several words indeed.</Person2>\n"
            "<Person1>Tail turn three.</Person1>")
@@ -968,7 +921,7 @@ def _dialogue(words: int) -> str:
 
 
 def _generator(chain=None):
-    from pipeline.podcastfy.content_generator import LongFormContentGenerator
+    from podcast_engine.content_generator import LongFormContentGenerator
     return LongFormContentGenerator(chain, None, {
         "max_num_chunks": 4, "per_source_words": 100,
         "intro_words": 40, "recap_words": 40})
@@ -1012,7 +965,7 @@ def test_call_llm_json_requests_json_object_response_format(monkeypatch):
     monkeypatch.setitem(sys.modules, "langchain_core", lr)
     monkeypatch.setitem(sys.modules, "langchain_core.runnables", lr.runnables)
 
-    from pipeline.podcastfy import generator as gen_mod
+    from podcast_engine import generator as gen_mod
 
     captured = {}
 
@@ -1048,7 +1001,7 @@ def test_call_llm_json_requests_json_object_response_format(monkeypatch):
         "podcast_tagline": "t", "output_language": "English", "instruction": "i",
         "context": "c", "input_text": "x", "host1_name": "Brian",
         "host2_name": "Tina", "roles_person1": "AI researcher",
-        "roles_person2": "AI researcher",
+        "roles_person2": "AI researcher", "podcast_topic": "AI research",
     }
     out = gen._call_llm_json(params)
     assert captured["response_format"] == {"type": "json_object"}
@@ -1356,7 +1309,7 @@ def test_generate_writes_memory_artifact(tmp_path, monkeypatch):
 
 
 def test_memory_section_and_ordering():
-    from pipeline.podcastfy.generator import SimplePodcastGenerator
+    from podcast_engine.generator import SimplePodcastGenerator
     gen = object.__new__(SimplePodcastGenerator)
     gen.memory_context = {"agents": ["2026-09-01: prior agent arc"],
                           "post_training": []}
@@ -1395,7 +1348,7 @@ def test_memory_section_and_ordering():
 def test_memory_block_chunking_and_part_cap():
     """The cross-episode MEMORY block is its own chunk with a small word cap
     and the PRIOR-COVERAGE-SYNC instruction — never a full topic part."""
-    from pipeline.podcastfy.content_generator import LongFormContentGenerator
+    from podcast_engine.content_generator import LongFormContentGenerator
     gen = LongFormContentGenerator(None, None, {
         "per_source_words": 300, "intro_words": 120, "recap_words": 180,
         "memory_words": 90, "continuity_reference_enabled": True})

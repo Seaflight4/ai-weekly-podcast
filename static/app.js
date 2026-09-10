@@ -3,11 +3,14 @@
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 let activeDate = null;
-let pollTimer = null;
 let confirmResolve = null;
-// Smooth elapsed clock for the run panel: between polls we advance the
-// displayed elapsed locally so it counts +1s per second instead of jumping in
-// poll-sized steps; each poll re-syncs it to the server's authoritative value.
+// The job id the run panel is currently tracking; null when no panel is open.
+let activeRunId = null;
+// True after the SSE stream's first open; a later open means a reconnect.
+let episodeRefreshConnected = false;
+// Smooth elapsed clock for the run panel: SSE pushes sync the server's
+// authoritative elapsed value, and between pushes we advance the displayed
+// elapsed locally so it counts +1s per second instead of jumping.
 let clockTimer = null;
 let clockSync = { at: 0, elapsed: 0 };
 let lastProgress = null;
@@ -464,43 +467,103 @@ function showToast(message, type = "info") {
   }, 3200);
 }
 
-// --- run panel (live log) ---------------------------------------------------
+// --- run panel (live progress, driven by SSE pushes) ------------------------
 
-async function openRunPanel(job) {
+// openRunPanel renders the panel from a freshly-submitted job; live progress
+// then arrives as ``run_progress`` SSE events and completion as
+// ``run_finished`` — no polling.
+function openRunPanel(job) {
   const panel = $("#run-panel");
   panel.classList.remove("hidden");
+  panel.classList.remove("done", "failed");
+  activeRunId = job.id;
   $("#run-title").textContent = `${job.kind} run ${job.id} — ${job.status}`;
-  renderStages(job, 0);
-  if (pollTimer) clearInterval(pollTimer);
-  const poll = async () => {
-    const res = await fetch(`/api/runs/${job.id}`);
-    if (!res.ok) return;
-    const j = await res.json();
-    $("#run-title").textContent = `${j.kind} run ${j.id} — ${j.status}`;
-    lastProgress = j.progress;
-    clockSync = { at: Date.now(), elapsed: j.progress.elapsed_sec || 0 };
-    renderProgress(j.progress);
-    renderStages(j, j.progress.stage_index);
-    if (j.status === "done" || j.status === "failed") {
-      clearInterval(pollTimer); pollTimer = null;
-      if (clockTimer) { clearInterval(clockTimer); clockTimer = null; }
-      lastProgress = null;
-      renderProgress(j.progress);
-      $("#run-panel").classList.add(j.status === "done" ? "done" : "failed");
-      loadEpisodes();
-      if (j.status === "failed") showRunError(j);
-      if (j.date) selectEpisode(j.date);
-    }
-  };
-  poll();
-  pollTimer = setInterval(poll, 1500);
+  renderStages(job, (job.progress && job.progress.stage_index) || 0);
+  lastProgress = job.progress || null;
+  clockSync = { at: Date.now(), elapsed: (job.progress && job.progress.elapsed_sec) || 0 };
+  renderProgress(job.progress);
   if (!clockTimer) clockTimer = setInterval(tickClock, 500);
+}
+
+// A ``run_progress`` push updates the panel only if it belongs to the job the
+// user is watching (a finished/closed panel is ignored).
+function handleRunProgress(job) {
+  if ($("#run-panel").classList.contains("hidden") || activeRunId !== job.id) return;
+  $("#run-title").textContent = `${job.kind} run ${job.id} — ${job.status}`;
+  lastProgress = job.progress;
+  clockSync = { at: Date.now(), elapsed: (job.progress && job.progress.elapsed_sec) || 0 };
+  renderProgress(job.progress);
+  renderStages(job, job.progress && job.progress.stage_index);
+}
+
+// A ``run_finished`` push is the single completion edge: finalize any open
+// panel for this job, then refresh the episode list (and the open detail if
+// that episode changed). The list refresh happens even with no panel open,
+// so an episode generated from another tab still appears.
+function handleRunFinished(job) {
+  const panelOpen = !$("#run-panel").classList.contains("hidden");
+  if (panelOpen && activeRunId === job.id) {
+    activeRunId = null;
+    if (clockTimer) { clearInterval(clockTimer); clockTimer = null; }
+    lastProgress = null;
+    $("#run-title").textContent = `${job.kind} run ${job.id} — ${job.status}`;
+    renderProgress(job.progress);
+    renderStages(job, job.progress && job.progress.stage_index);
+    $("#run-panel").classList.add(job.status === "done" ? "done" : "failed");
+    if (job.status === "failed") showRunError(job);
+    if (job.date) selectEpisode(job.date);
+  }
+  loadEpisodes();
 }
 
 function tickClock() {
   if (!lastProgress) return;
   const elapsed = clockSync.elapsed + (Date.now() - clockSync.at) / 1000;
   renderProgress(lastProgress, elapsed);
+}
+
+// After an SSE reconnect the panel state may be stale: find the active run in
+// one fetch and re-attach (or surface the finished job if it completed while
+// disconnected).
+async function resyncActiveRun() {
+  if ($("#run-panel").classList.contains("hidden")) return;
+  let jobs;
+  try {
+    const res = await fetch("/api/runs");
+    if (!res.ok) return;
+    jobs = await res.json();
+  } catch (_) { return; }
+  const active = (jobs || []).find((j) => j.status === "queued" || j.status === "running");
+  if (active) { openRunPanel(active); return; }
+  if (activeRunId !== null) {
+    const finished = (jobs || []).find((j) => j.id === activeRunId);
+    if (finished) { handleRunFinished(finished); return; }
+  }
+  $("#run-panel").classList.add("hidden");
+}
+
+// --- SSE stream: push lifecycle, no polling ---------------------------------
+
+function connectEvents() {
+  const sse = new EventSource("/api/events");
+  sse.addEventListener("run_progress", (e) => {
+    try { handleRunProgress(JSON.parse(e.data).job); } catch (_) {}
+  });
+  sse.addEventListener("run_finished", (e) => {
+    try { handleRunFinished(JSON.parse(e.data).job); } catch (_) {}
+  });
+  sse.addEventListener("episodes_changed", () => {
+    loadEpisodes();
+    // Refresh the open detail (brief/transcript) unless mid-personalize.
+    if (activeDate && $("#detail-tabs")) selectEpisode(activeDate);
+  });
+  sse.onopen = () => {
+    // The first open is the initial connect; only later opens are reconnects
+    // that need a catch-up refresh of the episode list.
+    if (episodeRefreshConnected) loadEpisodes();
+    episodeRefreshConnected = true;
+    resyncActiveRun();
+  };
 }
 
 function showRunError(job) {
@@ -540,9 +603,9 @@ function renderProgress(p, elapsedOverride = null) {
 $("#run-close").onclick = () => {
   $("#run-panel").classList.add("hidden");
   $("#run-panel").classList.remove("done", "failed");
-  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
   if (clockTimer) { clearInterval(clockTimer); clockTimer = null; }
   lastProgress = null;
+  activeRunId = null;
 };
 
 // --- modal plumbing ----------------------------------------------------------
@@ -743,9 +806,8 @@ $("#btn-generate-run").onclick = async () => {
 
 loadConfig();
 loadEpisodes();
+connectEvents();
 showEmptyState();
-// refresh episode list periodically; manual runs appear here too.
-setInterval(loadEpisodes, 10000);
 
 // topic filter on history: re-render locally as the user types.
 let topicFilterTimer = null;

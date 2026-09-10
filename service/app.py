@@ -10,16 +10,49 @@ from __future__ import annotations
 import pathlib
 
 from fastapi import FastAPI, HTTPException, Body
-from fastapi.responses import FileResponse, PlainTextResponse, JSONResponse
+from fastapi.responses import (
+    FileResponse,
+    PlainTextResponse,
+    JSONResponse,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 
 from pipeline import config as config_mod
 
-from . import episodes, jobs, podcast_config
+from . import episodes, events, jobs, podcast_config
 
 STATIC_DIR = pathlib.Path(__file__).resolve().parent.parent / "static"
 
 app = FastAPI(title="AI Weekly Podcast")
+
+
+# --- server-sent events: push, so the frontend never polls -------------------
+
+@app.get("/api/events")
+async def sse_events():
+    """Long-lived Server-Sent Events stream. Pushes ``run_progress`` every
+    second while a run is active, ``run_finished`` when one completes, and
+    ``episodes_changed`` when an episode is deleted. The browser opens one
+    connection (EventSource) and re-renders only on these events."""
+    q = events.subscribe()
+
+    async def gen():
+        try:
+            async for frame in events.frames(q):
+                yield frame
+        finally:
+            events.unsubscribe(q)
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # --- episodes ---------------------------------------------------------------
@@ -73,6 +106,7 @@ def delete_episode(date: str):
         raise HTTPException(400, str(e))
     if not removed:
         raise HTTPException(404, f"no episode for {date}")
+    events.broadcast({"type": "episodes_changed"})
     return {"deleted": date}
 
 

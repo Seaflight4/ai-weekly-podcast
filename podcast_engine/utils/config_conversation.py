@@ -12,11 +12,11 @@ import yaml
 
 
 DEFAULT_CONVERSATION_CONFIG: Dict[str, Any] = {
-    "podcast_name": "AI News Weekly",
-    "podcast_tagline": "Latest AI research and news",
+    "podcast_name": "Podcast",
+    "podcast_tagline": "",
     "conversation_style": ["informative", "engaging"],
-    "roles_person1": "AI researcher",
-    "roles_person2": "AI researcher",
+    "roles_person1": "co-host",
+    "roles_person2": "co-host",
     "dialogue_structure": ["conversation", "exchange"],
     "output_language": "English",
     "engagement_techniques": ["examples", "analogies"],

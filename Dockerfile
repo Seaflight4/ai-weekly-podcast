@@ -16,6 +16,8 @@ RUN pip install -r requirements.txt && rm -rf /root/.cache/pip
 # 2) Copy source AFTER deps; editable install with --no-deps is fast (~secs).
 COPY pyproject.toml README.md ./
 COPY pipeline ./pipeline
+COPY podcast_engine ./podcast_engine
+COPY mcp_server ./mcp_server
 COPY service ./service
 COPY static ./static
 

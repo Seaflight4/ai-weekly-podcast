@@ -1,9 +1,8 @@
 """Long-form podcast generator (vendored from podcastfy-long).
 
-Parses a ``podcast_brief.md`` (the format emitted by ``pipeline.generate``),
-fetches full arXiv PDFs and Hacker-News/web pages, generates a two-host
-transcript via an OpenAI-compatible LLM, and synthesizes voice-cloned audio
-via the TNG qwen3 TTS service.
+Fetches full arXiv PDFs and web pages, generates a two-host transcript via
+an OpenAI-compatible LLM, and synthesizes voice-cloned audio via the TNG
+qwen3 TTS service.
 
 The entry point is :class:`SimplePodcastGenerator`.
 """
@@ -21,12 +20,20 @@ import pymupdf
 
 from .content_generator import LLMBackend, LongFormContentStrategy
 from .text_to_speech import TextToSpeech
-from .sources import parse_brief, download_arxiv_pdfs, fetch_web_content
+from .sources import download_arxiv_pdfs, fetch_web_content
 
 logger = logging.getLogger(__name__)
 
 SKAINET_BASE = "https://chat.model.tngtech.com/v1"
 DEFAULT_MODEL = "deepseek-ai/DeepSeek-V4-Flash-0731"
+
+# Hard cap on how much of a fetched blog/web page is fed to the transcript
+# LLM per part, regardless of depth. A deep-dive blog can exceed 35 KB, and
+# re-processing that much input per part is the dominant transcript cost
+# (measured ~17 min for a 7-blog episode). The head + a short tail is enough
+# for a ~330-word topic discussion and cuts per-part input ~3x.
+MAX_WEB_CHARS = 12000
+MAX_WEB_TAIL_CHARS = 1500
 
 
 # Self-contained long-form podcast prompt (modelled on the souzatharsis
@@ -36,7 +43,7 @@ DEFAULT_MODEL = "deepseek-ai/DeepSeek-V4-Flash-0731"
 # reasoning/thinking that DeepSeek otherwise leaks into its content. The model
 # returns JSON {"dialogue": [{"speaker": "1"|"2", "text": "..."}, ...]} which we
 # parse back into <PersonN>...</PersonN> tagged lines.
-LONGFORM_PROMPT = """You are producing a part of a two-host podcast that gives a high-level overview of recent AI research and industry news.
+LONGFORM_PROMPT = """You are producing a part of a two-host podcast about {podcast_topic}.
 
 Audience: {audience}
 
@@ -47,7 +54,7 @@ Language: {output_language}
 Roles: {host1_name} — {roles_person1} (Person1) and {host2_name} — {roles_person2} (Person2). Hosts introduce themselves by name and address each other by name; never refer to yourselves as "Person 1" or "Person 2".
 
 SPEAKER DYNAMIC:
-- Two knowledgeable AI researchers co-hosting. They take turns leading topics and react to each other naturally. Genuine curiosity, surprise, or occasional skepticism when a claim truly warrants it.
+- Two knowledgeable co-hosts exploring the topic together. They take turns leading topics and react to each other naturally. Genuine curiosity, surprise, or occasional skepticism when a claim truly warrants it.
 - No one is the designated skeptic. The goal is a clear, big-picture explanation the listener can follow, not a debate. Pushback happens only when genuinely warranted by the content, never as a structural rule.
 - Both hosts can teach as well as ask. Alternate who LEADS each topic so the conversation has natural variety.
 
@@ -271,6 +278,13 @@ class SimplePodcastGenerator:
         familiar_clause: str = "none",
         memory_context: Optional[dict] = None,
         items: Optional[list] = None,
+        podcast_topic: str = "the provided sources",
+        podcast_name: str = "Podcast",
+        podcast_tagline: str = "",
+        host1_name: str = "Brian",
+        host2_name: str = "Tina",
+        roles_person1: str = "co-host",
+        roles_person2: str = "co-host",
     ):
         """
         Minimal setup: LLM + strategy + TTS.
@@ -342,7 +356,11 @@ class SimplePodcastGenerator:
             self._raw_client = OpenAI(
                 api_key=os.environ.get(api_key_label),
                 base_url=os.environ.get(api_base_label) or SKAINET_BASE,
-                timeout=120,
+                # Big-context part calls (deep-dive blog sources) can run >120s;
+                # a too-tight timeout kills them mid-generation and forces a
+                # full retry (each wasted attempt ~= the timeout). 300s leaves
+                # headroom for the largest parts.
+                timeout=300,
                 max_retries=2,
             )
 
@@ -351,6 +369,7 @@ class SimplePodcastGenerator:
         self.depth_factor = depth_factor
         self.audience_prompt = audience_prompt
         self.familiar_clause = familiar_clause
+        self.podcast_topic = podcast_topic
         # Output word budget (derived by RunConfig.budget). These cap each
         # part's transcript length so the finished episode conforms to the
         # requested length; they do NOT scale with depth_factor.
@@ -359,13 +378,13 @@ class SimplePodcastGenerator:
         self.recap_words = recap_words or 280
         self.memory_words = memory_words or 90
         self.config_conversation = {
-            "podcast_name": "AI News Weekly",
-            "podcast_tagline": "Latest AI research and news",
+            "podcast_name": podcast_name,
+            "podcast_tagline": podcast_tagline,
             "conversation_style": ["informative", "engaging", "punchy"],
-            "host1_name": "Brian",
-            "host2_name": "Tina",
-            "roles_person1": "AI researcher",
-            "roles_person2": "AI researcher",
+            "host1_name": host1_name,
+            "host2_name": host2_name,
+            "roles_person1": roles_person1,
+            "roles_person2": roles_person2,
             "dialogue_structure": ["conversation", "exchange"],
             "output_language": "English",
             "engagement_techniques": ["analogies", "examples", "specific numbers"],
@@ -379,9 +398,12 @@ class SimplePodcastGenerator:
             "memory_words": self.memory_words,
             # Per-source input context scales with depth: brief feeds less so
             # the LLM stays concise, deep-dive feeds more so it can go deeper.
+            # Web (blog) text is capped hard: a blog page can be 35KB+ under
+            # deep-dive, and re-reading that per part is the dominant transcript
+            # cost; the head + a short tail is enough for a 330-word discussion.
             "per_paper_chars": round(10000 * depth_factor),      # abstract + intro per paper
             "per_paper_tail_chars": round(3000 * depth_factor),  # conclusion tail per paper
-            "per_web_chars": round(22000 * depth_factor),        # full text fetched for blog sources
+            "per_web_chars": min(round(22000 * depth_factor), MAX_WEB_CHARS),  # blog full text
             "depth_factor": depth_factor,
             # The mid/recap part instructions gain the grounded continuity
             # reference rules whenever cross-episode memory is available
@@ -474,12 +496,12 @@ class SimplePodcastGenerator:
 
         # Prepare parameters
         audience = (self.audience_prompt or (
-            "AI researchers at a leading software consulting firm. They know ML "
-            "fundamentals (RL, transformers, MoE, quantization, diffusion, "
-            "autoregressive decoding, tokenization). Explain ONLY what is novel "
-            "to each item. Do not define basics they already know."
+            "a general audience interested in the topic. Define specialized "
+            "terms where helpful and keep explanations concrete and "
+            "self-contained."
         ))
         prompt_params = {
+            "podcast_topic": self.podcast_topic,
             "roles_person1": self.config_conversation["roles_person1"],
             "roles_person2": self.config_conversation["roles_person2"],
             "host1_name": self.config_conversation["host1_name"],
@@ -523,45 +545,6 @@ class SimplePodcastGenerator:
         tts.convert_to_speech(transcript, output_path)
         print(f"[podcastfy] audio saved to {output_path}")
 
-    def load_markdown_and_pdfs(self, markdown_path: str, pdf_paths: List[str]) -> str:
-        """
-        Load markdown file and extract text from PDF papers.
-        Concatenate all into single input for transcript generation.
-
-        Args:
-            markdown_path: Path to podcast_brief.md
-            pdf_paths: List of paths to arXiv PDF files
-
-        Returns:
-            Combined text content
-        """
-        # Load markdown
-        with open(markdown_path, "r") as f:
-            combined_content = f.read()
-
-        # Extract and append PDF content
-        pdf_extractor = SimplePDFExtractor()
-        per_paper_chars = self.config_conversation.get("per_paper_chars", 20000)
-        tail_chars = self.config_conversation.get("per_paper_tail_chars", 5000)
-        for pdf_path in pdf_paths:
-            print(f"[podcastfy] extracting {os.path.basename(pdf_path)}...")
-            try:
-                pdf_text = pdf_extractor.extract_text(pdf_path)
-                # Collapse whitespace so the dense PDF text is readable.
-                pdf_text = " ".join(pdf_text.split())
-                # Overview input: abstract+intro (head) and conclusion (tail).
-                body = pdf_text[:per_paper_chars]
-                if len(pdf_text) > per_paper_chars:
-                    body += "\n\n[EXCERPT END]\n\n" + pdf_text[-tail_chars:]
-                combined_content += (
-                    f"\n\n=== PAPER: {os.path.basename(pdf_path)} ===\n\n{body}"
-                )
-            except Exception as e:
-                logger.warning(f"Skipping {pdf_path}: {e}")
-
-        return combined_content
-
-
     # Thematic ordering of topics for narrative flow. Maps source titles
     # (substring match) to their position in the podcast. Grouped into 3 themes:
     #   Model architectures -> Agent frameworks -> Industry & security
@@ -581,30 +564,18 @@ class SimplePodcastGenerator:
         "Every Model Cheats",
     ]
 
-    def load_brief_and_sources(self, brief_path: str = "source/podcast_brief.md") -> str:
+    def build_combined_content(self, sources: list, intro_text: str = "") -> str:
         """
-        Parse a podcast brief, auto-download referenced arXiv PDFs, and
-        assemble topic-delimited blocks for transcript generation.
-
-        Produces a sequence of === TOPIC: <title> === blocks (one per source,
-        in thematic order), bracketed by === INTRO === and === RECAP === blocks.
-        The topic-aware chunker in content_generator.py splits on these markers
-        so each LLM call handles one coherent topic.
-
-        Args:
-            brief_path: Path to the podcast brief markdown file.
-
-        Returns:
-            Combined text content for the LLM.
+        Fetch full source content and assemble topic-delimited blocks for
+        transcript generation from a list of structured :class:`Source`
+        objects. Callers pass sources directly; the engine has no dependency
+        on any brief markdown format.
         """
-        # Read the brief for the intro block (title + description).
-        with open(brief_path, "r") as f:
-            brief_text = f.read()
-
-        # Parse sources and download arXiv PDFs.
-        sources = parse_brief(brief_path)
         arxiv_sources = [s for s in sources if s.kind == "arxiv"]
-        print(f"[podcastfy] {len(sources)} sources ({len(arxiv_sources)} arXiv, {len(sources) - len(arxiv_sources)} blog)")
+        pdf_sources = [s for s in sources if s.kind == "pdf"]
+        blog_sources = [s for s in sources if s.kind == "blog"]
+        print(f"[podcastfy] {len(sources)} sources "
+              f"({len(arxiv_sources)} arXiv, {len(pdf_sources)} pdf, {len(blog_sources)} blog)")
 
         pdf_paths = download_arxiv_pdfs(sources, target_dir=self.papers_dir)
         print(f"[podcastfy] {len(pdf_paths)} arXiv PDF(s) available")
@@ -621,10 +592,11 @@ class SimplePodcastGenerator:
         ordered = self._order_sources_thematically(sources)
 
         # Build the combined content as topic-delimited blocks.
-        # INTRO block: brief title + description (for the opening overview).
-        intro_lines = brief_text.strip().split("\n")[:3]
+        # INTRO block: intro text (for the opening overview).
+        intro_lines = intro_text.strip().split("\n")[:3] if intro_text.strip() else []
         combined_content = "=== INTRO ===\n"
-        combined_content += "\n".join(intro_lines)
+        if intro_lines:
+            combined_content += "\n".join(intro_lines)
         combined_content += "\n=== END INTRO ===\n"
 
         # MEMORY block: prior-episode summaries for topics this episode covers
@@ -647,7 +619,8 @@ class SimplePodcastGenerator:
             # already drops empty-body items, so this only fires for hand-
             # edited briefs that keep a bare bullet with no excerpt.
             has_full = ((src.kind == "arxiv" and src.arxiv_id and src.arxiv_id in pdf_by_id)
-                        or (src.kind == "blog" and src.url in web_by_url))
+                        or (src.kind == "blog" and src.url in web_by_url)
+                        or (src.kind == "pdf" and src.local_path))
             if not src.excerpt.strip() and not has_full:
                 print(f"[podcastfy] no content for topic, dropping: {src.title} ({src.url})")
                 continue
@@ -669,12 +642,24 @@ class SimplePodcastGenerator:
                     combined_content += f"\nFULL PAPER TEXT:\n{body}\n"
                 except Exception as e:
                     logger.warning(f"Skipping {pdf_path}: {e}")
+            elif src.kind == "pdf" and src.local_path:
+                # A user-provided PDF already on disk (no download/fetch).
+                print(f"[podcastfy] extracting {os.path.basename(src.local_path)}...")
+                try:
+                    pdf_text = pdf_extractor.extract_text(src.local_path)
+                    pdf_text = " ".join(pdf_text.split())
+                    body = pdf_text[:per_paper_chars]
+                    if len(pdf_text) > per_paper_chars:
+                        body += "\n\n[EXCERPT END]\n\n" + pdf_text[-tail_chars:]
+                    combined_content += f"\nFULL PAPER TEXT:\n{body}\n"
+                except Exception as e:
+                    logger.warning(f"Skipping {src.local_path}: {e}")
             elif src.kind == "blog" and src.url in web_by_url:
                 # Blog source: append the fetched full main-article text.
                 web_text = web_by_url[src.url]
                 body = web_text[:per_web_chars]
                 if len(web_text) > per_web_chars:
-                    body += "\n\n[EXCERPT END]\n\n" + web_text[-2000:]
+                    body += "\n\n[EXCERPT END]\n\n" + web_text[-MAX_WEB_TAIL_CHARS:]
                 combined_content += f"\nFULL PAGE TEXT:\n{body}\n"
 
             combined_content += "=== END TOPIC ===\n"
@@ -696,9 +681,12 @@ class SimplePodcastGenerator:
         lines = ["=== MEMORY: PRIOR EPISODES ===",
                  "Prior coverage from earlier episodes, matched by topic label. "
                  "This is the COMPLETE set of prior coverage you may reference. "
-                 "Reference a listed item only when this episode genuinely "
-                 "continues it (new development / successor / repeated pattern). "
-                 "Never invent prior coverage not listed here."]
+                 "Reference a listed item ONLY when this episode's story "
+                 "directly continues it — a new development or successor release "
+                 "of the same product, model, paper, or news thread. A listed "
+                 "prior item that merely shares the same broad topic/theme but "
+                 "is a different story is NOT a continuation and must NOT be "
+                 "referenced. Never invent prior coverage not listed here."]
         for topic in sorted(self.memory_context):
             entries = self.memory_context[topic]
             if not entries:

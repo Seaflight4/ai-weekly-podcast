@@ -79,7 +79,7 @@ class LLMBackend:
                 api_key=os.environ.get(api_key_label),
                 base_url=base_url,
                 max_tokens=max_output_tokens,
-                timeout=120,
+                timeout=300,
                 max_retries=2,
                 # DeepSeek honours response_format=json_object, which suppresses
                 # the "thinking"/reasoning that otherwise leaks into content.
@@ -192,8 +192,8 @@ class LongFormContentGenerator:
         Split content on === INTRO ===, === TOPIC: ... ===, and === RECAP ===
         markers. Each block becomes one chunk. Blocks are returned in order.
 
-        Also handles === PAPER: ... === markers for backward compatibility with
-        load_markdown_and_pdfs (each === PAPER === block = one chunk).
+        Also handles === PAPER: ... === markers for backward compatibility
+        (each === PAPER === block = one chunk).
         """
         import re as _re
 
@@ -284,23 +284,32 @@ class LongFormContentGenerator:
                                  and self.config_conversation.get(
                                      "continuity_reference_enabled"))
         CONTRAST_CONTINUITY_INTRO = (
-            "CONTINUITY: this episode continues threads covered in prior episodes "
-            "listed in the MEMORY section of the input. When a theme or story "
-            "genuinely picks up a prior item (a new development, a successor, or "
-            "a repeated pattern), you may acknowledge the follow-up naturally "
-            "('We covered X earlier... and this week...') once, briefly. Only "
-            "reference prior coverage that is actually listed; never invent an "
-            "'as we discussed last episode' for something not in the input."
+            "CONTINUITY: this episode may continue stories covered in prior "
+            "episodes listed in the MEMORY section of the input. Only when the "
+            "SAME story directly continues — the exact product, model, paper, "
+            "or news thread gaining a new development or successor release "
+            "(e.g. the promised follow-up landing) — may you acknowledge the "
+            "follow-up naturally ('We covered X earlier... and this week...') "
+            "once, briefly. A listed prior item that merely shares the same "
+            "broad topic/theme is NOT a continuation and must NOT be "
+            "referenced. Only reference prior coverage that is actually "
+            "listed; never invent an 'as we discussed last episode' for "
+            "something not in the input."
         ) if enable_continuity else ""
         CONTRAST_CONTINUITY_MID = (
             "CONTINUITY: this episode may build on earlier episodes. The INPUT "
-            "may contain a MEMORY section listing the COMPLETE set of prior "
-            "coverage for this topic. You may reference a listed prior item "
-            "only when this topic genuinely continues, succeeds, or echoes it "
-            "(a new development, a successor release, a repeated pattern) — "
-            "then reference it naturally once, e.g. 'Earlier we covered X... "
-            "and this week...', and lead with what is NEW. You may also refer "
-            "back, in one line, to a topic already covered in THIS episode "
+            "may contain a MEMORY section listing prior coverage for this "
+            "topic. You may reference a listed prior item ONLY when this exact "
+            "story directly continues it — the same product, model, paper, or "
+            "news thread gaining a new development or successor release (the "
+            "promised follow-up landing, a new version, a follow-up result). "
+            "Then reference it naturally once, e.g. 'Earlier we covered X... "
+            "and this week...', and lead with what is NEW. A listed prior "
+            "item that merely concerns the same broad topic/theme but a "
+            "DIFFERENT story is NOT a continuation and must NOT be referenced "
+            "; discuss that item standalone. "
+            "You may also refer back, in one line, to a topic already covered "
+            "in THIS episode "
             "('as we just heard with Y...') when it is genuinely related. "
             "You may ONLY reference items listed in a MEMORY section or already "
             "covered in this episode. Never invent prior coverage; a topic with "
@@ -454,9 +463,11 @@ class LongFormContentGenerator:
             else:
                 chat_context = chat_context + response
             # Cap the context window so very long podcasts do not exceed the LLM
-            # context limit: keep at most the last ~60k chars of prior dialogue.
-            if len(chat_context) > 60000:
-                chat_context = chat_context[-60000:]
+            # context limit and so later parts don't re-process the whole prior
+            # dialogue: keep at most the last ~30k chars of prior dialogue (each
+            # part mainly needs the immediately previous topic's transition).
+            if len(chat_context) > 30000:
+                chat_context = chat_context[-30000:]
             print(f"Generated part {i+1}/{num_parts}: Size {len(chunk)} characters.")
             #print(f"[LLM-START] Step: {i+1} ##############################")
             #print(response)

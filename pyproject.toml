@@ -31,19 +31,24 @@ serve = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.27",
 ]
+mcp = [
+    "mcp>=2.0",
+]
 
 [project.scripts]
 ai-podcast = "pipeline.__main__:main"
+podcast-mcp = "mcp_server.server:main"
 
 [tool.setuptools]
 packages = [
     "pipeline",
-    "pipeline.podcastfy",
-    "pipeline.podcastfy.tts",
-    "pipeline.podcastfy.tts.providers",
-    "pipeline.podcastfy.utils",
+    "podcast_engine",
+    "podcast_engine.tts",
+    "podcast_engine.tts.providers",
+    "podcast_engine.utils",
+    "mcp_server",
     "service",
 ]
 
 [tool.setuptools.package-data]
-"pipeline.podcastfy" = ["config.yaml", "reference/*.wav"]
+"podcast_engine" = ["config.yaml", "reference/*.wav"]

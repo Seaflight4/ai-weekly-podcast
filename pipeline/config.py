@@ -16,6 +16,16 @@ import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from podcast_engine.engine import (
+    WPM,
+    LENGTH_MINUTES,
+    DEPTH_MINUTES,
+    DEPTH_FACTOR,
+    INTRO_RECAP_FRACTION,
+    INTRO_SHARE,
+    MEMORY_WORDS,
+)
+
 # --- option vocabularies ----------------------------------------------------
 
 PODCAST_LENGTH_CHOICES = ("short", "medium", "long")
@@ -23,31 +33,9 @@ TOPIC_DEPTH_CHOICES = ("brief", "deep-dive")
 AUDIENCE_CHOICES = ("researcher", "intermediate", "beginner")
 
 # Target duration (minutes) for each podcast-length option.
-LENGTH_MINUTES = {"short": 10.0, "medium": 17.5, "long": 30.0}
-
-# Target duration (minutes) per source for each depth option. This is the
-# source-count driver: depth = how long each topic is given, length = how
-# many topics fit (see RunConfig.budget).
-DEPTH_MINUTES = {"brief": 1.0, "deep-dive": 2.0}
-
-# Input reference fetch scale per depth — controls how much source text the
-# LLM sees (per_paper_chars etc.). It does NOT scale the output word budget;
-# duration is derived separately (WPM * length).
-DEPTH_FACTOR = {"brief": 0.8, "deep-dive": 1.6}
-
-# Spoken words-per-minute used to convert length presets into a total word
-# budget. Fixed (measured deep-dive output runs ~165-190 wpm, so 165 gives a
-# small safety margin).
-WPM = 165.0
-
-# Intro + recap together take this fraction of the total length; the rest is
-# split evenly across sources.
-INTRO_RECAP_FRACTION = 0.20
-# Within the intro/recap slice, the intro gets this share (recap = 1 - share).
-INTRO_SHARE = 0.40
-# Word cap for the cross-episode MEMORY part: a brief "prior coverage sync"
-# that connects the episode to prior coverage without becoming a topic.
-MEMORY_WORDS = 90
+# LENGTH_MINUTES, WPM, DEPTH_MINUTES, DEPTH_FACTOR, INTRO_RECAP_FRACTION,
+# INTRO_SHARE, and MEMORY_WORDS are imported from podcast_engine.engine —
+# the single source of truth shared by both the pipeline and the MCP server.
 
 MIN_SOURCES = 4
 MAX_SOURCES = 30
@@ -175,25 +163,6 @@ class RunConfig:
         b = self.budget()
         return (LENGTH_MINUTES[self.length] * INTRO_RECAP_FRACTION
                 + b["num_sources"] * DEPTH_MINUTES[self.depth])
-
-    def podcastfy_overrides(self) -> dict:
-        """Knobs threaded into the vendored podcastfy transcript generator.
-
-        ``depth_factor`` + ``max_num_chunks`` scale how much source text the
-        LLM sees; the word-budget keys set each part's output cap (so the
-        transcript conforms to the length preset).
-        """
-        b = self.budget()
-        return {
-            "depth_factor": self.depth_factor(),
-            "max_num_chunks": b["num_sources"],
-            "per_source_words": b["per_source_words"],
-            "intro_words": b["intro_words"],
-            "recap_words": b["recap_words"],
-            "memory_words": MEMORY_WORDS,
-            "audience_prompt": self.audience_prompt(),
-            "familiar_clause": self.familiar_clause(),
-        }
 
     # ------------------------------------------------------------- persistence
 

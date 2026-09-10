@@ -12,8 +12,10 @@ Design (see the project README / plan):
   current window-end, matched to the current items' topic labels, and hands it
   to the audio backend. The backend injects a ``=== MEMORY ===`` block into
   the transcript-generation input, and the part instructions let a part
-  reference a listed prior item only when there is a real continuation
-  (direct, successor, or thematic echo) — never a fabricated "last episode".
+  reference a listed prior item only when there is a direct continuation
+  (the same product/model/paper/thread getting a new development or successor
+  release; never a same-topic-but-different-story bridge, never a fabricated
+  "last episode").
 
 Deleting an episode deletes its folder and therefore its memory; the filesystem
 remains the single source of truth (see ``pipeline/store.py``).

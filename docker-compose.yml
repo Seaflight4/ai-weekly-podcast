@@ -16,3 +16,17 @@ services:
       # Optional override (default shown). Model choices are pinned in code.
       LLM_API_BASE: ${LLM_API_BASE:-https://chat.model.tngtech.com/v1}
     restart: unless-stopped
+
+  podcast-mcp:
+    build: .
+    command: python -m mcp_server
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./data:/app/data
+    environment:
+      SKAINET_API_KEY: ${SKAINET_API_KEY}
+      LLM_API_BASE: ${LLM_API_BASE:-https://chat.model.tngtech.com/v1}
+      MCP_PORT: "8001"
+      MCP_HOST: "0.0.0.0"
+    restart: unless-stopped

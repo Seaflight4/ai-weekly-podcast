@@ -31,8 +31,14 @@ import threading
 import time
 import uuid
 
+from . import events
+
 LOG_DIR = pathlib.Path("data/.jobs")
 LOG_TAIL_LINES = 200
+
+# Cadence of the live progress pushes sent over the SSE stream while a job is
+# running (replaces the old 1.5s browser poll).
+PROGRESS_INTERVAL = 1.0
 
 # Default per-stage duration estimates (seconds), 1-indexed. Jobs get
 # config-scaled estimates via estimate_stages() at submit time (based on
@@ -148,6 +154,12 @@ _active: Job | None = None
 _recent: list[Job] = []
 _recent_lock = threading.Lock()
 
+# Live progress push: one daemon ticker per active job, broadcasting
+# ``run_progress`` over SSE at PROGRESS_INTERVAL. Self-stops when the job moves
+# out of running/queued (its ``run_finished`` broadcast is the completion edge).
+_ticker_lock = threading.Lock()
+_ticker: threading.Thread | None = None
+
 
 def active_job() -> Job | None:
     return _active
@@ -156,6 +168,27 @@ def active_job() -> Job | None:
 def list_jobs(limit: int = 20) -> list[dict]:
     with _recent_lock:
         return [j.to_dict() for j in _recent[:limit]]
+
+
+def _start_ticker() -> None:
+    global _ticker
+    with _ticker_lock:
+        if _ticker is not None and _ticker.is_alive():
+            return
+        _ticker = threading.Thread(target=_ticker_loop, daemon=True)
+        _ticker.start()
+
+
+def _ticker_loop() -> None:
+    while True:
+        time.sleep(PROGRESS_INTERVAL)
+        job = _active
+        if job is None or job.status in ("done", "failed"):
+            return
+        try:
+            events.broadcast({"type": "run_progress", "job": job.to_dict()})
+        except Exception:
+            pass
 
 
 def submit(kind: str, cmd: list[str], date: str | None = None,
@@ -180,6 +213,7 @@ def submit(kind: str, cmd: list[str], date: str | None = None,
         job.started_at = _now()
         job._thread = threading.Thread(target=_run, args=(job,), daemon=True)
         job._thread.start()
+        _start_ticker()
         return job, ""
     finally:
         _lock.release()
@@ -233,6 +267,12 @@ def _run(job: Job) -> None:
         with _recent_lock:
             _recent.insert(0, job)
             del _recent[50:]
+        try:
+            # Completion edge: browsers refresh the episode list / detail from
+            # this single push instead of polling.
+            events.broadcast({"type": "run_finished", "job": job.to_dict()})
+        except Exception:
+            pass
 
 
 def _now() -> str:
