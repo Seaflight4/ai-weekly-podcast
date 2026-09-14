@@ -1,6 +1,11 @@
-# Build context exclusions — keep the image lean.
-.venv/
+# Root .dockerignore — governs BOTH app images, whose build context is the
+# repo root (see mcp-app/Dockerfile and pipeline-app/Dockerfile:
+# `docker build -f <app>/Dockerfile .`). Each Dockerfile only COPYs what it
+# needs; these rules just keep the uploaded context lean.
+
+# VCS + caches
 .git/
+.venv/
 __pycache__/
 *.pyc
 *.egg-info/
@@ -8,7 +13,7 @@ __pycache__/
 .ruff_cache/
 .mypy_cache/
 
-# Tests + teaching workspace aren't needed in the runtime image.
+# Not needed in any runtime image
 tests/
 docs/
 .scratch/
@@ -18,8 +23,12 @@ AGENTS.md
 MISSION.md
 NOTES.md
 RESOURCES.md
+package-lock.json
 
-# Runtime state lives in the mounted data volume, not the image.
-# Exclude the entire data/ dir from build context (mp3s, caches, jobs).
+# Runtime state lives in the mounted ../data volume, never in an image.
 data/
 output/
+
+# Secrets
+.env
+*.log

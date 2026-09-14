@@ -1,5 +1,5 @@
 # Runtime dependencies for the podcast pipeline + serve extras.
-# Keep in sync with pyproject.toml [project.dependencies] + [serve] extra.
+# The shared podcast_engine lives at ../podcast_engine (editable-installed).
 # Regenerate with: pip-compile pyproject.toml --extra serve --output-file requirements.txt
 openai>=1.0.0
 trafilatura>=2.2.0

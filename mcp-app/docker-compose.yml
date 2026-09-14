@@ -1,0 +1,21 @@
+services:
+  podcast-mcp:
+    build:
+      context: ..
+      dockerfile: mcp-app/Dockerfile
+    # Runs as root (image default) so the ./data bind mount is writable on
+    # every machine without setup.
+    command: python -m mcp_server
+    ports:
+      - "8001:8001"
+    volumes:
+      - ../data:/app/data
+    environment:
+      # Required: the LLM/TTS gateway key both the engine's transcript LLM and
+      # the TNG qwen3 TTS backend share.
+      SKAINET_API_KEY: ${SKAINET_API_KEY}
+      # Optional override (default shown). Model choices are pinned in code.
+      LLM_API_BASE: ${LLM_API_BASE:-https://chat.model.tngtech.com/v1}
+      MCP_PORT: "8001"
+      MCP_HOST: "0.0.0.0"
+    restart: unless-stopped

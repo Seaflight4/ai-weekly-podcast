@@ -6,7 +6,10 @@ import json, pathlib, sys, types, base64
 
 import pytest
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+_FILE = pathlib.Path(__file__).resolve()
+# Shared engine lives under podcast-engine/ at the repo root (parents[1]).
+sys.path.insert(0, str(_FILE.parents[1]))
+sys.path.insert(0, str(_FILE.parents[1] / "podcast-engine"))
 
 from podcast_engine import Source, EngineConfig, EpisodeResult
 from podcast_engine import engine as engine_mod

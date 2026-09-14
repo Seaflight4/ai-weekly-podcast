@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "podcast-mcp"
+version = "0.1.0"
+description = "MCP server exposing the podcast generation tool (podcast_generate_podcast)."
+requires-python = ">=3.11"
+license = { text = "MIT" }
+
+# Runtime dependencies are pinned in requirements.txt and installed before the
+# editable install (see Dockerfile: pip install -r requirements.txt first).
+# The shared podcast_engine library is editable-installed separately.
+
+[project.optional-dependencies]
+test = ["pytest>=8.0.0"]
+
+[project.scripts]
+podcast-mcp = "mcp_server.server:main"
+
+[tool.setuptools]
+packages = [
+    "mcp_server",
+]

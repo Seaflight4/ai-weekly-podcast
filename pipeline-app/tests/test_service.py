@@ -7,7 +7,12 @@ import asyncio, json, pathlib, queue, sys
 
 import pytest
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+_FILE = pathlib.Path(__file__).resolve()
+# service lives in this app folder (parents[1]); podcast_engine is shared in
+# podcast-engine/ at the repo root (parents[2]).
+sys.path.insert(0, str(_FILE.parents[1]))
+sys.path.insert(0, str(_FILE.parents[2]))
+sys.path.insert(0, str(_FILE.parents[2] / "podcast-engine"))
 
 from service import episodes, events, jobs, podcast_config
 

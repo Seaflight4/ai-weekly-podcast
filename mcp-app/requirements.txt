@@ -1,0 +1,15 @@
+# Runtime dependencies for the standalone podcast MCP server (mcp-app).
+# Only what podcast_engine + mcp_server import at runtime. The engine's
+# podcastfy audio backend needs ffmpeg on PATH for pydub MP3 encoding (Dockerfile).
+# Regenerate with: pip-compile pyproject.toml --extra mcp --output-file requirements.txt
+openai>=1.0.0
+requests>=2.0.0
+trafilatura>=2.2.0
+langchain-core>=0.3,<1
+langchain-openai>=0.3,<1
+pymupdf
+pydub
+audioop-lts; python_version >= '3.13'
+python-dotenv
+PyYAML
+mcp>=2.0

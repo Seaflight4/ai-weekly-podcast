@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "podcast-engine"
+version = "0.1.0"
+description = "Generic podcast generation engine: turns sources (URLs/PDFs) into a transcript + audio episode."
+requires-python = ">=3.11"
+license = { text = "MIT" }
+
+# Runtime dependencies are pinned in each app's requirements.txt (shared
+# across mcp-app and pipeline-app) and installed BEFORE this editable
+# install, so none are declared here (see Dockerfiles: pip install -e . --no-deps).
+
+[tool.setuptools]
+packages = [
+    "podcast_engine",
+    "podcast_engine.tts",
+    "podcast_engine.tts.providers",
+    "podcast_engine.utils",
+]
+
+[tool.setuptools.package-data]
+"podcast_engine" = ["config.yaml", "reference/*.wav"]
