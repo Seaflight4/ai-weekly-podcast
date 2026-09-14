@@ -3,6 +3,11 @@ services:
     build:
       context: ..
       dockerfile: pipeline-app/Dockerfile
+      # Build /app owned by the same uid/gid the container runs as, so the
+      # engine's cwd-relative output/ dirs stay writable without root.
+      args:
+        APP_UID: ${PUID:-1000}
+        APP_GID: ${PGID:-1000}
     # Run as the host user so files written to ../data are owned by you
     # (not root), so you can edit/delete them without sudo. Override
     # PUID/PGID in .env on machines with a different host uid/gid.
