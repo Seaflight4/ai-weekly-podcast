@@ -16,20 +16,25 @@ Both apps import `podcast_engine` (single source of truth under
 ## Quick start — podcast MCP (mcp-app)
 
 ```bash
+git clone ssh://git@bitbucket.int.tngtech.com:122/air/source-to-podcast.git
 cd mcp-app
 cp .env.example .env      # then set SKAINET_API_KEY
 docker compose up -d --build   # podcast-mcp on http://localhost:8001 (MCP over Streamable HTTP)
+# restart opencode
+# generate podcast from opencode CLI. For example: Use the `podcast_generate_podcast` tool to make a short podcast about the RAG Survey paper from https://arxiv.org/abs/2312.10997.
+docker compose down # stop container
 ```
 
-Then connect opencode to `http://localhost:8001/mcp` (the folder ships
-`opencode.json`). See `MCP_LOCAL_TESTING.md` and `mcp-app/README.md`.
+See `mcp-app/README.md` for the full product docs.
 
 ## Quick start — pipeline app (pipeline-app)
 
 ```bash
+git clone ssh://git@bitbucket.int.tngtech.com:122/air/source-to-podcast.git
 cd pipeline-app
 cp .env.example .env      # then set SKAINET_API_KEY
 docker compose up --build # then open http://localhost:8000 in your browser
+docker compose down # stop container
 ```
 
 See `pipeline-app/README.md` for the full product docs.
