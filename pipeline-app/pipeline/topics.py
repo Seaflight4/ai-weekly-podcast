@@ -1,20 +1,26 @@
-"""Single-label topic taxonomy + shared helpers for item/episode labels.
+"""Multi-label topic taxonomy + shared helpers for item/episode labels.
 
 The taxonomy is derived from the news itself (``pipeline.derive_taxonomy.py``:
 free-form label a 4-week corpus sample -> cluster -> verify) and curated by
-hand. Every item gets EXACTLY ONE topic id, so the rest of the pipeline treats
-a label set as a one-hot flat ``{id: 1.0}`` vector: cosine ``personal_match``,
-the ranking blend, episode aggregation and history filtering all work unchanged.
+hand. Every item gets ONE OR MORE topic ids (equal weight), so a label set is
+a flat ``{id: 1.0}`` vector over every facet that applies (a paper can be both
+``post_training`` and ``agents``). Nothing downstream hard-codes a single
+label: cosine ``personal_match``, the ranking blend, episode aggregation, the
+brief and history filtering all operate on these multi-hot vectors unchanged.
 
-Keeping one label per item is a deliberate choice: it keeps the small
-production labeler reliable, the chips readable and the steering signal sharp
-(the most salient facet of each item).
+The taxonomy can be refreshed every few months by re-running the derivation
+pipeline (see ``pipeline.derive_taxonomy.py``) and dropping its runtime
+artifact at ``TAXONOMY_PATH`` (default ``data/taxonomy.json``). If present it
+is loaded at import; otherwise the curated ``DEFAULT_TAXONOMY`` is used.
 """
 from __future__ import annotations
 
+import json
 import math
+import os
+import pathlib
 
-TAXONOMY: tuple[dict, ...] = (
+DEFAULT_TAXONOMY: tuple[dict, ...] = (
     {"id": "agents", "label": "AI Agents",
      "description": "Autonomous or semi-autonomous AI systems that plan, act, and interact with environments."},
     {"id": "ai_for_science", "label": "AI for Science",
@@ -53,8 +59,62 @@ TAXONOMY: tuple[dict, ...] = (
      "description": "Relevant but fits no named topic."},
 )
 
+# Path of the runtime-loaded taxonomy artifact (see derive_taxonomy.py). When
+# it exists and parses, it overrides the curated default so a refreshed
+# taxonomy can be adopted without code edits. Overridable via TAXONOMY_PATH.
+TAXONOMY_PATH = pathlib.Path(os.environ.get("TAXONOMY_PATH", "data/taxonomy.json"))
+
+
+def _load_taxonomy() -> tuple[dict, ...]:
+    """The active taxonomy: ``data/taxonomy.json`` when present, else the
+    built-in curated set. Tolerant of a missing/malformed artifact (the
+    pipeline never breaks on a bad refresh) and normalizes ``definition`` (the
+    derivation artifact's key) to ``description``."""
+    spec = None
+    try:
+        raw = json.loads(TAXONOMY_PATH.read_text(encoding="utf-8"))
+        spec = raw.get("taxonomy") or raw.get("canonicals") or raw.get("ids")
+    except (OSError, ValueError, AttributeError):
+        spec = None
+    if not isinstance(spec, list) or not spec:
+        return DEFAULT_TAXONOMY
+    out: list[dict] = []
+    for t in spec:
+        if not isinstance(t, dict):
+            continue
+        tid = t.get("id")
+        label = t.get("label") or t.get("id")
+        desc = t.get("description") or t.get("definition") or ""
+        if isinstance(tid, str) and tid.strip():
+            out.append({"id": tid.strip(), "label": str(label or tid),
+                        "description": str(desc or "")})
+    if not out:
+        return DEFAULT_TAXONOMY
+    if "other" not in {t["id"] for t in out}:
+        out.append({"id": "other", "label": "Other",
+                    "description": "Relevant but fits no named topic."})
+    # Fail closed to the curated set if the artifact has fewer than two real
+    # (non-"other") buckets — too degenerate to steer on.
+    if len({t["id"] for t in out if t["id"] != "other"}) < 2:
+        return DEFAULT_TAXONOMY
+    return tuple(out)
+
+
+TAXONOMY = _load_taxonomy()
 TAXONOMY_IDS = tuple(t["id"] for t in TAXONOMY)
 TAXONOMY_BY_ID = {t["id"]: t for t in TAXONOMY}
+
+
+def reload_taxonomy(path: str | os.PathLike | None = None) -> tuple[dict, ...]:
+    """Re-read the runtime taxonomy (used by tests / a hot refresh). Returns
+    the newly active ``TAXONOMY`` (mutating the module globals)."""
+    global TAXONOMY, TAXONOMY_IDS, TAXONOMY_BY_ID, TAXONOMY_PATH
+    if path is not None:
+        TAXONOMY_PATH = pathlib.Path(path)
+    TAXONOMY = _load_taxonomy()
+    TAXONOMY_IDS = tuple(t["id"] for t in TAXONOMY)
+    TAXONOMY_BY_ID = {t["id"]: t for t in TAXONOMY}
+    return TAXONOMY
 
 # personal_match for an item when no user profile is configured (steering off):
 # the blend is neutral, so final == importance.
@@ -63,7 +123,7 @@ NEUTRAL_PERSONAL = 0.5
 
 def label_prompt() -> str:
     """System prompt shared by the production labeler and the eval reference
-    model. Lists the single-label taxonomy and asks for the exact JSON shape
+    model. Lists the multi-label taxonomy and asks for the exact JSON shape
     the labeler parses."""
     lines = [
         "You label AI news items and research papers for a weekly AI podcast.",
@@ -72,24 +132,31 @@ def label_prompt() -> str:
         "\"title\", a \"url\", and a \"body\" (an abstract for arxiv, extracted "
         "page text for hn — it may be long; the head usually suffices).",
         "",
-        "For EACH item pick EXACTLY ONE topic id from this taxonomy:",
+        "For EACH item pick 1 to 3 topic ids from this taxonomy that genuinely "
+        "apply (every facet the item actually belongs to):",
     ]
     for t in TAXONOMY:
         lines.append(f"- {t['id']}: {t['description']}")
     lines += [
         "",
         "Rules:",
-        "- Pick the single most important label for the item; give only one id.",
+        "- Give the item ALL ids that meaningfully describe it (a paper can be "
+          "both its technical area and another facet, e.g. an agent-training "
+          "paper is post_training AND agents; a model launch with a pricing "
+          "story is model_release AND business_economics).",
+        "- 1 id is usually right; use 2-3 only when the item genuinely spans "
+          "multiple buckets. Prefer the most salient facet first.",
         "- A research paper gets its technical area (e.g. post_training, "
           "benchmarks) — NOT model_release.",
         "- An event story (launch, incident, deal) gets the event topic "
           "(model_release, incident, business_economics).",
-        "- If nothing fits, use \"other\".",
+        "- If nothing fits, use [\"other\"].",
         "",
         "Return ONLY a JSON object with a single key \"labels\": an array of "
         "objects, one per item in input order, each with \"index\" (the item's "
-        "integer index) and \"label\" (a string id). Every index must appear "
-        "exactly once. No prose before or after. No markdown fences.",
+        "integer index) and \"labels\" (an ARRAY of 1-3 string ids). Every "
+        "index must appear exactly once. No prose before or after. No markdown "
+        "fences.",
     ]
     return "\n".join(lines)
 
@@ -109,6 +176,9 @@ def normalize_url(url: str) -> str:
 def personal_match(item_topics: dict[str, float],
                    profile: dict[str, float]) -> float:
     """Cosine similarity of an item's topic vector and the user's profile.
+
+    Labels are equal-weight multi-hot vectors (each assigned id = 1.0), so the
+    cosine naturally measures overlap across all of an item's facets.
 
     Returns ``NEUTRAL_PERSONAL`` (0.5) when no profile is configured so the
     blend is a no-op; 0.0 when the item has no labels or no overlap. Empty

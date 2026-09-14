@@ -244,7 +244,9 @@ def _brief_text(chosen: list[RankedItem],
                 link += f" · [PDF]({pdf})"
             link += f" — score {m.score:.2f}"
             if m.topics:
-                link += f" · {next(iter(m.topics))}"
+                # Multi-label: comma-joined ids, most salient facet first
+                # (labels keep living in the brief — see README).
+                link += f" · {','.join(m.topics)}"
             lines.append(link)
             if m.body:
                 lines.append(f"  > {m.body[:500]}")

@@ -19,6 +19,7 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 
 from pipeline import config as config_mod
+from pipeline import topics as topics_mod
 
 from . import episodes, events, jobs, podcast_config
 
@@ -108,6 +109,17 @@ def delete_episode(date: str):
         raise HTTPException(404, f"no episode for {date}")
     events.broadcast({"type": "episodes_changed"})
     return {"deleted": date}
+
+
+# --- taxonomy ----------------------------------------------------------------
+
+@app.get("/api/taxonomy")
+def get_taxonomy():
+    """The active topic taxonomy (id/label/description). May come from a
+    runtime refresh (data/taxonomy.json, see pipeline.topics) or the curated
+    built-in — the UI renders the Sources-of-interest checkboxes from this."""
+    return [{"id": t["id"], "label": t["label"], "description": t["description"]}
+            for t in topics_mod.TAXONOMY]
 
 
 # --- podcast config ---------------------------------------------------------

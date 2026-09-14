@@ -339,6 +339,19 @@ def test_episodes_get_run_includes_labels(tmp_path, monkeypatch):
     assert run["labels"]["episode_topics"][0]["topic"] == "post_training"
 
 
+def test_taxonomy_endpoint_shape():
+    """GET /api/taxonomy exposes the active taxonomy (id/label/description)
+    so the UI renders the Sources-of-interest checkboxes from it — after a
+    runtime refresh adopts a new artifact, this reflects the new set."""
+    from service.app import get_taxonomy
+    items = get_taxonomy()
+    ids = {t["id"] for t in items}
+    assert "other" in ids and "agents" in ids
+    assert len(ids) == len(items)  # unique ids
+    for t in items:
+        assert all(k in t for k in ("id", "label", "description"))
+
+
 def test_podcast_config_validates_topic_prefs_and_alpha(tmp_path, monkeypatch):
     monkeypatch.setattr(podcast_config, "CONFIG_PATH", tmp_path / "podcast_config.yaml")
     base = {"user": {"audience": "researcher"},

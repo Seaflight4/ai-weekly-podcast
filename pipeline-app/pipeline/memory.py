@@ -81,22 +81,26 @@ def derive_summary(items, episode_date: str | None = None) -> dict:
 
 
 def _payload(items) -> list[dict]:
-    """The aired items, grouped by their single taxonomy label, in the compact
+    """The aired items, grouped by their taxonomy labels, in the compact
     shape the summary prompt consumes (titles give the next episode a concrete
-    subject to ground its "same story?" judgment on)."""
+    subject to ground its "same story?" judgment on). An item with several
+    labels appears under EACH of its topics, so every topic summary sees the
+    items that actually belong to it."""
     grouped: dict[str, list[dict]] = {}
     for it in items:
         t = getattr(it, "topics", None) or {}
-        tid = next((k for k in t if t[k] > 0), None)
-        if tid is None or tid not in topics.TAXONOMY_BY_ID:
-            tid = "other"
+        tids = [k for k in t if t[k] > 0 and k in topics.TAXONOMY_BY_ID]
+        if not tids:
+            tids = ["other"]
         date = (getattr(it, "date", "") or "")[:10]
-        grouped.setdefault(tid, []).append({
+        entry = {
             "title": getattr(it, "title", ""),
             "url": getattr(it, "url", ""),
             "date": date,
             "judge_reason": getattr(it, "judge_reason", ""),
-        })
+        }
+        for tid in tids:
+            grouped.setdefault(tid, []).append(entry)
     return [{"topic": tid, "items": grouped[tid]} for tid in topics.TAXONOMY_IDS
             if tid in grouped]
 

@@ -19,8 +19,10 @@ let lastProgress = null;
 let podcastConfig = null;
 let firstRun = true;
 
-// Mirror of pipeline/topics.py TAXONOMY (id -> human label) for chip/filter display.
-const TAXONOMY = {
+// Mirror of pipeline/topics.py taxonomy (id -> human label). Baked fallback
+// for the curated default; replaced by GET /api/taxonomy once loaded so a
+// runtime taxonomy refresh shows up in the Settings checkboxes.
+const DEFAULT_TAXONOMY = {
   agents: "AI Agents",
   ai_for_science: "AI for Science",
   safety_alignment: "Safety & Alignment",
@@ -40,24 +42,26 @@ const TAXONOMY = {
   retrieval_rag: "Retrieval & RAG",
   other: "Other",
 };
+let TAXONOMY = DEFAULT_TAXONOMY;
 
 function topicLabel(id) { return TAXONOMY[id] || id; }
 
-function topicChips(topics, max = 3) {
-  if (!topics || topics.length === 0) return "";
-  return topics.slice(0, max).map((t) =>
-    `<span class="chip chip-topic" title="${esc(topicLabel(t.topic))}">${esc(topicLabel(t.topic))}</span>`
-  ).join(" ");
+// A brief label token is a comma-joined list of taxonomy ids
+// (e.g. "post_training,agents"); render it as human labels joined by ", ".
+function labelTokenText(token) {
+  if (!token) return "";
+  return token.split(",").map((id) => topicLabel(id.trim())).filter(Boolean).join(", ");
 }
 
 // --- brief parsing ---------------------------------------------------------
 // Brief format (see pipeline/generate.py _brief_text):
 //   ## arXiv papers (N)
-//   - [Title](url) · [PDF](pdf_url) — score 0.88 · agents
+//   - [Title](url) · [PDF](pdf_url) — score 0.88 · agents,post_training
 //     > Excerpt.
 // We split into a header (everything up to the first ## section), sections,
 // and items. Each item keeps its source section so we can re-render the
-// brief in the same shape when items are deleted.
+// brief in the same shape when items are deleted. Labels are a comma-joined
+// list of taxonomy ids (multi-label, most salient first).
 
 function parseBrief(md) {
   const lines = md.split("\n");
@@ -76,7 +80,7 @@ function parseBrief(md) {
       sections.push(cur);
       continue;
     }
-    const m = line.match(/^- \[([^\]]+)\]\(([^)]+)\)(?:\s*·\s*\[PDF\]\(([^)]+)\))?(?:\s*—\s*score\s*([\d.]+))?(?:\s*·\s*([\w-]+))?\s*$/);
+    const m = line.match(/^- \[([^\]]+)\]\(([^)]+)\)(?:\s*·\s*\[PDF\]\(([^)]+)\))?(?:\s*—\s*score\s*([\d.]+))?(?:\s*·\s*([\w-]+(?:,\s*[\w-]+)*))?\s*$/);
     if (m && cur) {
       const item = {
         title: m[1], url: m[2], pdfUrl: m[3] || null,
@@ -129,30 +133,17 @@ function fmtClock(sec) {
 
 // --- episodes list (single history) ----------------------------------------
 
-let topicFilter = "";
-
-function matchesTopicFilter(ep) {
-  const q = topicFilter.trim().toLowerCase();
-  if (!q) return true;
-  const ids = (ep.topics || []).map((t) => t.topic.toLowerCase());
-  const labels = (ep.topics || []).map((t) => topicLabel(t.topic).toLowerCase());
-  return ids.some((id) => id.includes(q)) || labels.some((l) => l.includes(q));
-}
-
 async function loadEpisodes() {
   const ul = $("#episodes");
   ul.innerHTML = "";
   const res = await fetch("/api/episodes");
   const all = await res.json();
-  const eps = all.filter(matchesTopicFilter);
-  $("#episode-count").textContent = String(eps.length);
-  if (eps.length === 0) {
-    ul.innerHTML = `<li class="muted empty-hint">${all.length === 0
-      ? "No episodes yet. Generate one above."
-      : "No episodes match this topic filter."}</li>`;
+  $("#episode-count").textContent = String(all.length);
+  if (all.length === 0) {
+    ul.innerHTML = `<li class="muted empty-hint">No episodes yet. Generate one above.</li>`;
     return;
   }
-  for (const ep of eps) {
+  for (const ep of all) {
     const li = document.createElement("li");
     li.dataset.date = ep.date;
     if (ep.date === activeDate) li.classList.add("active");
@@ -165,8 +156,7 @@ async function loadEpisodes() {
     if (ep.has_transcript) meta.push("· transcript");
     li.innerHTML = `
       <div class="ep-date">${ep.date_label || ep.date} <span class="badge badge-${badge}">${ep.status}</span></div>
-      <div class="ep-meta">${meta.join(" ")}</div>
-      ${ep.topics && ep.topics.length ? `<div class="ep-topics">${topicChips(ep.topics, 2)}</div>` : ""}`;
+      <div class="ep-meta">${meta.join(" ")}</div>`;
     li.onclick = () => selectEpisode(ep.date);
     ul.appendChild(li);
   }
@@ -205,8 +195,6 @@ function renderDetail(run) {
   const durChip = dur ? `<span class="chip" title="Measured duration">${dur}</span>` : "";
   const srcChip = run.selection_source
     ? `<span class="chip chip-${esc(run.selection_source)}">${esc(run.selection_source)}</span>` : "";
-  const topicRow = run.topics && run.topics.length
-    ? `<div class="topic-chips">${topicChips(run.topics, 8)}</div>` : "";
   body.innerHTML = `
     <div class="hero">
       <div class="detail-head">
@@ -215,7 +203,6 @@ function renderDetail(run) {
         ${srcChip}
         ${durChip}
       </div>
-      ${topicRow}
       ${audio}
       <div class="hero-actions">
         <button id="btn-personalize" class="ghost">Edit brief</button>
@@ -319,14 +306,14 @@ function renderMarkdown(md) {
   const closeList = () => { if (inList) { html += "</ul>"; inList = false; } };
   for (let line of lines) {
     if (/^##\s/.test(line)) { closeList(); html += `<h2>${esc(line.replace(/^##\s/, ""))}</h2>`; continue; }
-    const m = line.match(/^- \[([^\]]+)\]\(([^)]+)\)(?:\s*·\s*\[PDF\]\(([^)]+)\))?(?:\s*—\s*score\s*([\d.]+))?(?:\s*·\s*([\w-]+))?\s*$/);
+    const m = line.match(/^- \[([^\]]+)\]\(([^)]+)\)(?:\s*·\s*\[PDF\]\(([^)]+)\))?(?:\s*—\s*score\s*([\d.]+))?(?:\s*·\s*([\w-]+(?:,\s*[\w-]+)*))?\s*$/);
     if (m) {
       if (inList) { html += "</ul>"; inList = false; }
       const [_, title, url, pdfUrl, score, label] = m;
       let item = `<a href="${esc(url)}" target="_blank" rel="noopener">${esc(title)}</a>`;
       if (pdfUrl) item += ` · <a class="pdf" href="${esc(pdfUrl)}" target="_blank" rel="noopener">PDF</a>`;
       if (score) item += ` <span class="score">— score ${score}</span>`;
-      if (label) item += ` <span class="label">· ${esc(topicLabel(label))}</span>`;
+      if (label) item += ` <span class="label">· ${esc(labelTokenText(label))}</span>`;
       html += `<li>${item}</li>`;
       continue;
     }
@@ -356,8 +343,8 @@ async function openPersonalize(run) {
       if (r) {
         it.judge_reason = r.judge_reason;
         it.source = r.source;
-        // Legacy briefs (pre-label) can still show the label from rank.json.
-        if (!it.label && r.topics) it.label = Object.keys(r.topics)[0] || null;
+        // Legacy briefs (pre-label) can still show the labels from rank.json.
+        if (!it.label && r.topics) it.label = Object.keys(r.topics).join(",") || null;
       }
     }
   }
@@ -390,7 +377,7 @@ function renderPersonalize(parsed, run) {
       const reason = it.judge_reason ? `<div class="reason">${esc(it.judge_reason)}</div>` : "";
       const src = it.source ? `<span class="tag tag-src">${esc(it.source)}</span>` : "";
       const score = it.score !== null ? ` <span class="tag tag-score">${it.score.toFixed(2)}</span>` : "";
-      const label = it.label ? ` <span class="tag tag-label">${esc(topicLabel(it.label))}</span>` : "";
+      const label = it.label ? ` <span class="tag tag-label">${esc(labelTokenText(it.label))}</span>` : "";
       const badge = it.removed ? '<span class="tag tag-removed">removed</span>' : "";
       div.innerHTML = `
         <div class="main">
@@ -702,6 +689,19 @@ function readSettingsForm() {
 }
 
 async function loadConfig() {
+  // Pull the active taxonomy from the API so a runtime refresh (see
+  // pipeline.topics / derive_taxonomy --apply) reaches the Settings
+  // checkboxes without a frontend code change. Fall back to the baked list.
+  try {
+    const tr = await fetch("/api/taxonomy");
+    if (tr.ok) {
+      const list = await tr.json();
+      const next = {};
+      for (const t of list) next[t.id] = t.label;
+      if (Object.keys(next).length) TAXONOMY = next;
+    }
+  } catch (_) { /* keep the baked default */ }
+
   const res = await fetch("/api/config");
   const data = await res.json();
   podcastConfig = data.config;
@@ -808,11 +808,3 @@ loadConfig();
 loadEpisodes();
 connectEvents();
 showEmptyState();
-
-// topic filter on history: re-render locally as the user types.
-let topicFilterTimer = null;
-$("#topic-filter").addEventListener("input", (e) => {
-  topicFilter = e.target.value;
-  clearTimeout(topicFilterTimer);
-  topicFilterTimer = setTimeout(loadEpisodes, 150);
-});

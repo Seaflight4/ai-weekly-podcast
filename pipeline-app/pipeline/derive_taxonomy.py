@@ -1,4 +1,10 @@
-"""Derive a single-label topic taxonomy bottom-up from a news corpus.
+"""Derive the topic taxonomy bottom-up from a news corpus.
+
+This is the re-runnable label-generation function: every few months, when
+production content drifts, sample a fresh corpus and re-derive the taxonomy
+set (see the ``derive`` function — also exposed as the ``derive_taxonomy``
+CLI). Per-item multi-labeling at rating time rides whatever taxonomy is
+active (see ``pipeline.topics`` / the rank judge).
 
 Pipeline:
   1. Load a corpus (~1000 sampled items, see pipeline/fetch_corpus.py).
@@ -11,12 +17,13 @@ Pipeline:
 Usage:
     python -m pipeline.fetch_corpus --out data/eval/corpus__x
     python -m pipeline.derive_taxonomy --pool data/eval/corpus__x/corpus.json \
-        --out data/eval/taxonomy__derived__x
+        --out data/eval/taxonomy__derived__x [--apply data/taxonomy.json]
 
 Output (under --out): raw_labels.json (item -> free label), frequency.json,
-canonical_labels.json (the derived set + mapping), report.json with the go/no-go
-metrics, and corner/ablation details. Every LLM pass is cached on disk, so
-re-running with tweaks doesn't re-pay model calls.
+canonical_labels.json (the derived set + mapping), taxonomy.runtime.json (the
+artifact ``pipeline.topics`` loads — adopted with ``--apply``), report.json
+with the go/no-go metrics, and corner/ablation details. Every LLM pass is
+cached on disk, so re-running with tweaks doesn't re-pay model calls.
 """
 from __future__ import annotations
 
@@ -290,41 +297,88 @@ def _normalize(s: str) -> str:
     return " ".join(str(s).strip().lower().split())
 
 
-def main() -> None:
-    _load_env()
-    ap = argparse.ArgumentParser(description="Derive a single-label taxonomy")
-    ap.add_argument("--pool", nargs="+", required=True, help="corpus JSON file(s)")
-    ap.add_argument("--out", default="data/eval/taxonomy__derived__latest")
-    ap.add_argument("--big", default=llm.JUDGE_MODEL)
-    ap.add_argument("--small", default=label_mod.LABEL_MODEL)
-    ap.add_argument("--consolidate-model", default=llm.JUDGE_MODEL,
-                    help="model used for cluster/name (Qwen handles these large "
-                         "JSON calls; the DeepSeek flash model times out on them)")
-    ap.add_argument("--canonicals", help="JSON with {\"canonicals\":[...]}: skip "
-                    "free-labeling/clustering and verify this fixed set instead "
-                    "(reuses raw cache + frequency.json from --out if present)")
-    args = ap.parse_args()
+def write_runtime_artifact(out_dir: str | pathlib.Path,
+                           canonicals: list[dict],
+                           generated_at: str,
+                           apply_to: str | pathlib.Path | None = None) -> pathlib.Path:
+    """Write the runtime-loadable taxonomy artifact (``id``/``label``/
+    ``description``/``covers`` per canonical) — the shape ``pipeline.topics``
+    loads at import (see topics.TAXONOMY_PATH). With ``apply_to`` the refresh
+    is adopted there (default data/taxonomy.json) so the pipeline switches
+    without code edits. Returns the artifact path.
+    """
+    out_dir = pathlib.Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    runtime = {
+        "generated_at": generated_at,
+        "source_report": f"{out_dir.name}/report.json",
+        "taxonomy": [
+            {"id": c.get("id"), "label": c.get("label") or c.get("id"),
+             "description": c.get("definition", ""),
+             "covers": list(c.get("covers") or [])}
+            for c in canonicals
+        ],
+    }
+    artifact = out_dir / "taxonomy.runtime.json"
+    artifact.write_text(json.dumps(runtime, indent=2), encoding="utf-8")
+    if apply_to:
+        target = pathlib.Path(apply_to)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(artifact.read_text(encoding="utf-8"), encoding="utf-8")
+    return artifact
 
-    items = load_corpus(args.pool)
+
+def derive(corpus_paths: list[str],
+           out_dir: str | pathlib.Path,
+           big: str | None = None,
+           small: str | None = None,
+           consolidate_model: str | None = None,
+           canonicals: str | None = None,
+           apply_to: str | pathlib.Path | None = None,
+           hold_out_frac: float = HOLD_OUT_FRAC,
+           seed: int = SEED) -> dict:
+    """Run the full taxonomy-derivation pipeline and write all its artifacts.
+
+    Returns the report dict (same shape as ``report.json``). Deterministic for
+    a given corpus + cached LLM labels. This is the re-runnable, every-few-
+    months entry point for refreshing a drifting taxonomy:
+
+        derive(["data/eval/corpus__x/corpus.json"],
+               "data/eval/taxonomy__refresh_01",
+               apply_to="data/taxonomy.json")
+
+    The runtime artifact (``id``/``label``/``description`` per canonical
+    bucket plus ``covers``) is always written to ``<out_dir>/taxonomy.runtime.
+    json``; with ``apply_to`` set it is also copied there, so the pipeline
+    (``pipeline.topics``) adopts the refresh without code edits. ``big`` /
+    ``small`` / ``consolidate_model`` default to the stage's pinned models.
+    ``canonicals`` (path to ``{"canonicals": [...]}``) skips free-labeling and
+    clustering and only re-verifies that curated set.
+    """
+    big = big or llm.JUDGE_MODEL
+    small = small or label_mod.LABEL_MODEL
+    consolidate_model = consolidate_model or llm.JUDGE_MODEL
+
+    items = load_corpus(corpus_paths)
     if len(items) < 200:
         raise SystemExit(f"corpus too small: {len(items)} items")
-    rng = random.Random(SEED)
+    rng = random.Random(seed)
     shuffled = list(items)
     rng.shuffle(shuffled)
-    n_hold = max(1, int(len(shuffled) * HOLD_OUT_FRAC))
+    n_hold = max(1, int(len(shuffled) * hold_out_frac))
     dev, hold = shuffled[:-n_hold], shuffled[-n_hold:]
     print(f"  corpus={len(items)} dev={len(dev)} hold_out={len(hold)}", flush=True)
-    out = pathlib.Path(args.out)
+    out = pathlib.Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     slug = lambda m: m.replace("/", "__").replace(".", "_")  # noqa: E731
 
     # 2. Free-form single label over the dev split (big model) — or load a
     #    curated canonical set (with raw cache/frequency from this out dir) for
     #    cheap re-verification without re-deriving/clustering.
-    if args.canonicals:
-        data = json.loads(pathlib.Path(args.canonicals).read_text())
-        canonicals = data["canonicals"]
-        rawp = out / f"raw__{slug(args.big)}.json"
+    if canonicals:
+        data = json.loads(pathlib.Path(canonicals).read_text())
+        canonicals_list = data["canonicals"]
+        rawp = out / f"raw__{slug(big)}.json"
         raw = json.loads(rawp.read_text()) if rawp.exists() else {}
         freqp = out / "frequency.json"
         counts = json.loads(freqp.read_text()) if freqp.exists() else {}
@@ -333,11 +387,11 @@ def main() -> None:
                 k = _normalize(lab)
                 if k:
                     counts[k] = counts.get(k, 0) + 1
-        print(f"  loaded {len(canonicals)} canonicals from {args.canonicals} "
+        print(f"  loaded {len(canonicals_list)} canonicals from {canonicals} "
               f"(raw={len(raw)} labels)", flush=True)
     else:
-        raw = label_all(dev, args.big, FREE_SYSTEM,
-                        out / f"raw__{slug(args.big)}.json")
+        raw = label_all(dev, big, FREE_SYSTEM,
+                        out / f"raw__{slug(big)}.json")
         counts: dict[str, int] = {}
         for lab in raw.values():
             k = _normalize(lab)
@@ -348,17 +402,17 @@ def main() -> None:
                        indent=2), encoding="utf-8")
 
     # 3. Canonical set (data-driven K or curated) + force 'other' fallback.
-    if not args.canonicals:
-        canonicals = consolidate(counts, args.consolidate_model)
-    ids = [c["id"] for c in canonicals]
+    if not canonicals:
+        canonicals_list = consolidate(counts, consolidate_model)
+    ids = [c["id"] for c in canonicals_list]
     if "other" not in ids:
-        canonicals = canonicals + [{
+        canonicals_list = canonicals_list + [{
             "id": "other", "label": "Other",
             "definition": "Relevant but fits no named topic.", "covers": []}]
         ids.append("other")
 
     canon_by_label: dict[str, str] = {}
-    for c in canonicals:
+    for c in canonicals_list:
         for x in c.get("covers", []):
             canon_by_label.setdefault(_normalize(x), c["id"])
 
@@ -384,7 +438,7 @@ def main() -> None:
                        and counts.get(_normalize(l), 0) >= MIN_COUNT_MAP})
     top_raw = sorted(counts.items(), key=lambda t: -t[1])[:30]
     (out / "canonical_labels.json").write_text(json.dumps({
-        "canonicals": canonicals,
+        "canonicals": canonicals_list,
         "derived": {"n_items": len(mapped), "coverage": round(coverage, 4),
                     "prevalence": {k: round(v / len(mapped), 4)
                                    for k, v in sorted(prev.items(), key=lambda t: -t[1])},
@@ -394,10 +448,10 @@ def main() -> None:
 
     # 4. Verify on the hold-out with the derived (closed) set.
     setver = abs(hash(",".join(ids))) % 10 ** 9
-    big_closed = label_all(hold, args.big, closed_system(canonicals),
-                           out / f"closed__{slug(args.big)}__set{setver}.json")
-    small_closed = label_all(hold, args.small, closed_system(canonicals),
-                             out / f"closed__{slug(args.small)}__set{setver}.json")
+    big_closed = label_all(hold, big, closed_system(canonicals_list),
+                           out / f"closed__{slug(big)}__set{setver}.json")
+    small_closed = label_all(hold, small, closed_system(canonicals_list),
+                             out / f"closed__{slug(small)}__set{setver}.json")
 
     def hit(d: dict[str, str], url: str) -> str:
         return (d.get(url) or "other").strip() or "other"
@@ -422,12 +476,12 @@ def main() -> None:
     for cid in top_ids:
         if cid == "other":
             continue
-        narrowed = [c for c in canonicals if c["id"] != cid]
+        narrowed = [c for c in canonicals_list if c["id"] != cid]
         sample_items = [it for it in hold if hit(big_closed, it.url) == cid][:ABLATE_SAMPLE]
         if len(sample_items) < 5:
             continue
-        relabeled = label_all(sample_items, args.big, closed_system(narrowed),
-                              out / f"ablate__{cid}__{slug(args.big)}__set{setver}.json")
+        relabeled = label_all(sample_items, big, closed_system(narrowed),
+                              out / f"ablate__{cid}__{slug(big)}__set{setver}.json")
         degrade = sum(1 for it in sample_items
                       if (relabeled.get(it.url) or "other").strip() == "other")
         ablation[cid] = {"n": len(sample_items),
@@ -435,17 +489,17 @@ def main() -> None:
 
     # Corner cases (must map cleanly).
     corner_items = [types.SimpleNamespace(**c) for c in CORNER_CASES]
-    corner_sys = closed_system(canonicals)
+    corner_sys = closed_system(canonicals_list)
     corner_out = {}
     for i, it in enumerate(corner_items):
-        res = label_all([it], args.big, corner_sys,
-                        out / f"corner{i}__{slug(args.big)}__set{setver}.json")
+        res = label_all([it], big, corner_sys,
+                        out / f"corner{i}__{slug(big)}__set{setver}.json")
         corner_out[it.title] = res.get(it.url) or "other"
 
     report = {
         "run_id": out.name,
         "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        "config": {"pool": list(args.pool), "big": args.big, "small": args.small,
+        "config": {"pool": [str(p) for p in corpus_paths], "big": big, "small": small,
                    "n_corpus": len(items), "n_dev": len(dev), "n_hold": n},
         "canonical_ids": ids,
         "coverage_gap": round(gap_rate, 4),
@@ -461,6 +515,14 @@ def main() -> None:
     }
     (out / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
 
+    # 5. Runtime taxonomy artifact: the canonical ids/labels/descriptions in
+    # the shape ``pipeline.topics`` loads (see topics.TAXONOMY_PATH). With
+    # ``apply_to`` the refresh is adopted immediately (no code edit).
+    artifact = write_runtime_artifact(out, canonicals_list, report["generated_at"],
+                                      apply_to=apply_to)
+    if apply_to:
+        print(f"  adopted runtime taxonomy -> {apply_to} (K={len(ids)})", flush=True)
+
     print(f"  K={len(ids)} canonicals; dev coverage={coverage:.2%}; "
           f"hold-out gap={gap_rate:.1%} (want <= {GAP_MAX:.0%}); "
           f"small-vs-big top-1={top1:.0%} (want >= {AGREE_MIN:.0%})")
@@ -468,6 +530,32 @@ def main() -> None:
                             sorted(prev.items(), key=lambda t: -t[1])[:12]})
     print("  corner cases:", json.dumps(corner_out), flush=True)
     print(f"  wrote {out / 'report.json'}", flush=True)
+    return report
+
+
+def main() -> None:
+    _load_env()
+    ap = argparse.ArgumentParser(
+        description="Derive (and optionally adopt) the topic taxonomy")
+    ap.add_argument("--pool", nargs="+", required=True, help="corpus JSON file(s)")
+    ap.add_argument("--out", default="data/eval/taxonomy__derived__latest")
+    ap.add_argument("--big", default=llm.JUDGE_MODEL,
+                    help="model for the free-label pass")
+    ap.add_argument("--small", default=label_mod.LABEL_MODEL,
+                    help="small model used for the closed-set verification")
+    ap.add_argument("--consolidate-model", default=llm.JUDGE_MODEL,
+                    help="model used for cluster/name (Qwen handles these large "
+                         "JSON calls; the DeepSeek flash model times out on them)")
+    ap.add_argument("--canonicals", help="JSON with {\"canonicals\":[...]}: skip "
+                    "free-labeling/clustering and verify this fixed set instead "
+                    "(reuses raw cache + frequency.json from --out if present)")
+    ap.add_argument("--apply", metavar="TARGET", default=None,
+                    help="adopt the derived taxonomy by copying taxonomy."
+                         "runtime.json here (default data/taxonomy.json)")
+    args = ap.parse_args()
+    derive(args.pool, args.out, big=args.big, small=args.small,
+           consolidate_model=args.consolidate_model,
+           canonicals=args.canonicals, apply_to=args.apply)
 
 
 if __name__ == "__main__":

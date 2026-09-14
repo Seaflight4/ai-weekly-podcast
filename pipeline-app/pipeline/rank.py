@@ -65,20 +65,22 @@ Anchor bands: 0.9+ = must-know this week; 0.7-0.89 = useful context; 0.4-0.69
 
 Return ONLY a JSON object with a single key "scores", an array of objects,
 one per item, each with keys "index" (the item's integer index), "score" (a
-float), "reason" (a one-sentence string), and "label" (the single topic id
-from the taxonomy below). Each index must appear exactly once, and "label"
-must be one of the listed ids for every item. No prose before or after. No
+float), "reason" (a one-sentence string), and "labels" (an ARRAY of 1-3
+topic ids from the taxonomy below — every facet that applies, most salient
+first). Each index must appear exactly once, and every "labels" id must be
+one of the listed ids. No prose before or after. No
 markdown fences.
 """
 
 
 def _label_block() -> str:
-    """Single-label taxonomy section appended to the judge rubric, so the label
+    """Multi-label taxonomy section appended to the judge rubric, so the label
     decision shares the judge's full-body context in the same LLM pass (no
     separate labeler re-reading the head of the body later)."""
     lines = [
         "",
-        "For every item, ALSO assign EXACTLY ONE topic id from this taxonomy:",
+        "For every item, ALSO assign 1-3 topic ids (every facet that actually "
+        "applies; most salient first) from this taxonomy:",
     ]
     for t in topics.TAXONOMY:
         lines.append(f"- {t['id']}: {t['description']}")
@@ -87,7 +89,8 @@ def _label_block() -> str:
         "Label rules: a research paper gets its technical area (post_training, "
         "benchmarks, ai_for_science, ...) — NOT model_release; an event story "
         "(launch, incident, deal) gets the event topic (model_release, incident, "
-        "business_economics). If nothing fits, use \"other\".",
+        "business_economics). A single id is usually right; use 2-3 only when "
+        "the item genuinely spans buckets. If nothing fits, use [\"other\"].",
         "",
     ]
     return "\n".join(lines)
@@ -101,12 +104,13 @@ def rank(items: list[Item], date: str | None = None,
          profile: dict | None = None, alpha: float = 0.3) -> list[RankedItem]:
     """Score and label every item in one fused judge pass (sorted desc).
 
-    Importance ``score`` and a single topic ``label`` come from the SAME LLM
-    call, which reads each item's full body once (the separate labeler pass
-    over the importance top-K pool — and its 2000-char head — is gone). When a
-    user ``profile`` (taxonomy topic weights) is provided, each item gets a
-    ``personal_score`` (cosine match) and ``final_score = (1-α)·score +
-    α·personal``; no profile => steering is a no-op (final == importance).
+    Importance ``score`` and the item's multi-label ``topics`` come from the
+    SAME LLM call, which reads each item's full body once (the separate
+    labeler pass over the importance top-K pool — and its 2000-char head —
+    is gone). When a user ``profile`` (taxonomy topic weights) is provided,
+    each item gets a ``personal_score`` (cosine match) and ``final_score =
+    (1-α)·score + α·personal``; no profile => steering is a no-op (final ==
+    importance).
 
     Optional prefilter (``top_k`` / ``score_floor``) shrinks the big-LLM input
     using the small-model ``gate_score`` set by the collect stage, per source
@@ -225,8 +229,8 @@ def _rank_pool(items: list[Item], rubric: str) -> list[RankedItem]:
                 done += 1
                 print(f"      batch {ci + 1}/{len(chunks)} done in {dt:.1f}s ({done}/{len(chunks)} complete)")
     for ci in sorted(results):
-        for (score, reason, label), item in zip(results[ci], chunks[ci]):
-            ranked.append(_to_ranked(item, score, reason, label))
+        for (score, reason, labels), item in zip(results[ci], chunks[ci]):
+            ranked.append(_to_ranked(item, score, reason, labels))
     return ranked
 
 
@@ -251,17 +255,16 @@ def _story_to_dict(group: Item, idx: int) -> dict:
     return d
 
 
-def _judge_batch(groups: list[Item], rubric: str) -> list[tuple[float, str, str | None]]:
+def _judge_batch(groups: list[Item], rubric: str) -> list[tuple[float, str, list[str] | None]]:
     """Judge a batch of stories in one LLM request.
 
-    Returns ``(score, reason, label)`` per story, where ``label`` is a single
-    taxonomy id (None when the model omits/uses an invalid id — label is
-    optional, score+reason are required).
+    Returns ``(score, reason, labels)`` per story, where ``labels`` is a list
+    of taxonomy ids (None/[] when the model omits or uses invalid ids —
+    labels are optional, score+reason are required).
     """
     import json
     payload = [_story_to_dict(g, i) for i, g in enumerate(groups)]
     user_msg = json.dumps(payload)
-    valid = topics.TAXONOMY_BY_ID
     last_err: ValueError | None = None
     for attempt in range(MAX_JUDGE_TRIES):
         raw = llm.chat(user_msg, rubric)
@@ -269,17 +272,15 @@ def _judge_batch(groups: list[Item], rubric: str) -> list[tuple[float, str, str 
             entries = llm.parse_json(raw).get("scores")
             if not isinstance(entries, list) or not entries:
                 raise ValueError(f"model returned no 'scores' list.\nraw response:\n{raw}")
-            by_index: dict[int, tuple[float, str, str | None]] = {}
+            by_index: dict[int, tuple[float, str, list[str] | None]] = {}
             for e in entries:
                 try:
                     idx = int(e["index"])
                     score = float(e["score"])
                 except (KeyError, TypeError, ValueError):
                     continue
-                label = e.get("label")
-                if not (isinstance(label, str) and label in valid):
-                    label = None
-                by_index[idx] = (score, str(e.get("reason", "")), label)
+                labels = _clean_labels(e.get("labels") or e.get("label"))
+                by_index[idx] = (score, str(e.get("reason", "")), labels)
             out = []
             missing = []
             for i in range(len(groups)):
@@ -297,9 +298,29 @@ def _judge_batch(groups: list[Item], rubric: str) -> list[tuple[float, str, str 
     raise last_err
 
 
+def _clean_labels(raw) -> list[str] | None:
+    """Normalize the judge's multi-label field: accepts a list of ids or a
+    single id string; drops anything off-taxonomy. None/empty -> None (the
+    item stays unlabeled for steering)."""
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return None
+    out: list[str] = []
+    for v in raw:
+        if isinstance(v, str) and v in topics.TAXONOMY_BY_ID and v not in out:
+            out.append(v)
+    return out or None
+
+
 def _to_ranked(item: Item, score: float, reason: str,
-               label: str | None = None) -> RankedItem:
+               labels: str | list[str] | None = None) -> RankedItem:
     r = RankedItem(**item.__dict__, score=score, judge_reason=reason)
-    if label:
-        r.topics = {label: 1.0}
+    if isinstance(labels, str):
+        labels = [labels]
+    for lab in (labels or []):
+        if lab in topics.TAXONOMY_BY_ID:
+            r.topics[lab] = 1.0
     return r

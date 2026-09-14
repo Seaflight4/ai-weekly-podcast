@@ -1,9 +1,11 @@
 """Offline eval: the cheap production labeler vs a big reference model.
 
-Labels the same items with two models (identical taxonomy prompt from
-``pipeline.topics``) and reports how well the small model agrees with the big
-one, so you can decide whether Mistral-Small's labels are good enough for
-steering (acceptance: exact-match ~>= 0.6 and mean per-topic Cohen's kappa
+Labels the same items with two models (identical multi-label taxonomy prompt
+from ``pipeline.topics``) and reports how well the small model agrees with the
+big one, so you can decide whether Mistral-Small's labels are good enough for
+steering. With multiple labels per item the agreement is measured as exact
+label-SET match, top-label match, mean per-topic Cohen's kappa and mean
+label-set IoU (acceptance roughly: set-match ~>= 0.5-0.6 and mean kappa
 ~>= 0.6 over the prevalent topics).
 
 Run manually (no service involvement):
@@ -15,10 +17,10 @@ Run manually (no service involvement):
         --out data/eval/labels__small__vs__big
 
 Writes ``data/eval/<name>/eval_report.json`` with per-item label-set agreement
-(Jaccard/IoU), top-label exact match, per-topic Cohen's kappa (big =
-reference), and qualitative disagreement samples. Per-model results are cached
-to disk under ``<out>/`` so re-running with new metrics doesn't re-call the
-LLMs.
+(Jaccard/IoU), exact set match, top-label exact match, per-topic Cohen's kappa
+(big = reference), and qualitative disagreement samples. Per-model results are
+cached to disk under ``<out>/`` so re-running with new metrics doesn't re-call
+the LLMs.
 """
 from __future__ import annotations
 
@@ -122,10 +124,12 @@ def _load_env() -> None:
 
 
 def _label_stats(items, small, big) -> tuple[dict, float, float]:
-    """Per-topic and overall agreement for the single-label taxonomy.
+    """Per-topic and overall agreement for the multi-label taxonomy.
 
-    Returns (topic_stats, used_kappa, used_match_frac). ``used_kappa`` averages
-    only topics the reference model actually marked (prevalence > 0) — rare
+    Each topic is a binary membership column (present/absent), so the same
+    per-topic Cohen's kappa works for multi-label vectors. Returns
+    (topic_stats, used_kappa, used_match_frac). ``used_kappa`` averages only
+    topics the reference model actually marked (prevalence > 0) — rare
     facets otherwise drag down an imbalance-biased kappa.
     """
     topic_stats: dict = {}
@@ -148,7 +152,7 @@ def _label_stats(items, small, big) -> tuple[dict, float, float]:
 
 
 def _label_id(vector: dict) -> str | None:
-    """The single label id in a one-hot flat vector (weight > 0)."""
+    """The primary (first) label id in an equal-weight flat vector."""
     for tid in topics.TAXONOMY_IDS:
         if vector.get(tid, 0.0) > 0:
             return tid
@@ -175,27 +179,32 @@ def main(argv: list[str] | None = None) -> None:
     small = _labels_or_cache(items, args.small, out / f"{_slug(args.small)}.cache.json")
     big = _labels_or_cache(items, args.big, out / f"{_slug(args.big)}.cache.json")
 
-    # Per-item IoU over the non-zero topic sets + top-label exact match.
+    # Per-item IoU over the non-zero topic sets + exact set match + top-label
+    # exact match.
     ious = []
-    exact_hits = 0
+    set_hits = 0
+    top_hits = 0
     samples_bad, samples_good = [], []
     for it in items:
         sa = small.get(topics.normalize_url(it.url), {})
         sb = big.get(topics.normalize_url(it.url), {})
         iou = _jaccard(sa, sb)
         ious.append(iou)
+        if set(sa) == set(sb):
+            set_hits += 1
         if _label_id(sa) == _label_id(sb):
-            exact_hits += 1
+            top_hits += 1
         row = {"title": it.title[:120], "small": dict(sa), "big": dict(sb)}
         (samples_bad if iou < 0.5 else samples_good).append((iou, row))
     samples_bad.sort(key=lambda t: t[0])
     samples_good.sort(key=lambda t: -t[0])
 
-    # Single-label agreement (exact match is the gate metric; kappa over the
-    # prevalent topics is the reliability check).
+    # Multi-label agreement (exact label-SET match is the gate metric; kappa
+    # over the prevalent topics is the reliability check).
     stats, mean_kappa, mean_match = _label_stats(items, small, big)
     gate = {
-        "exact_match": round(exact_hits / len(items), 3),
+        "exact_set_match": round(set_hits / len(items), 3),
+        "top_label_match": round(top_hits / len(items), 3),
         "mean_kappa": mean_kappa,
         "mean_match": mean_match,
     }
@@ -206,7 +215,7 @@ def main(argv: list[str] | None = None) -> None:
         "config": {
             "small": args.small,
             "big": args.big,
-            "prompt": "topics.label_prompt (builtin, single-label)",
+            "prompt": "topics.label_prompt (builtin, multi-label)",
             "pools": list(args.pool),
         },
         "n_items": len(items),
@@ -225,7 +234,8 @@ def main(argv: list[str] | None = None) -> None:
         json.dumps(report, indent=2), encoding="utf-8")
     print(f"      eval_labels: {len(items)} items, {args.small} vs {args.big}")
     g = report["gate_metrics"]
-    print(f"      gate: exact_match={g['exact_match']} mean_kappa={g['mean_kappa']} "
+    print(f"      gate: exact_set_match={g['exact_set_match']} "
+          f"top_label_match={g['top_label_match']} mean_kappa={g['mean_kappa']} "
           f"mean_match={g['mean_match']} "
           f"IoU={report['aggregated_metrics']['label_set_iou']['mean']}")
     print(f"      wrote {out / 'eval_report.json'}")

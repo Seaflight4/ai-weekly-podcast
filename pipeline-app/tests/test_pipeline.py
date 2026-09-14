@@ -2,7 +2,7 @@
 
 No network, no LLM. The judge is monkeypatched; store is isolated to a tmp dir.
 """
-import json, pathlib, sys, types
+import json, math, pathlib, re, sys, types
 import pytest
 
 _FILE = pathlib.Path(__file__).resolve()
@@ -56,7 +56,10 @@ def test_rank_returns_full_pool_sorted(tmp_path, monkeypatch):
         Item(title=f"t{i}", url=f"u{i}", date="2026-08-21", body="b", source="arxiv")
         for i in range(3)
     ]
-    rank._judge_batch = lambda groups, rubric: [(0.9 - i * 0.1, "r", None) for i in range(len(groups))]
+    monkeypatch.setattr(
+        rank, "_judge_batch",
+        lambda groups, rubric: [(0.9 - i * 0.1, "r", None)
+                                for i in range(len(groups))])
     monkeypatch.setattr(rank.store, "run_dir", lambda date=None: tmp_path)
     out = rank.rank(items)
     assert len(out) == 3
@@ -173,6 +176,44 @@ def test_collect_joins_all_source_branches(tmp_path, monkeypatch):
     out = collect.collect("2026-09-04", window_start="2026-09-03")
     assert [i.source for i in out] == ["hn", "arxiv"]  # registry order
     assert json.loads((tmp_path / "collect.json").read_text())[0]["title"] == "hn-t"
+
+
+def test_collect_degrades_when_a_source_fails(tmp_path, monkeypatch):
+    """A source branch that raises (e.g. arXiv HTTP 429 throttling) is dropped
+    with a warning; collect continues with the healthy sources instead of
+    failing the whole run."""
+    from pipeline import collect
+    import json
+
+    def fake_hn(date, start):
+        return [Item(title="hn-t", url="https://h.example/x", date="2026-09-03",
+                     body="body", source="hn")]
+
+    def fake_arxiv(date, start):
+        raise RuntimeError("HTTP 429 throttled")
+
+    monkeypatch.setattr(collect, "SOURCES", {"hn": fake_hn, "arxiv": fake_arxiv})
+    monkeypatch.setattr(collect.store, "run_dir", lambda date=None: tmp_path)
+    monkeypatch.setattr(collect.store, "write",
+                        lambda name, payload, date=None: (tmp_path / name)
+                        .write_text(json.dumps(payload, indent=2)))
+
+    out = collect.collect("2026-09-04", window_start="2026-09-03")
+    assert [i.source for i in out] == ["hn"]  # the healthy branch survives
+    assert json.loads((tmp_path / "collect.json").read_text())[0]["title"] == "hn-t"
+
+
+def test_collect_raises_when_every_source_fails(tmp_path, monkeypatch):
+    from pipeline import collect
+
+    def boom(date, start):
+        raise RuntimeError("all sources down")
+
+    monkeypatch.setattr(collect, "SOURCES", {"hn": boom, "arxiv": boom})
+    monkeypatch.setattr(collect.store, "run_dir", lambda date=None: tmp_path)
+    # no source produced anything -> the empty-file guard still aborts
+    with pytest.raises(SystemExit):
+        collect.collect("2026-09-04")
 
 
 def test_dedup_rules_hn_arxiv_twin_dropped():
@@ -1398,7 +1439,7 @@ def _steer_judge(n=5):
 
 def test_rank_steering_reranks_by_profile(tmp_path, monkeypatch):
     items = _steer_items()
-    rank._judge_batch = _steer_judge()
+    monkeypatch.setattr(rank, "_judge_batch", _steer_judge())
     monkeypatch.setattr(rank.store, "run_dir", lambda date=None: tmp_path)
 
     out = rank.rank(items, date="07-09-2026",
@@ -1413,7 +1454,7 @@ def test_rank_steering_reranks_by_profile(tmp_path, monkeypatch):
 
 def test_rank_steering_off_is_unchanged(tmp_path, monkeypatch):
     items = _steer_items()
-    rank._judge_batch = _steer_judge()
+    monkeypatch.setattr(rank, "_judge_batch", _steer_judge())
     monkeypatch.setattr(rank.store, "run_dir", lambda date=None: tmp_path)
 
     out = rank.rank(items, date="07-09-2026")  # no profile -> steering off
@@ -1425,7 +1466,7 @@ def test_rank_steering_off_is_unchanged(tmp_path, monkeypatch):
 
 def test_rank_steering_alpha_zero_keeps_importance_order(tmp_path, monkeypatch):
     items = _steer_items()
-    rank._judge_batch = _steer_judge()
+    monkeypatch.setattr(rank, "_judge_batch", _steer_judge())
     monkeypatch.setattr(rank.store, "run_dir", lambda date=None: tmp_path)
 
     out = rank.rank(items, date="07-09-2026",
@@ -1447,7 +1488,7 @@ def test_rank_judge_labels_feed_steering_for_all_items(tmp_path, monkeypatch):
             out.append((scores[i], "r", label))
         return out
 
-    rank._judge_batch = judge
+    monkeypatch.setattr(rank, "_judge_batch", judge)
     monkeypatch.setattr(rank.store, "run_dir", lambda date=None: tmp_path)
 
     out = rank.rank(items, date="07-09-2026",
@@ -1564,3 +1605,188 @@ def test_eval_labels_label_stats_uses_prevalent_topics():
     assert stats["post_training"]["prevalence"] == 0.5
     # 'other' was never marked by the reference -> excluded from the mean kappa
     assert stats["other"]["prevalence"] == 0.0
+
+
+# --- multi-label items (equal-weight, cosine unchanged) -----------------------
+
+def test_clean_labels_normalizes_multi_and_single():
+    assert rank._clean_labels(["post_training", "agents"]) == ["post_training", "agents"]
+    assert rank._clean_labels(["post_training", "nope", "agents"]) == ["post_training", "agents"]
+    assert rank._clean_labels("post_training") == ["post_training"]
+    assert rank._clean_labels([]) is None
+    assert rank._clean_labels(None) is None
+    assert rank._clean_labels(5) is None
+
+
+def test_rank_to_ranked_multi_label():
+    item = Item(title="t", url="u", date="d", body="b", source="arxiv")
+    r = rank._to_ranked(item, 0.9, "r", ["post_training", "agents"])
+    assert r.topics == {"post_training": 1.0, "agents": 1.0}
+    # legacy single-string judge shape still supported
+    assert rank._to_ranked(item, 0.9, "r", "post_training").topics == {"post_training": 1.0}
+    assert rank._to_ranked(item, 0.9, "r", None).topics == {}
+    assert rank._to_ranked(item, 0.9, "r", ["bogus"]).topics == {}
+
+
+def test_judge_batch_parses_multi_labels(monkeypatch):
+    monkeypatch.setattr(rank.llm, "chat", lambda *a, **k: json.dumps({
+        "scores": [
+            {"index": 0, "score": 0.8, "reason": "r",
+             "labels": ["post_training", "agents"]},
+            {"index": 1, "score": 0.5, "reason": "s",
+             "labels": ["not_a_topic"]},
+        ]}))
+    items = [Item(title="a", url="u1", date="d", body="b", source="arxiv"),
+             Item(title="b", url="u2", date="d", body="b", source="arxiv")]
+    out = rank._judge_batch(items, "rubric")
+    assert out[0] == (0.8, "r", ["post_training", "agents"])
+    # an all-invalid label list is normalized to None (item stays neutral)
+    assert out[1] == (0.5, "s", None)
+
+
+def test_personal_match_multi_label_item():
+    vec = {"post_training": 1.0, "agents": 1.0}
+    pref = {"post_training": 1.0}
+    v = topics.personal_match(vec, pref)
+    assert abs(v - 1.0 / math.sqrt(2)) < 1e-9
+    # an item matching every profile facet scores full match
+    assert topics.personal_match(vec, {"post_training": 1.0, "agents": 1.0}) == pytest.approx(1.0)
+    assert topics.personal_match({"agents": 1.0}, pref) == 0.0
+
+
+def test_flatten_label_multi():
+    assert label_mod._flatten_label({"index": 0, "labels": ["post_training", "agents"]}) \
+        == {"post_training": 1.0, "agents": 1.0}
+    # off-taxonomy ids dropped; a scalar string id is tolerated
+    assert label_mod._flatten_label({"index": 0, "labels": ["post_training", "bogus"]}) \
+        == {"post_training": 1.0}
+    assert label_mod._flatten_label({"labels": "model_release"}) == {"model_release": 1.0}
+    # legacy single-label shape still parses
+    assert label_mod._flatten_label({"label": "post_training"}) == {"post_training": 1.0}
+    assert label_mod._flatten_label({}) == {}
+
+
+def test_label_items_parses_multi_labels(monkeypatch):
+    monkeypatch.setattr(label_mod, "_chat", lambda payload, model: json.dumps({
+        "labels": [
+            {"index": 0, "labels": ["post_training", "agents"]},
+            {"index": 1, "labels": "model_release"},
+        ]}))
+    items = [Item(title="a", url="https://a.example", date="d", body="b", source="arxiv"),
+             Item(title="b", url="https://b.example", date="d", body="b", source="arxiv")]
+    out = label_mod.label_items(items, workers=1)
+    assert out["https://a.example"] == {"post_training": 1.0, "agents": 1.0}
+    assert out["https://b.example"] == {"model_release": 1.0}
+
+
+def test_generate_brief_multi_labels():
+    chosen = [
+        RankedItem(title="Paper A", url="https://arxiv.org/abs/2601.00001",
+                   date="d", body="abstract", source="arxiv", score=0.9,
+                   topics={"post_training": 1.0, "agents": 1.0}),
+    ]
+    by_source = generate._group_by_source(chosen)
+    text = generate._brief_text(chosen, by_source)
+    # comma-joined multi-label ids, most salient facet first (dict order)
+    line = next(l for l in text.splitlines() if l.startswith("- "))
+    m = re.search(r"·\s*([\w-]+(?:,\s*[\w-]+)*)$", line)
+    assert m and m.group(1) == "post_training,agents"
+
+
+def test_annotate_brief_labels_multi_comma(tmp_path):
+    root = tmp_path
+    brief = root / "podcast_brief.md"
+    brief.write_text(
+        "# AI News Digest — 2026-09-08\n\n"
+        "## Hacker News stories (1)\n\n"
+        "- [A](https://a.example) — score 0.90\n",
+        encoding="utf-8")
+    labels = {"https://a.example": {"agents": 1.0, "post_training": 1.0}}
+    assert label_mod._annotate_brief_labels(root, labels) is True
+    assert "- [A](https://a.example) — score 0.90 · agents,post_training\n" \
+        in brief.read_text(encoding="utf-8")
+    # second run is a no-op (already annotated)
+    assert label_mod._annotate_brief_labels(root, labels) is False
+
+
+def test_memory_payload_groups_under_each_label():
+    items = [
+        RankedItem(title="A", url="https://a.example", date="2026-09-08",
+                   body="b", source="arxiv", score=0.9, judge_reason="r",
+                   topics={"post_training": 1.0, "agents": 1.0}),
+        RankedItem(title="B", url="https://b.example", date="2026-09-08",
+                   body="b", source="hn", score=0.8, judge_reason="r", topics={}),
+    ]
+    payload = memory_mod._payload(items)
+    by_topic = {e["topic"]: [i["title"] for i in e["items"]] for e in payload}
+    # a multi-label item is summarized under EACH of its topics
+    assert by_topic["post_training"] == ["A"]
+    assert by_topic["agents"] == ["A"]
+    assert by_topic["other"] == ["B"]
+
+
+# --- runtime taxonomy loading / refresh adoption --------------------------------
+
+def _restore_default_taxonomy():
+    topics.reload_taxonomy(pathlib.Path("data/taxonomy.json"))
+
+
+def test_topics_default_fallback_when_artifact_missing(tmp_path, monkeypatch):
+    try:
+        topics.reload_taxonomy(tmp_path / "missing.json")
+        assert topics.TAXONOMY == topics.DEFAULT_TAXONOMY
+    finally:
+        _restore_default_taxonomy()
+
+
+def test_topics_loads_runtime_taxonomy(tmp_path):
+    spec = {"taxonomy": [
+        {"id": "widgets", "label": "Widgets", "description": "Widget news."},
+        {"id": "gadgets", "label": "Gadgets", "definition": "Gadget news."},
+    ]}
+    p = tmp_path / "taxonomy.json"
+    p.write_text(json.dumps(spec), encoding="utf-8")
+    try:
+        taxo = topics.reload_taxonomy(p)
+        assert [t["id"] for t in taxo] == ["widgets", "gadgets", "other"]
+        assert taxo[0]["label"] == "Widgets"
+        # the derive artifact's "definition" key is normalized to "description"
+        assert taxo[1]["description"] == "Gadget news."
+        # downstream constants track the artifact
+        assert topics.TAXONOMY_BY_ID["widgets"]["label"] == "Widgets"
+    finally:
+        _restore_default_taxonomy()
+
+
+def test_topics_rejects_degenerate_artifact_and_falls_back(tmp_path):
+    p = tmp_path / "taxonomy.json"
+    p.write_text(json.dumps({"taxonomy": [{"id": "only_one"}]}), encoding="utf-8")
+    try:
+        topics.reload_taxonomy(p)
+        assert topics.TAXONOMY == topics.DEFAULT_TAXONOMY
+    finally:
+        _restore_default_taxonomy()
+
+
+def test_write_runtime_artifact_and_adopt(tmp_path):
+    from pipeline import derive_taxonomy as dt
+    canon = [
+        {"id": "agents", "label": "AI Agents", "definition": "d",
+         "covers": ["agentic"]},
+        {"id": "model_release", "label": "Model Releases", "definition": "m",
+         "covers": ["launch"]},
+        {"id": "other", "label": "Other", "definition": "o", "covers": []},
+    ]
+    target = tmp_path / "taxonomy.json"
+    out_dir = tmp_path / "out"
+    artifact = dt.write_runtime_artifact(out_dir, canon, "2026-09-08T00:00:00Z",
+                                         apply_to=target)
+    raw = json.loads(artifact.read_text())
+    assert [t["id"] for t in raw["taxonomy"]] == ["agents", "model_release", "other"]
+    assert raw["taxonomy"][0]["description"] == "d"
+    try:
+        # the adopted artifact is what pipeline.topics loads
+        assert [t["id"] for t in topics.reload_taxonomy(target)] \
+            == ["agents", "model_release", "other"]
+    finally:
+        _restore_default_taxonomy()

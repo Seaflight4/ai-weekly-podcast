@@ -86,9 +86,9 @@ def _chunk_by_chars(items: list, max_chars: int = LABEL_BATCH_CHARS) -> list[lis
 def _label_chunk(chunk: list, model: str) -> dict[str, dict[str, float]]:
     """One labeler request. Returns ``{normalized_url: {topic: weight}}``.
 
-    The response uses the single-label shape (one ``label`` id per item, see
-    ``topics.label_prompt``); it is flattened into a one-hot vector of the
-    globally-unique id. On a malformed response the whole chunk yields no
+    The response uses the multi-label shape (a ``labels`` array per item, see
+    ``topics.label_prompt``); it is flattened into an equal-weight vector over
+    the globally-unique ids. On a malformed response the whole chunk yields no
     labels (items stay neutral for steering) rather than failing the run.
     """
     payload = [item_payload(it, i) for i, it in enumerate(chunk)]
@@ -119,15 +119,25 @@ def _label_chunk(chunk: list, model: str) -> dict[str, dict[str, float]]:
 
 
 def _flatten_label(entry: dict) -> dict[str, float]:
-    """Flatten one single-label entry into a one-hot flat vector.
+    """Flatten one multi-label entry into an equal-weight flat vector.
 
-    The label id is carried at weight 1.0 (single label per item). Off-taxonomy
-    entries are dropped.
+    Each assigned label id is carried at weight 1.0 (multi-label: every facet
+    is equally salient for steering). Accepts the ``labels`` array shape the
+    labeler prompt returns, and the legacy single ``label`` id for
+    backward-compat caches. Off-taxonomy ids are dropped.
     """
-    tid = entry.get("label")
-    if isinstance(tid, str) and tid in topics.TAXONOMY_BY_ID:
-        return {tid: 1.0}
-    return {}
+    raw = entry.get("labels")
+    if raw is None:
+        raw = entry.get("label")
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return {}
+    out: dict[str, float] = {}
+    for v in raw:
+        if isinstance(v, str) and v in topics.TAXONOMY_BY_ID:
+            out[v] = 1.0
+    return out
 
 
 def label_items(items: list,
@@ -225,9 +235,9 @@ def _annotate_brief_labels(root: pathlib.Path,
     for line in text.splitlines():
         m = _BULLET_URL_RE.match(line)
         if m:
-            lab = next(iter(labels.get(topics.normalize_url(m.group(1))) or {}), None)
-            if lab and not re.search(r"·\s*[\w-]+\s*$", line.rstrip()):
-                line = line.rstrip() + f" · {lab}"
+            labs = labels.get(topics.normalize_url(m.group(1))) or {}
+            if labs and not re.search(r"·\s*[\w, -]+\s*$", line.rstrip()):
+                line = line.rstrip() + f" · {','.join(labs)}"
                 changed = True
         out.append(line)
     if changed:
@@ -239,7 +249,7 @@ def backfill_labels(date=None, force: bool = False) -> list[str]:
     """Label the chosen items of existing runs, write per-run episode
     ``labels.json`` (used by the history topic filter for pre-steering
     episodes), and annotate each run's ``podcast_brief.md`` with the per-item
-    topic (``— score 0.88 · <topic>``). Skips runs that already have
+    topics (``— score 0.88 · topic_a,topic_b``). Skips runs that already have
     ``labels.json`` unless forced. Returns the run folder names touched.
     """
     from . import RankedItem

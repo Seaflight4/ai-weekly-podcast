@@ -202,6 +202,11 @@ def collect(date: str | None = None, window_start: str | None = None,
     data-driven rule list (``DEDUP_RULES``), so adding a source is
     register-a-collector + a rule.
 
+    Fault-tolerant: a branch that raises (e.g. arXiv throttling with HTTP 429)
+    is dropped with a warning and the run continues with the surviving sources —
+    the episode then omits that source's content. ``collect`` only aborts when
+    NO source yields any item (the empty-file guard).
+
     ``date`` is the window end (ISO date, defaults to today) and also the
     storage anchor unless ``anchor`` is given — a full-run passes its unique
     run id here so collect.json lands in the same folder as rank/episode.
@@ -213,13 +218,27 @@ def collect(date: str | None = None, window_start: str | None = None,
     start = datetime.date.fromisoformat(window_start) if window_start else end - datetime.timedelta(days=7)
 
     print(f"      collect: running {len(SOURCES)} source branches in parallel...")
+    results: dict[str, list] = {}
+    failed: list[str] = []
     with ThreadPoolExecutor(max_workers=len(SOURCES)) as ex:
         futures = {name: ex.submit(fn, date, start) for name, fn in SOURCES.items()}
-        results = {name: futures[name].result() for name in SOURCES}
+        for name in SOURCES:
+            try:
+                results[name] = futures[name].result()
+            except Exception as e:  # noqa: BLE001 — never let one source kill the run
+                failed.append(name)
+                print(f"      collect: source '{name}' failed: {e}")
+                print(f"      collect: continuing WITHOUT '{name}' — the episode "
+                      f"will lack {name} content")
+    if failed:
+        ok = ", ".join(n for n in SOURCES if n not in failed)
+        print(f"      collect: source(s) failed ({', '.join(failed)}); "
+              f"proceeding with: {ok or 'none'}")
 
     items = []
     for name in SOURCES:          # registry order, so output order is stable
-        items += results[name]
+        if name in results:
+            items += results[name]
 
     # Cross-source dedup at the join (after all branches finish), via the
     # data-driven DEDUP_RULES table.
@@ -655,14 +674,15 @@ def _get(url: str, max_bytes: int | None = None) -> str:
         data = r.read(max_bytes) if max_bytes else r.read()
     return data.decode("utf-8", "replace")
 
-def _get_arxiv(url: str, max_bytes: int | None = None, retries: int = 5,
-               base_wait: float = 20.0, cap: float = 120.0) -> str:
+def _get_arxiv(url: str, max_bytes: int | None = None, retries: int = 3,
+               base_wait: float = 12.0, cap: float = 45.0) -> str:
     """arXiv page GET with exponential backoff on transient failures.
 
     arXiv throttles aggressively and answers with HTTP 429 (often "Unknown
     Error") for a stretch after too many requests from an IP; the documented
-    recovery is to wait and retry. Backing off instead of failing lets a
-    single throttled page recover instead of aborting the whole collect.
+    recovery is to wait and retry. The budget is deliberately short (~40s
+    total): if a throttle persists past that, the collect stage degrades and
+    keeps the other sources instead of stalling the whole run for minutes.
 
     Only used for the arXiv page fetch — HN body fetches keep the fast
     fail-empty path in ``_fetch_body``.
