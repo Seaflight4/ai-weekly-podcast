@@ -25,9 +25,12 @@ server = MCPServer(
     instructions=(
         "Generate podcast episodes from provided sources. "
         "Call generate_podcast with a topic and a list of sources "
-        "(URLs or base64-encoded PDFs). The tool returns a job_id "
-        "immediately; poll the podcast://jobs/{job_id} resource for status "
-        "and the finished transcript + audio path."
+        "(URLs or base64-encoded PDFs). The tool returns a job_id immediately. "
+        "Job reads on the podcast://jobs/{job_id} resource are paced: the "
+        "first read is only served ~1 minute after launch and later reads at "
+        "most once per minute, so do NOT poll repeatedly in fast succession — "
+        "wait for the read to return. It returns the finished transcript + "
+        "audio path when the job is done."
     ),
 )
 
@@ -92,7 +95,11 @@ def generate_podcast(
 
 @server.resource("podcast://jobs/{job_id}")
 def get_job(job_id: str) -> str:
-    """Poll a podcast generation job for status and results.
+    """Check a podcast generation job for status and results.
+
+    Reads are paced to ~one per minute: the first read is served only after
+    ~1 minute from launch, and an in-flight job's read blocks until it is
+    time to check again. A completed/failed job returns immediately.
 
     Returns JSON with:
       - status: "pending", "running", "completed", or "failed"
@@ -101,7 +108,7 @@ def get_job(job_id: str) -> str:
       - audio_path: filesystem path to episode.mp3 (when completed)
       - error: error message (when failed)
     """
-    result = jobs.get(job_id)
+    result = jobs.poll(job_id)
     return json.dumps(result, indent=2)
 
 

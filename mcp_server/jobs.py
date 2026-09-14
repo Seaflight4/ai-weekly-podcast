@@ -5,13 +5,13 @@ Jobs are persisted in a sqlite database so status survives restarts.
 """
 from __future__ import annotations
 
-import json
 import pathlib
 import sqlite3
 import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from podcast_engine import EngineConfig, Source, generate_podcast
 
@@ -19,6 +19,11 @@ from podcast_engine import EngineConfig, Source, generate_podcast
 _DB_PATH = pathlib.Path("data/.mcp_jobs.db")
 _LOCK = threading.Lock()
 _EXECUTOR: ThreadPoolExecutor | None = None
+
+# Minimum time between resource reads for a non-terminal job, and the delay
+# before the first read is allowed. Keeps a polling client to ~1 check/minute
+# instead of hammering the job immediately after launch.
+POLL_INTERVAL_SECONDS = 60.0
 
 
 def _get_executor() -> ThreadPoolExecutor:
@@ -33,23 +38,53 @@ def _get_db() -> sqlite3.Connection:
     conn = sqlite3.connect(str(_DB_PATH))
     conn.execute("""
         CREATE TABLE IF NOT EXISTS jobs (
-            id          TEXT PRIMARY KEY,
-            status      TEXT NOT NULL DEFAULT 'pending',
-            stage       TEXT,
-            error       TEXT,
-            run_dir     TEXT,
-            transcript  TEXT,
-            audio_path  TEXT,
-            created_at  TEXT NOT NULL,
-            updated_at  TEXT NOT NULL
+            id            TEXT PRIMARY KEY,
+            status        TEXT NOT NULL DEFAULT 'pending',
+            stage         TEXT,
+            error         TEXT,
+            run_dir       TEXT,
+            transcript    TEXT,
+            audio_path    TEXT,
+            created_at    TEXT NOT NULL,
+            updated_at    TEXT NOT NULL,
+            next_poll_at  TEXT
         )
     """)
+    # Lightweight migration: add the pacing column to DBs created before
+    # it existed (CREATE TABLE IF NOT EXISTS never alters existing tables).
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
+    if "next_poll_at" not in cols:
+        conn.execute("ALTER TABLE jobs ADD COLUMN next_poll_at TEXT")
     conn.commit()
     return conn
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _now_dt() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _parse_ts(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _next_poll_at(job_id: str) -> datetime | None:
+    """The earliest time a non-terminal job may be read again (or None if unknown)."""
+    with _LOCK:
+        conn = _get_db()
+        row = conn.execute(
+            "SELECT next_poll_at FROM jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+        conn.close()
+    return _parse_ts(row[0] if row else None)
 
 
 def submit(sources: list[Source], config: EngineConfig) -> str:
@@ -61,9 +96,12 @@ def submit(sources: list[Source], config: EngineConfig) -> str:
     job_id = uuid.uuid4().hex
     with _LOCK:
         conn = _get_db()
+        created = _now()
         conn.execute(
-            "INSERT INTO jobs (id, status, created_at, updated_at) VALUES (?, ?, ?, ?)",
-            (job_id, "pending", _now(), _now()),
+            "INSERT INTO jobs (id, status, created_at, updated_at, next_poll_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (job_id, "pending", created, created,
+             (_now_dt() + timedelta(seconds=POLL_INTERVAL_SECONDS)).isoformat()),
         )
         conn.commit()
         conn.close()
@@ -134,3 +172,37 @@ def get(job_id: str) -> dict:
         "created_at": row[7],
         "updated_at": row[8],
     }
+
+
+def poll(job_id: str, interval: float = POLL_INTERVAL_SECONDS) -> dict:
+    """Return a job's state, pacing reads so they land ~once per ``interval``.
+
+    Used by the ``podcast://jobs/{job_id}`` resource. Terminal jobs
+    (completed/failed/not_found) return immediately without waiting. For an
+    in-flight job the call blocks until its ``next_poll_at`` (set to ~one
+    interval after submission, then advanced by one interval per read), so
+    the first read never comes right after launch and the client cannot
+    poll faster than one check per interval.
+
+    ``interval`` is overridable so tests can run with a tiny value.
+    """
+    result = get(job_id)
+    if result["status"] in ("completed", "failed", "not_found"):
+        return result
+
+    next_read = _next_poll_at(job_id)
+    if next_read is not None:
+        wait = (next_read - _now_dt()).total_seconds()
+        if wait > 0:
+            time.sleep(wait)
+
+    with _LOCK:
+        conn = _get_db()
+        conn.execute(
+            "UPDATE jobs SET next_poll_at = ? WHERE id = ?",
+            ((_now_dt() + timedelta(seconds=interval)).isoformat(), job_id),
+        )
+        conn.commit()
+        conn.close()
+
+    return get(job_id)

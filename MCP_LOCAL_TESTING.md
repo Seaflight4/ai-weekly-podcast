@@ -57,8 +57,12 @@ required.
    > RAG Survey paper from https://arxiv.org/abs/2312.10997
 
    It returns a `job_id` and a resource URI `podcast://jobs/{id}`. The job
-   runs async (transcript LLM + TTS takes a few minutes). Check the result by
-   asking opencode to read the job resource, or inspect the output folder:
+   runs async (transcript LLM + TTS takes a few minutes). Reads on the job
+   resource are paced: the first check returns ~1 minute after launch and
+   later checks at most once per minute, so don't poll it rapidly — wait for
+   each read to return (it blocks until it's time to check again). Check the
+   result by asking opencode to read the job resource, or inspect the output
+   folder:
 
    ```bash
    ls data/engine/<latest-timestamp>/      # transcript.md + episode.mp3

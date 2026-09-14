@@ -2,7 +2,8 @@
 
 No network, no LLM, no TTS. The engine's generate_podcast is mocked.
 """
-import base64, json, pathlib, sys, types, uuid
+import base64, json, pathlib, sys, time, types, uuid
+from datetime import timedelta
 
 import pytest
 
@@ -148,6 +149,65 @@ def test_job_get_not_found(tmp_path, monkeypatch):
     monkeypatch.setattr(jobs, "_DB_PATH", tmp_path / "test_jobs.db")
     result = jobs.get("nonexistent-job-id")
     assert result["status"] == "not_found"
+
+
+# --- paced polling (jobs.poll) ----------------------------------------------
+
+def _insert_job(tmp_path, monkeypatch, job_id, status, next_poll_at=None):
+    """Insert a job row directly so poll() can be tested without the worker."""
+    monkeypatch.setattr(jobs, "_DB_PATH", tmp_path / "test_jobs.db")
+    created = jobs._now()
+    with jobs._LOCK:
+        conn = jobs._get_db()
+        if next_poll_at is None:
+            conn.execute(
+                "INSERT INTO jobs (id, status, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?)",
+                (job_id, status, created, created),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO jobs (id, status, created_at, updated_at, next_poll_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (job_id, status, created, created, next_poll_at),
+            )
+        conn.commit()
+        conn.close()
+
+
+def test_poll_waits_until_next_poll_at(tmp_path, monkeypatch):
+    """An in-flight job blocks poll() until next_poll_at, then advances it."""
+    next_at = (jobs._now_dt() + timedelta(seconds=0.2)).isoformat()
+    _insert_job(tmp_path, monkeypatch, "inflight", "pending", next_poll_at=next_at)
+
+    started = time.monotonic()
+    result = jobs.poll("inflight", interval=0.1)
+    assert result["status"] == "pending"
+    assert time.monotonic() - started >= 0.2  # waited until next_poll_at
+
+    # next_poll_at advanced by ~interval for the read after this one.
+    next_read = jobs._next_poll_at("inflight")
+    assert next_read is not None
+    assert next_read >= jobs._now_dt() + timedelta(seconds=0.1) - timedelta(seconds=1)
+
+
+def test_poll_returns_immediately_for_terminal(tmp_path, monkeypatch):
+    """A completed (or failed) job is served instantly, no pacing wait."""
+    _insert_job(tmp_path, monkeypatch, "done", "completed")
+    monkeypatch.setattr(jobs, "_DB_PATH", tmp_path / "test_jobs.db")
+
+    started = time.monotonic()
+    result = jobs.poll("done", interval=30)
+    assert result["status"] == "completed"
+    assert time.monotonic() - started < 1
+
+
+def test_poll_returns_immediately_for_not_found(tmp_path, monkeypatch):
+    monkeypatch.setattr(jobs, "_DB_PATH", tmp_path / "test_jobs.db")
+    started = time.monotonic()
+    result = jobs.poll("missing", interval=30)
+    assert result["status"] == "not_found"
+    assert time.monotonic() - started < 1
 
 
 # --- server tool + resource registration ------------------------------------
