@@ -3,8 +3,10 @@ services:
     build:
       context: ..
       dockerfile: mcp-app/Dockerfile
-    # Runs as root (image default) so the ./data bind mount is writable on
-    # every machine without setup.
+    # Run as the host user so files written to ../data are owned by you
+    # (not root), so you can edit/delete them without sudo. Override
+    # PUID/PGID in .env on machines with a different host uid/gid.
+    user: "${PUID:-1000}:${PGID:-1000}"
     command: python -m mcp_server
     ports:
       - "8001:8001"
@@ -16,6 +18,8 @@ services:
       SKAINET_API_KEY: ${SKAINET_API_KEY}
       # Optional override (default shown). Model choices are pinned in code.
       LLM_API_BASE: ${LLM_API_BASE:-https://chat.model.tngtech.com/v1}
+      # Non-root user has no writable home; point it somewhere it can cache.
+      HOME: /tmp
       MCP_PORT: "8001"
       MCP_HOST: "0.0.0.0"
     restart: unless-stopped

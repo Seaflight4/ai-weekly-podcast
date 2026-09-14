@@ -3,11 +3,10 @@ services:
     build:
       context: ..
       dockerfile: pipeline-app/Dockerfile
-    # Runs as root (image default) so the ./data bind mount is writable on
-    # every machine (rootful/rootless Linux, Docker Desktop) without setup.
-    # Episodes/config/logs land root-owned under ./data — fine for
-    # container-only use. If you ever run the pipeline on the host instead,
-    # point PIPELINE_DATA_ROOT at a separate directory.
+    # Run as the host user so files written to ../data are owned by you
+    # (not root), so you can edit/delete them without sudo. Override
+    # PUID/PGID in .env on machines with a different host uid/gid.
+    user: "${PUID:-1000}:${PGID:-1000}"
     ports:
       - "8000:8000"
     volumes:
@@ -17,4 +16,6 @@ services:
       SKAINET_API_KEY: ${SKAINET_API_KEY}
       # Optional override (default shown). Model choices are pinned in code.
       LLM_API_BASE: ${LLM_API_BASE:-https://chat.model.tngtech.com/v1}
+      # Non-root user has no writable home; point it somewhere it can cache.
+      HOME: /tmp
     restart: unless-stopped
