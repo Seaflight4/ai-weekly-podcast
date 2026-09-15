@@ -13,7 +13,6 @@ from fastapi import FastAPI, HTTPException, Body
 from fastapi.responses import (
     FileResponse,
     PlainTextResponse,
-    JSONResponse,
     StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
@@ -26,6 +25,18 @@ from . import episodes, events, jobs, podcast_config
 STATIC_DIR = pathlib.Path(__file__).resolve().parent.parent / "static"
 
 app = FastAPI(title="AI Weekly Podcast")
+
+
+def _path_date(date: str) -> str:
+    """Normalize a path ``date`` (ISO / DD-MM-YYYY / a run id) or answer 400.
+
+    The episode/job endpoints get the date from the URL, so an unparseable
+    value must be a clean client error, never a server traceback.
+    """
+    try:
+        return episodes._normalize_date(date)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 # --- server-sent events: push, so the frontend never polls -------------------
@@ -68,7 +79,7 @@ def list_episodes(topics: str = ""):
 
 @app.get("/api/episodes/{date}")
 def get_episode(date: str):
-    run = episodes.get_run(date)
+    run = episodes.get_run(_path_date(date))
     if run is None:
         raise HTTPException(404, f"no run for {date}")
     return run
@@ -76,7 +87,7 @@ def get_episode(date: str):
 
 @app.get("/api/episodes/{date}/audio")
 def get_audio(date: str):
-    p = episodes.audio_path(date)
+    p = episodes.audio_path(_path_date(date))
     if p is None:
         raise HTTPException(404, "no audio for this run")
     return FileResponse(p, media_type="audio/mpeg", filename="episode.mp3")
@@ -84,7 +95,7 @@ def get_audio(date: str):
 
 @app.get("/api/episodes/{date}/brief")
 def get_brief(date: str):
-    p = episodes.brief_path(date)
+    p = episodes.brief_path(_path_date(date))
     if p is None:
         raise HTTPException(404, "no brief for this run")
     return PlainTextResponse(p.read_text(encoding="utf-8"), media_type="text/markdown")
@@ -92,7 +103,7 @@ def get_brief(date: str):
 
 @app.get("/api/episodes/{date}/transcript")
 def get_transcript(date: str):
-    p = episodes.transcript_path(date)
+    p = episodes.transcript_path(_path_date(date))
     if p is None:
         raise HTTPException(404, "no transcript for this run")
     return PlainTextResponse(p.read_text(encoding="utf-8"), media_type="text/markdown")
@@ -145,11 +156,7 @@ def put_config(payload: dict = Body(default={})):
 
 @app.get("/api/runs")
 def list_runs():
-    active = jobs.active_job()
-    out = jobs.list_jobs()
-    if active is not None:
-        out = [active.to_dict()] + [j for j in out if j["id"] != active.id]
-    return out
+    return jobs.list_jobs()
 
 
 @app.post("/api/runs")
@@ -164,7 +171,8 @@ def submit_run(payload: dict = Body(default={})):
     date = payload.get("date")
     no_audio = bool(payload.get("no_audio", False))
     try:
-        config = podcast_config.resolved_run_config(payload.get("podcast"))
+        config = podcast_config.resolved_run_config(
+            payload.get("podcast"), now=payload.get("now"))
     except ValueError as e:
         raise HTTPException(400, str(e))
     # The run anchors on the resolved window end. Unless the body pins an
@@ -182,15 +190,9 @@ def submit_run(payload: dict = Body(default={})):
         num_sources=int(config["num_sources"]),
         window_days=int(config["window_days"]),
     )
-    job, err = jobs.submit("full", cmd, date=date, env=env,
-                           stage_estimates=stage_estimates)
-    if err == "busy":
-        active = jobs.active_job()
-        return JSONResponse(
-            {"detail": "a run is already active",
-             "active_job_id": active.id if active else None},
-            status_code=409,
-        )
+    job = jobs.submit("full", cmd, date=date, env=env,
+                      window_start=config["window_start"],
+                      stage_estimates=stage_estimates)
     return job.to_dict()
 
 
@@ -208,9 +210,10 @@ def submit_generate(date: str, payload: dict = Body(default={})):
     to "customized".
     """
     brief_md = payload.get("brief_markdown")
-    if not brief_md:
-        raise HTTPException(400, "body must include 'brief_markdown'")
-    folder = episodes.DATA_ROOT / episodes._normalize_date(date)
+    if not isinstance(brief_md, str) or not brief_md.strip():
+        raise HTTPException(
+            400, "body must include a non-empty 'brief_markdown' string")
+    folder = episodes.DATA_ROOT / _path_date(date)
     if not (folder / "rank.json").exists():
         raise HTTPException(404, f"no ranked pool for {date} — cannot re-render")
     brief_path = folder / "podcast_brief.md"
@@ -242,27 +245,38 @@ def submit_generate(date: str, payload: dict = Body(default={})):
     stage_estimates = jobs.estimate_stages(
         "generate", num_sources=est_cfg.num_sources(), window_days=0)
     env = {"PIPELINE_DATA_ROOT": str(episodes.DATA_ROOT)}
-    job, err = jobs.submit("generate", cmd, date=date, env=env,
-                           stage_estimates=stage_estimates)
-    if err == "busy":
-        active = jobs.active_job()
-        return JSONResponse(
-            {"detail": "a run is already active",
-             "active_job_id": active.id if active else None},
-            status_code=409,
-        )
+    window_start = None
+    if est_cfg is not None and getattr(est_cfg, "window_start", None):
+        window_start = str(est_cfg.window_start)
+    job = jobs.submit("generate", cmd, date=date, env=env,
+                      window_start=window_start,
+                      stage_estimates=stage_estimates)
     return job.to_dict()
 
 
 @app.get("/api/runs/{job_id}")
 def get_run(job_id: str):
-    active = jobs.active_job()
-    if active is not None and active.id == job_id:
-        return active.to_dict()
-    for j in jobs.list_jobs():
-        if j["id"] == job_id:
-            return j
-    raise HTTPException(404, "no such job")
+    job = jobs.find_job(job_id)
+    if job is None:
+        raise HTTPException(404, "no such job")
+    return job.to_dict()
+
+
+@app.post("/api/runs/{job_id}/cancel")
+def cancel_run(job_id: str):
+    """Cancel a queued or running job and clean up its intermediate results.
+
+    A running ``full`` run has its process group terminated and its run folder
+    deleted; a running ``generate`` re-render is terminated and rolled back to
+    a pre-run snapshot of the episode (the edited brief is kept). A queued job
+    is dropped from the queue outright.
+    """
+    job, err = jobs.cancel(job_id)
+    if err == "not_found":
+        raise HTTPException(404, "no such job")
+    if err == "not_running":
+        raise HTTPException(409, "job is not cancellable (already finished)")
+    return job.to_dict()
 
 
 # --- static frontend --------------------------------------------------------

@@ -212,9 +212,17 @@ def rank_from_cache(cache_path: str, date: str | None = None) -> list[RankedItem
 
 
 def _rank_pool(items: list[Item], rubric: str) -> list[RankedItem]:
+    """Score all items in parallel judge batches.
+
+    A batch that exhausts its retries does NOT kill the run: the error is
+    printed (so the job log / panel show why) and that batch's items are
+    dropped from the ranking rather than failing the whole episode.
+    """
     ranked: list[RankedItem] = []
     chunks = [items[i:i + BATCH_SIZE] for i in range(0, len(items), BATCH_SIZE)]
     results: dict[int, list] = {}
+    skipped_items = 0
+    first_err: str | None = None
     if chunks:
         with ThreadPoolExecutor(max_workers=JUDGE_WORKERS) as ex:
             futures = {ex.submit(_judge_batch, chunk, rubric): ci
@@ -224,13 +232,27 @@ def _rank_pool(items: list[Item], rubric: str) -> list[RankedItem]:
             for fut in as_completed(futures):
                 ci = futures[fut]
                 t_b = time.time()
-                results[ci] = fut.result()
+                try:
+                    results[ci] = fut.result()
+                except Exception as e:
+                    n = len(chunks[ci])
+                    skipped_items += n
+                    err = f"{type(e).__name__}: {e}"
+                    if first_err is None:
+                        first_err = err
+                    print(f"      WARN: rank batch {ci + 1}/{len(chunks)} failed after "
+                          f"{MAX_JUDGE_TRIES} tries — skipping its {n} item(s)"
+                          f" ({err})")
+                    continue
                 dt = time.time() - t_b
                 done += 1
                 print(f"      batch {ci + 1}/{len(chunks)} done in {dt:.1f}s ({done}/{len(chunks)} complete)")
     for ci in sorted(results):
         for (score, reason, labels), item in zip(results[ci], chunks[ci]):
             ranked.append(_to_ranked(item, score, reason, labels))
+    if skipped_items:
+        print(f"      WARN: rank dropped {skipped_items} item(s) across failed "
+              f"judge batch(es) — first error: {first_err}")
     return ranked
 
 
@@ -261,14 +283,18 @@ def _judge_batch(groups: list[Item], rubric: str) -> list[tuple[float, str, list
     Returns ``(score, reason, labels)`` per story, where ``labels`` is a list
     of taxonomy ids (None/[] when the model omits or uses invalid ids —
     labels are optional, score+reason are required).
+
+    Any failure (malformed JSON *or* a gateway error `llm.chat` let through)
+    is retried up to ``MAX_JUDGE_TRIES``; if the last attempt still fails the
+    exception is raised and the caller decides (skip the batch, loud).
     """
     import json
     payload = [_story_to_dict(g, i) for i, g in enumerate(groups)]
     user_msg = json.dumps(payload)
-    last_err: ValueError | None = None
+    last_err: Exception | None = None
     for attempt in range(MAX_JUDGE_TRIES):
-        raw = llm.chat(user_msg, rubric)
         try:
+            raw = llm.chat(user_msg, rubric)
             entries = llm.parse_json(raw).get("scores")
             if not isinstance(entries, list) or not entries:
                 raise ValueError(f"model returned no 'scores' list.\nraw response:\n{raw}")
@@ -293,8 +319,10 @@ def _judge_batch(groups: list[Item], rubric: str) -> list[tuple[float, str, list
                     f"model omitted indices {missing} from batch.\nraw response:\n{raw}"
                 )
             return out
-        except ValueError as e:
+        except Exception as e:
             last_err = e
+            if attempt < MAX_JUDGE_TRIES - 1:
+                time.sleep(1.0 * (attempt + 1))
     raise last_err
 
 

@@ -67,16 +67,12 @@ def make_run_id(window_end_iso: str,
     string like ``YYYY-MM-DDTHH:MM:SS``. It falls back to the server's local
     time only when ``now`` is missing or unparseable (the server may run UTC,
     so a client-supplied local time keeps the stamp in the user's timezone).
+
+    Thin wrapper over the pipeline's single-source-of-truth
+    ``pipeline.store.make_run_id``, so the UI and the CLI share one scheme.
     """
-    d = datetime.date.fromisoformat(window_end_iso)
-    if now is None:
-        now = datetime.datetime.now()
-    elif isinstance(now, str):
-        try:
-            now = datetime.datetime.fromisoformat(now.strip())
-        except ValueError:
-            now = datetime.datetime.now()
-    return f"{d.strftime(DATE_FORMAT)}-{now.strftime('%H%M%S')}"
+    from pipeline import store as pipeline_store
+    return pipeline_store.make_run_id(window_end_iso, now)
 
 
 def _date_label(run_id: str) -> str:
@@ -90,12 +86,69 @@ def _date_label(run_id: str) -> str:
     return dt.strftime(DATE_FORMAT + " %H:%M")
 
 
+_MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+
+def _to_iso_date(value) -> datetime.date | None:
+    """Tolerant parse of a window boundary — YYYY-MM-DD, DD-MM-YYYY, or a
+    run id DD-MM-YYYY-HHMMSS — to a date. None when missing/unparseable."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    value = value.strip()
+    for fmt in ("%Y-%m-%d", RUN_ID_FORMAT, DATE_FORMAT):
+        try:
+            return datetime.datetime.strptime(value, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _fmt_day(d: datetime.date) -> str:
+    """A day as '05 Sep 2026'."""
+    return f"{d.day:02d} {_MONTH_ABBR[d.month - 1]} {d.year}"
+
+
+def window_label(window_start, window_end) -> str | None:
+    """Human label for the news window an episode covers.
+
+    - '05 Sep 2026'       — single day (or unknown start)
+    - '02–05 Sep 2026'    — same month and year
+    - '29 Aug – 05 Sep 2026' — spans a month boundary (same year)
+    - '30 Dec 2026 – 05 Jan 2027' — spans a year boundary
+
+    Returns None when neither boundary parses.
+    """
+    s = _to_iso_date(window_start)
+    e = _to_iso_date(window_end)
+    if s is None and e is None:
+        return None
+    if s is None:
+        return _fmt_day(e)
+    if e is None:
+        return _fmt_day(s)
+    if s == e:
+        return _fmt_day(e)
+    if s.year == e.year and s.month == e.month:
+        return f"{s.day:02d}\u2013{e.day:02d} {_MONTH_ABBR[e.month - 1]} {e.year}"
+    if s.year == e.year:
+        return (f"{s.day:02d} {_MONTH_ABBR[s.month - 1]} \u2013 "
+                f"{e.day:02d} {_MONTH_ABBR[e.month - 1]} {e.year}")
+    return (f"{s.day:02d} {_MONTH_ABBR[s.month - 1]} {s.year} \u2013 "
+            f"{e.day:02d} {_MONTH_ABBR[e.month - 1]} {e.year}")
+
+
 def _is_run_folder(name: str) -> bool:
     return _parse_run_id(name) is not None
 
 
 def _list_runs(root: pathlib.Path) -> list[dict]:
-    """All run folders under ``root``, newest first, with a status badge."""
+    """All run folders under ``root``, newest first, with a status badge.
+
+    Multiple runs that cover the same window get a creation-order suffix on
+    their ``window_label`` (``... #2``, ``#3``) so each stays distinguishable;
+    the folder's own creation order decides who is ``#1`` (no suffix).
+    """
     if not root.exists():
         return []
     runs: list[tuple[datetime.datetime, dict]] = []
@@ -105,7 +158,25 @@ def _list_runs(root: pathlib.Path) -> list[dict]:
         dt = _parse_run_id(p.name)
         runs.append((dt, _run_summary(p)))
     runs.sort(key=lambda t: t[0], reverse=True)
-    return [r for _, r in runs]
+
+    def _window_key(dt, r: dict) -> str:
+        return r["window_end"] or (dt.date().isoformat() if dt else r["date"])
+
+    total: dict[str, int] = {}
+    for dt, r in runs:
+        key = _window_key(dt, r)
+        total[key] = total.get(key, 0) + 1
+
+    seen: dict[str, int] = {}
+    out: list[dict] = []
+    for dt, r in runs:
+        key = _window_key(dt, r)
+        seen[key] = seen.get(key, 0) + 1
+        order = total[key] - seen[key] + 1   # 1 = oldest of this window
+        if total[key] > 1 and order > 1:
+            r["window_label"] = f"{r['window_label']} #{order}"
+        out.append(r)
+    return out
 
 
 def _run_summary(folder: pathlib.Path) -> dict:
@@ -118,9 +189,25 @@ def _run_summary(folder: pathlib.Path) -> dict:
         status = "draft"
     else:
         status = "ready"
+    # The coverage window comes from the episode manifest (written by the
+    # generate stage); empty runs have none, but the run id still encodes the
+    # window-end date, so they label as a single-day episode either way.
+    dt_run = _parse_run_id(folder.name)
+    ep_window = ((ep or {}).get("config") or {}).get("window") or {}
+    ws = ep_window.get("start") or None
+    we = ep_window.get("end") or None
+    if we is None and dt_run is not None:
+        we = dt_run.date().isoformat()
+    created_label = None
+    if dt_run is not None and not (dt_run.hour == dt_run.minute == dt_run.second == 0):
+        created_label = f"{dt_run.hour:02d}:{dt_run.minute:02d}"
     return {
         "date": folder.name,
         "date_label": _date_label(folder.name),
+        "window_start": ws,
+        "window_end": we,
+        "window_label": window_label(ws, we) or _date_label(folder.name),
+        "created_label": created_label,
         "status": status,
         "has_audio": audio.exists(),
         "has_transcript": (folder / "transcript.md").exists(),

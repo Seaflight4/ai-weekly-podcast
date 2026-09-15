@@ -100,6 +100,8 @@ button.link {
   padding: 2px; box-shadow: none;
 }
 button.link:hover { background: none; text-decoration: underline; }
+button.link.danger { color: var(--danger); }
+button.link.danger:hover { color: var(--danger); }
 
 /* --- header --------------------------------------------------------------- */
 
@@ -285,7 +287,14 @@ audio { width: 100%; margin: 4px 0 12px; height: 40px; }
 .tab-body.markdown a:hover { text-decoration: underline; }
 .tab-body.markdown a.pdf { color: var(--muted); font-size: 0.9em; }
 .tab-body.markdown .score { color: var(--ok); font-weight: 600; }
-.tab-body.markdown .label { color: var(--primary-strong); font-weight: 600; }
+.tab-body.markdown .label {
+  display: block; width: fit-content;
+  margin-top: 3px;
+  font-size: 11px; font-weight: 600; letter-spacing: 0.015em;
+  color: #8a5a00;
+  background: #fbf4dc; border: 1px solid #efe0b2; border-radius: 999px;
+  padding: 1px 9px;
+}
 .tab-body.markdown blockquote {
   margin: 6px 0 10px; padding: 6px 14px; border-left: 3px solid var(--border-strong);
   color: var(--muted); font-size: 13px; background: var(--surface-2);
@@ -421,7 +430,7 @@ audio { width: 100%; margin: 4px 0 12px; height: 40px; }
 .confirm-message { color: var(--text); margin: 8px 0 0; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
 
-/* --- run panel ------------------------------------------------------------ */
+/* --- jobs panel (floating list of queued + running jobs) -------------------- */
 
 #run-panel {
   position: fixed; bottom: 0; right: 22px; width: 640px; max-width: calc(100vw - 44px);
@@ -429,8 +438,6 @@ audio { width: 100%; margin: 4px 0 12px; height: 40px; }
   border-bottom: 0; border-radius: var(--radius) var(--radius) 0 0;
   box-shadow: 0 -8px 30px rgba(20, 24, 34, 0.18); z-index: 100;
 }
-#run-panel.done { border-color: rgba(21, 128, 61, 0.5); box-shadow: 0 -8px 30px rgba(21, 128, 61, 0.12); }
-#run-panel.failed { border-color: rgba(197, 34, 31, 0.5); box-shadow: 0 -8px 30px rgba(197, 34, 31, 0.12); }
 
 .run-panel-head {
   display: flex; justify-content: space-between; align-items: center;
@@ -438,20 +445,54 @@ audio { width: 100%; margin: 4px 0 12px; height: 40px; }
 }
 .run-panel-head h3 { margin: 0; font-size: 13px; }
 
-.progress { padding: 12px 16px; }
-.stage-dots { display: flex; gap: 6px; margin-bottom: 8px; }
-.stage-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--surface-2); border: 1px solid var(--border-strong); }
-.stage-dot.active { background: var(--primary); border-color: var(--primary); box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.18); }
-.stage-dot.done { background: var(--ok); border-color: var(--ok); }
+.jobs-list { display: flex; flex-direction: column; gap: 10px; padding: 12px 16px 16px; }
 
-.progress-bar { height: 8px; background: var(--surface-2); border-radius: 999px; overflow: hidden; }
-.progress-fill {
+.job-row {
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: 9px 12px; background: var(--bg);
+}
+.job-row-queued { opacity: 0.85; }
+
+.job-row-head { display: flex; align-items: center; gap: 8px; }
+.job-row-name {
+  flex: 1; min-width: 0; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.job-row-cancel,
+.job-row-dismiss { padding: 0 4px; }
+
+.job-row-bar {
+  height: 8px; margin-top: 8px; background: var(--surface-2);
+  border-radius: 999px; overflow: hidden;
+}
+.job-row-fill {
   height: 100%; width: 0%;
   background: linear-gradient(90deg, var(--primary), var(--accent));
-  border-radius: 999px;
-  transition: width 0.4s ease;
+  border-radius: 999px; transition: width 0.4s ease;
 }
-.progress-meta { margin-top: 7px; font-size: 12px; color: var(--muted); }
+.job-row-queued .job-row-fill { background: var(--border-strong); }
+.job-row-failed .job-row-fill {
+  background: var(--danger);
+  opacity: 0.35;
+}
+
+.job-row-meta {
+  margin-top: 6px; font-size: 12px; color: var(--muted);
+  display: flex; justify-content: space-between; gap: 8px;
+  flex-wrap: wrap;
+}
+.job-row-failed { border-color: rgba(197, 34, 31, 0.45); }
+.job-row-error {
+  flex-basis: 100%; color: var(--danger); font-family: var(--mono);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* job-status badges */
+.badge-queued { background: var(--surface-2); color: var(--muted); }
+.badge-running { background: var(--primary-soft); color: var(--primary-strong); }
+.badge-done { background: var(--ok-bg); color: var(--ok); }
+.badge-failed { background: var(--danger-bg); color: var(--danger); }
+.badge-cancelled { background: var(--warn-bg); color: var(--warn); }
 
 .error-message {
   margin: 0; padding: 10px 12px; max-height: 240px; overflow-y: auto;

@@ -4,16 +4,8 @@ const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 let activeDate = null;
 let confirmResolve = null;
-// The job id the run panel is currently tracking; null when no panel is open.
-let activeRunId = null;
 // True after the SSE stream's first open; a later open means a reconnect.
 let episodeRefreshConnected = false;
-// Smooth elapsed clock for the run panel: SSE pushes sync the server's
-// authoritative elapsed value, and between pushes we advance the displayed
-// elapsed locally so it counts +1s per second instead of jumping.
-let clockTimer = null;
-let clockSync = { at: 0, elapsed: 0 };
-let lastProgress = null;
 // Persistent podcast config (data/podcast_config.yaml). Null until loaded;
 // the app forces the setup dialog when the file doesn't exist yet.
 let podcastConfig = null;
@@ -23,23 +15,32 @@ let firstRun = true;
 // for the curated default; replaced by GET /api/taxonomy once loaded so a
 // runtime taxonomy refresh shows up in the Settings checkboxes.
 const DEFAULT_TAXONOMY = {
-  agents: "AI Agents",
+  agents: "Agents",
+  agent_tooling: "Agent Tooling / Orchestration",
+  evals_benchmarks: "Evals / Benchmarks",
   ai_for_science: "AI for Science",
-  safety_alignment: "Safety & Alignment",
-  benchmarks: "Benchmarks & Evaluation",
-  inference_infrastructure: "Inference & Infrastructure",
+  inference_serving: "Inference / GPU Serving",
+  safety_alignment: "Safety / Alignment",
+  retrieval_rag: "Retrieval / RAG",
   multimodal: "Multimodal",
-  robotics: "Robotics",
-  business_economics: "Business & AI Economics",
-  post_training: "Post-training",
-  pretraining: "Pretraining & Scaling",
-  policy: "Policy & Regulation",
-  model_release: "Model Releases",
+  post_training_rl: "Post-Training (RL / RLHF)",
+  post_training_finetuning: "Post-Training (Fine-tuning / SFT)",
+  post_training_distillation: "Post-Training (Distillation)",
   interpretability: "Interpretability",
-  incident: "Incidents & Failures",
-  research_theory: "Research & Theory",
-  architecture_world_models: "Architecture & World Models",
-  retrieval_rag: "Retrieval & RAG",
+  model_releases: "Model Releases",
+  policy_regulation: "Policy / Regulation",
+  other_applied: "Other / Applied AI",
+  robotics: "Robotics",
+  business_deals: "Business / Deals",
+  incidents: "Incidents",
+  world_models: "World Models",
+  model_architecture: "Architecture / Model Design",
+  reasoning: "Reasoning",
+  pretraining: "Pretraining / Data",
+  theory_complexity: "Theory / Complexity",
+  agi: "AGI / General Intelligence",
+  code_generation: "Code Generation",
+  long_context_memory: "Long-Context / Memory",
   other: "Other",
 };
 let TAXONOMY = DEFAULT_TAXONOMY;
@@ -124,6 +125,12 @@ function esc(s) {
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
+// Title of an episode run: the coverage window when known ('02–05 Sep 2026',
+// with '#N' for repeated windows), else the legacy date label.
+function runTitle(run) {
+  return run.window_label || run.date_label || run.date || "";
+}
+
 function fmtClock(sec) {
   if (sec === null || sec === undefined || !isFinite(sec)) return null;
   const s = Math.max(0, Math.round(sec));
@@ -155,7 +162,7 @@ async function loadEpisodes() {
     else meta.push(`· audio`);
     if (ep.has_transcript) meta.push("· transcript");
     li.innerHTML = `
-      <div class="ep-date">${ep.date_label || ep.date} <span class="badge badge-${badge}">${ep.status}</span></div>
+      <div class="ep-date">${esc(ep.window_label || ep.date_label || ep.date)} <span class="badge badge-${badge}">${ep.status}</span></div>
       <div class="ep-meta">${meta.join(" ")}</div>`;
     li.onclick = () => selectEpisode(ep.date);
     ul.appendChild(li);
@@ -195,13 +202,16 @@ function renderDetail(run) {
   const durChip = dur ? `<span class="chip" title="Measured duration">${dur}</span>` : "";
   const srcChip = run.selection_source
     ? `<span class="chip chip-${esc(run.selection_source)}">${esc(run.selection_source)}</span>` : "";
+  const madeChip = run.created_label
+    ? `<span class="chip" title="Generated at ${esc(run.created_label)}">made ${esc(run.created_label)}</span>` : "";
   body.innerHTML = `
     <div class="hero">
       <div class="detail-head">
-        <h2>${run.date_label || run.date}</h2>
+        <h2>${esc(runTitle(run))}</h2>
         <span class="chip">${run.items} items</span>
         ${srcChip}
         ${durChip}
+        ${madeChip}
       </div>
       ${audio}
       <div class="hero-actions">
@@ -278,7 +288,7 @@ function renderTranscript(md) {
 
 async function deleteEpisode(run) {
   const date = run.date;
-  const label = run.date_label || run.date;
+  const label = runTitle(run);
   const ok = await askConfirm({
     title: "Delete episode",
     message: `Delete the episode for ${label} from history? This cannot be undone.`,
@@ -313,7 +323,7 @@ function renderMarkdown(md) {
       let item = `<a href="${esc(url)}" target="_blank" rel="noopener">${esc(title)}</a>`;
       if (pdfUrl) item += ` · <a class="pdf" href="${esc(pdfUrl)}" target="_blank" rel="noopener">PDF</a>`;
       if (score) item += ` <span class="score">— score ${score}</span>`;
-      if (label) item += ` <span class="label">· ${esc(labelTokenText(label))}</span>`;
+      if (label) item += `<span class="label">${esc(labelTokenText(label))}</span>`;
       html += `<li>${item}</li>`;
       continue;
     }
@@ -358,7 +368,7 @@ function renderPersonalize(parsed, run) {
   const count = () => allItems.filter((it) => !it.removed).length;
   body.innerHTML = `
     <div class="detail-head perso-head">
-      <h2>Edit brief — ${run.date_label || run.date}</h2>
+      <h2>Edit brief — ${esc(runTitle(run))}</h2>
       <span class="count-chip" id="perso-count">${count()} kept</span>
     </div>
     <p class="muted">Delete items to drop them from the audio. "Generate audio" re-renders this episode's mp3 with your selection, replacing it in history.</p>
@@ -405,7 +415,7 @@ function renderPersonalize(parsed, run) {
     if (kept === 0) { showToast("Keep at least one item.", "error"); return; }
     const ok = await askConfirm({
       title: "Re-render audio",
-      message: `Re-render the audio for ${run.date_label || run.date} with ${kept} items? The existing episode is replaced.`,
+      message: `Re-render the audio for ${runTitle(run)} with ${kept} items? The existing episode is replaced.`,
       confirmLabel: "Generate audio",
     });
     if (!ok) return;
@@ -415,10 +425,9 @@ function renderPersonalize(parsed, run) {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ brief_markdown: brief_md }),
     });
-    if (res.status === 409) { showToast("A run is already active. Wait for it to finish.", "error"); $("#btn-generate").disabled = false; return; }
     if (!res.ok) { showToast("Failed to start: " + (await res.text()), "error"); $("#btn-generate").disabled = false; return; }
     const job = await res.json();
-    openRunPanel(job);
+    upsertJob(job);
   };
 }
 
@@ -454,79 +463,170 @@ function showToast(message, type = "info") {
   }, 3200);
 }
 
-// --- run panel (live progress, driven by SSE pushes) ------------------------
+// --- jobs panel: one list of every live job + not-yet-dismissed failures ---
 
-// openRunPanel renders the panel from a freshly-submitted job; live progress
-// then arrives as ``run_progress`` SSE events and completion as
-// ``run_finished`` — no polling.
-function openRunPanel(job) {
+// Job map keyed by id. Queued/running rows show progress + cancel; a failed
+// run STAYS in the panel (chip "failed" + error reason) until dismissed, so a
+// failure is never silently swallowed by the auto-hide. Done/cancelled rows
+// leave immediately.
+const jobsById = new Map();
+
+function upsertJob(job) {
+  if (!job || !job.id) return;
+  jobsById.set(job.id, job);
+  renderJobsPanel();
+}
+
+function removeJob(job) {
+  if (!job || !job.id) return;
+  jobsById.delete(job.id);
+  renderJobsPanel();
+}
+
+// Order for the panel: running first, then queued (FIFO), then failed
+// (newest first). Done/cancelled are already gone by the time we render.
+function panelJobs() {
+  const order = { running: 0, queued: 1, failed: 2 };
+  return Array.from(jobsById.values())
+    .filter((j) => j.status in order)
+    .sort((a, b) => {
+      const ra = order[a.status], rb = order[b.status];
+      if (ra !== rb) return ra - rb;
+      if (a.status === "failed") {
+        return (b.finished_at || "").localeCompare(a.finished_at || ""); // newest first
+      }
+      return (a.submitted_at || "").localeCompare(b.submitted_at || "");
+    });
+}
+
+// Re-render the whole jobs panel from the in-memory map. Runs on every SSE
+// push — the list is tiny, so rebuilding is cheap and always consistent.
+function renderJobsPanel() {
   const panel = $("#run-panel");
+  const list = $("#jobs-list");
+  const jobs = panelJobs();
+  if (jobs.length === 0) {
+    panel.classList.add("hidden");
+    if (list) list.innerHTML = "";
+    return;
+  }
   panel.classList.remove("hidden");
-  panel.classList.remove("done", "failed");
-  activeRunId = job.id;
-  $("#run-title").textContent = `${job.kind} run ${job.id} — ${job.status}`;
-  renderStages(job, (job.progress && job.progress.stage_index) || 0);
-  lastProgress = job.progress || null;
-  clockSync = { at: Date.now(), elapsed: (job.progress && job.progress.elapsed_sec) || 0 };
-  renderProgress(job.progress);
-  if (!clockTimer) clockTimer = setInterval(tickClock, 500);
+  const running = jobs.filter((j) => j.status === "running").length;
+  const queued = jobs.filter((j) => j.status === "queued").length;
+  const failed = jobs.filter((j) => j.status === "failed").length;
+  let title;
+  if (jobs.length === 1) {
+    const only = jobs[0].status;
+    title = only === "running" ? "1 run active"
+      : only === "queued" ? "1 run queued"
+      : "1 run failed";
+  } else {
+    const parts = [`${jobs.length} runs`];
+    if (running) parts.push(`${running} active`);
+    if (queued) parts.push(`${queued} queued`);
+    if (failed) parts.push(`${failed} failed`);
+    title = parts.join(" · ");
+  }
+  $("#run-title").textContent = title;
+  list.innerHTML = "";
+  for (const j of jobs) {
+    const p = j.progress || {};
+    const pct = Math.max(0, Math.min(100, Math.round((p.fraction || 0) * 100)));
+    const isActive = j.status === "queued" || j.status === "running";
+    const stage = p.stage || (j.status === "queued" ? "queued"
+      : j.status === "failed" ? "failed" : "running");
+    const time = j.status === "running" ? `${fmtDur(p.elapsed_sec || 0)} elapsed`
+      : j.status === "queued" ? "waiting" : "finished";
+    const row = document.createElement("div");
+    row.className = `job-row job-row-${j.status}`;
+    row.innerHTML = `
+      <div class="job-row-head">
+        <span class="job-row-name">${esc(j.name || j.id)}</span>
+        <span class="badge badge-${j.status}">${esc(j.status)}</span>
+        ${isActive
+          ? `<button class="job-row-cancel link danger">cancel</button>`
+          : `<button class="job-row-dismiss link">dismiss</button>`}
+      </div>
+      <div class="job-row-bar"><div class="job-row-fill" style="width:${pct}%"></div></div>
+      <div class="job-row-meta"><span>${esc(stage)}…</span><span>${time}</span>${
+        j.status === "failed" && j.error
+          ? `<span class="job-row-error" title="${esc(j.error)}">${esc(j.error)}</span>`
+          : ""}</div>`;
+    if (isActive) {
+      const btn = row.querySelector(".job-row-cancel");
+      if (btn) btn.onclick = () => cancelJob(j);
+    } else {
+      const btn = row.querySelector(".job-row-dismiss");
+      if (btn) btn.onclick = () => removeJob(j);
+    }
+    list.appendChild(row);
+  }
 }
 
-// A ``run_progress`` push updates the panel only if it belongs to the job the
-// user is watching (a finished/closed panel is ignored).
-function handleRunProgress(job) {
-  if ($("#run-panel").classList.contains("hidden") || activeRunId !== job.id) return;
-  $("#run-title").textContent = `${job.kind} run ${job.id} — ${job.status}`;
-  lastProgress = job.progress;
-  clockSync = { at: Date.now(), elapsed: (job.progress && job.progress.elapsed_sec) || 0 };
-  renderProgress(job.progress);
-  renderStages(job, job.progress && job.progress.stage_index);
-}
-
-// A ``run_finished`` push is the single completion edge: finalize any open
-// panel for this job, then refresh the episode list (and the open detail if
-// that episode changed). The list refresh happens even with no panel open,
-// so an episode generated from another tab still appears.
+// A ``run_finished`` push is the single completion edge. Done runs and
+// cancelled re-renders select their episode and leave the panel; a FAILED run
+// is kept in the panel with its error reason until dismissed.
 function handleRunFinished(job) {
-  const panelOpen = !$("#run-panel").classList.contains("hidden");
-  if (panelOpen && activeRunId === job.id) {
-    activeRunId = null;
-    if (clockTimer) { clearInterval(clockTimer); clockTimer = null; }
-    lastProgress = null;
-    $("#run-title").textContent = `${job.kind} run ${job.id} — ${job.status}`;
-    renderProgress(job.progress);
-    renderStages(job, job.progress && job.progress.stage_index);
-    $("#run-panel").classList.add(job.status === "done" ? "done" : "failed");
-    if (job.status === "failed") showRunError(job);
-    if (job.date) selectEpisode(job.date);
+  if (!job || !job.id) return;
+  if (job.status === "done" && job.date) {
+    selectEpisode(job.date);
+    removeJob(job);
+  } else if (job.status === "cancelled") {
+    if (job.kind === "generate" && job.date) selectEpisode(job.date);
+    removeJob(job);
+  } else if (job.status === "failed") {
+    upsertJob(job);   // row stays, shows chip + error reason + dismiss
+    showToast(`Run failed: ${job.name || job.id}.${job.error ? " " + job.error : ""}`, "error");
   }
   loadEpisodes();
 }
 
-function tickClock() {
-  if (!lastProgress) return;
-  const elapsed = clockSync.elapsed + (Date.now() - clockSync.at) / 1000;
-  renderProgress(lastProgress, elapsed);
-}
-
-// After an SSE reconnect the panel state may be stale: find the active run in
-// one fetch and re-attach (or surface the finished job if it completed while
-// disconnected).
-async function resyncActiveRun() {
-  if ($("#run-panel").classList.contains("hidden")) return;
+// After an SSE reconnect (or on first load) rebuild the live set from
+// GET /api/runs, the server's authoritative active + queued view. Failed rows
+// already shown in the panel are kept across reconnects until dismissed.
+async function resyncJobs() {
   let jobs;
   try {
     const res = await fetch("/api/runs");
     if (!res.ok) return;
     jobs = await res.json();
   } catch (_) { return; }
-  const active = (jobs || []).find((j) => j.status === "queued" || j.status === "running");
-  if (active) { openRunPanel(active); return; }
-  if (activeRunId !== null) {
-    const finished = (jobs || []).find((j) => j.id === activeRunId);
-    if (finished) { handleRunFinished(finished); return; }
+  const liveIds = new Set();
+  for (const j of jobs || []) {
+    if (j.status === "queued" || j.status === "running") {
+      jobsById.set(j.id, j);
+      liveIds.add(j.id);
+    }
   }
-  $("#run-panel").classList.add("hidden");
+  for (const id of Array.from(jobsById.keys())) {
+    const existing = jobsById.get(id);
+    if (!liveIds.has(id) && existing && existing.status !== "failed") {
+      jobsById.delete(id);
+    }
+  }
+  renderJobsPanel();
+}
+
+// Cancel a queued/running job straight from its row. The API terminates the
+// process (and cleans up intermediate results); the ``run_finished`` SSE event
+// (or this response) then removes the row.
+async function cancelJob(job) {
+  const ok = await askConfirm({
+    title: "Cancel run",
+    message: `Stop "${job.name || job.id}" and discard its in-progress results?`,
+    confirmLabel: "Cancel run",
+    danger: true,
+  });
+  if (!ok) return;
+  const res = await fetch(`/api/runs/${job.id}/cancel`, { method: "POST" });
+  if (!res.ok) { showToast("Cancel failed: " + (await res.text()), "error"); return; }
+  upsertJob(await res.json());   // status will be "cancelled" -> row removed
+}
+
+function fmtDur(sec) {
+  sec = Math.max(0, Math.round(sec));
+  const m = Math.floor(sec / 60), s = sec % 60;
+  return m > 0 ? `${m}m ${s}s` : `${s}s`;
 }
 
 // --- SSE stream: push lifecycle, no polling ---------------------------------
@@ -534,7 +634,10 @@ async function resyncActiveRun() {
 function connectEvents() {
   const sse = new EventSource("/api/events");
   sse.addEventListener("run_progress", (e) => {
-    try { handleRunProgress(JSON.parse(e.data).job); } catch (_) {}
+    try { upsertJob(JSON.parse(e.data).job); } catch (_) {}
+  });
+  sse.addEventListener("run_queued", (e) => {
+    try { upsertJob(JSON.parse(e.data).job); } catch (_) {}
   });
   sse.addEventListener("run_finished", (e) => {
     try { handleRunFinished(JSON.parse(e.data).job); } catch (_) {}
@@ -549,51 +652,9 @@ function connectEvents() {
     // that need a catch-up refresh of the episode list.
     if (episodeRefreshConnected) loadEpisodes();
     episodeRefreshConnected = true;
-    resyncActiveRun();
+    resyncJobs();
   };
 }
-
-function showRunError(job) {
-  const tail = (job.log_tail || "").split("\n").slice(-30).join("\n").trim();
-  $("#error-message").textContent = tail || "[no log output]";
-  openModal("modal-error");
-}
-
-function renderStages(j, current) {
-  const dots = $("#progress-stages");
-  if (!dots) return;
-  const labels = ["", "collecting", "ranking", "generating"];
-  const n = j.progress.stage_count || 3;
-  dots.innerHTML = Array.from({ length: n }, (_, i) => {
-    const idx = i + 1;
-    const cls = idx < current ? "done" : idx === current ? "active" : "";
-    return `<span class="stage-dot ${cls}" title="${labels[idx] || ""}"></span>`;
-  }).join("");
-}
-
-function fmtDur(sec) {
-  sec = Math.max(0, Math.round(sec));
-  const m = Math.floor(sec / 60), s = sec % 60;
-  return m > 0 ? `${m}m ${s}s` : `${s}s`;
-}
-
-function renderProgress(p, elapsedOverride = null) {
-  if (!p) return;
-  const bar = $("#progress-fill");
-  const meta = $("#progress-meta");
-  if (bar) bar.style.width = `${Math.round((p.fraction || 0) * 100)}%`;
-  if (meta) {
-    const elapsed = elapsedOverride !== null ? elapsedOverride : (p.elapsed_sec || 0);
-    meta.textContent = `${p.stage || "running"}… · ${fmtDur(elapsed)} elapsed`;
-  }
-}
-$("#run-close").onclick = () => {
-  $("#run-panel").classList.add("hidden");
-  $("#run-panel").classList.remove("done", "failed");
-  if (clockTimer) { clearInterval(clockTimer); clockTimer = null; }
-  lastProgress = null;
-  activeRunId = null;
-};
 
 // --- modal plumbing ----------------------------------------------------------
 
@@ -757,6 +818,11 @@ function openGenerate() {
   start.setDate(start.getDate() - podcastConfig.podcast.window_days);
   $("#gen-window-start").value = isoDate(start);
   $("#gen-window-end").value = isoDate(end);
+  // The window can't end in the future: the pickers are bounded by the user's
+  // local "today" (the server re-validates authoritatively on submit).
+  const todayStr = isoDate(end);
+  $("#gen-window-end").max = todayStr;
+  $("#gen-window-start").max = isoDate(end);
   $("#gen-length").value = podcastConfig.podcast.length;
   $("#gen-depth").value = podcastConfig.podcast.depth;
   $("#gen-mem-windows").value = podcastConfig.podcast.mem_windows ?? 2;
@@ -770,14 +836,25 @@ $("#btn-generate-cancel").onclick = closeModals;
 ["#gen-length", "#gen-depth"].forEach((sel) =>
   $(sel).addEventListener("change", () =>
     updateDerivedMeta("#gen-length", "#gen-depth", "#gen-sources", "#gen-minutes")));
+// Moving the end earlier/later bounds the start so a window can never start
+// after its end or after today.
+$("#gen-window-end").addEventListener("change", () => {
+  $("#gen-window-start").max = $("#gen-window-end").value;
+});
+$("#gen-window-start").addEventListener("change", () => {
+  if ($("#gen-window-start").value > $("#gen-window-end").value) {
+    $("#gen-window-start").value = $("#gen-window-end").value;
+  }
+});
 
 $("#btn-generate-run").onclick = async () => {
   const now = new Date();
   const pad = (n) => String(n).padStart(2, "0");
+  const localToday = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
   const body = {
     // The user's local wall-clock time at submit, so the episode's timestamp
     // matches what they see on their clock even though the server may run UTC.
-    now: `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`,
+    now: `${localToday}T${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`,
     podcast: {
       window_start: $("#gen-window-start").value,
       window_end: $("#gen-window-end").value,
@@ -789,17 +866,22 @@ $("#btn-generate-run").onclick = async () => {
   if (!body.podcast.window_start || !body.podcast.window_end) {
     showToast("Window start and end are required.", "error"); return;
   }
+  if (body.podcast.window_end > localToday) {
+    showToast("Window end can't be in the future.", "error"); return;
+  }
+  if (body.podcast.window_start > body.podcast.window_end) {
+    showToast("Window start must be on or before the end.", "error"); return;
+  }
   $("#btn-generate-run").disabled = true;
   const res = await fetch("/api/runs", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
   $("#btn-generate-run").disabled = false;
-  if (res.status === 409) { showToast("A run is already active.", "error"); return; }
   if (!res.ok) { showToast("Failed to start: " + (await res.text()), "error"); return; }
   closeModals();
   const job = await res.json();
-  openRunPanel(job);
+  upsertJob(job);
 };
 
 // --- init ------------------------------------------------------------------

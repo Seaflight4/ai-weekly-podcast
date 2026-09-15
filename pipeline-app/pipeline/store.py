@@ -36,6 +36,35 @@ def _parse_run_id(name: str) -> datetime.datetime | None:
     return None
 
 
+def make_run_id(window_end_iso: str,
+                now: datetime.datetime | str | None = None) -> str:
+    """Build the unique id for a new episode: the window-end date plus a
+    creation time (DD-MM-YYYY-HHMMSS), so a second episode generated the same
+    day gets its own folder instead of overwriting the first.
+
+    ``now`` is the caller's local wall-clock time — a datetime or an ISO-ish
+    string like ``YYYY-MM-DDTHH:MM:SS``. It falls back to the server's local
+    time only when ``now`` is missing or unparseable. The service passes the
+    browser's local time; the CLI (no ``now``) uses the server's.
+
+    The single source of truth for run ids: both the service (UI) and the
+    plain CLI use it, so every fresh run — from either entry point — gets a
+    time-stamped folder and therefore the same ``DD-MM-YYYY HH:MM`` title.
+    """
+    d = datetime.date.fromisoformat(window_end_iso)
+    if now is None or not isinstance(now, (datetime.datetime, str)):
+        # Missing or malformed ``now`` (wrong type, e.g. a JSON list) falls
+        # back to the server's clock so a bad request can never crash the id
+        # builder or produce a 500.
+        now = datetime.datetime.now()
+    elif isinstance(now, str):
+        try:
+            now = datetime.datetime.fromisoformat(now.strip())
+        except ValueError:
+            now = datetime.datetime.now()
+    return f"{d.strftime(DATE_FORMAT)}-{now.strftime('%H%M%S')}"
+
+
 def run_dir(date: str | None = None) -> pathlib.Path:
     """The output folder for a run, named 'DD-MM-YYYY' or the run id
     'DD-MM-YYYY-HHMMSS' (defaults to a plain today folder). Accepts ISO

@@ -62,6 +62,15 @@ Then, all in the browser:
   episode is replaced in place with your selection.
 - **Delete** — removes an episode from history entirely.
 
+Episode generation happens **in the browser only**. The pipeline CLI
+(`python -m pipeline run`) is an internal mechanism the service uses to run
+jobs, plus a dev/ops interface for the maintenance tools below (label
+backfill, taxonomy refresh, evals, memory tests); it is not a supported way
+for you to generate episodes. Every run — from the UI or a bare
+`python -m pipeline run` — creates a time-stamped
+`DD-MM-YYYY-HHMMSS` history folder, so episodes always carry the same
+`DD-MM-YYYY HH:MM` title regardless of entry point.
+
 ## Assigning topics: multi-label + steering
 
 Every candidate item gets **1–3 coarse topic labels** (a data-derived ~20-bucket

@@ -81,6 +81,132 @@ def test_rank_returns_full_pool_sorted(tmp_path, monkeypatch):
     assert all(0.0 <= r.score <= 1.0 for r in out)
 
 
+def test_rank_pool_skips_failed_batch_and_finishes(monkeypatch, capsys):
+    # A judge batch that exhausts its retries must NOT kill the run: the pool
+    # skips that chunk, warns loudly, and scores the rest.
+    items = [
+        Item(title=f"t{i}", url=f"u{i}", date="2026-08-21", body="b", source="arxiv")
+        for i in range(55)
+    ]
+    def fake_judge(groups, rubric):
+        if len(groups) == 5:          # third chunk (items 50..54) always fails
+            raise RuntimeError("gateway boom")
+        return [(0.5, "r", None)] * len(groups)
+    monkeypatch.setattr(rank, "_judge_batch", fake_judge)
+    out = rank._rank_pool(items, "rubric")
+    assert len(out) == 50             # both 25-item batches survive
+    err = capsys.readouterr().out
+    assert "WARN" in err
+    assert "batch 3/3 failed" in err and "skipping its 5 item(s)" in err
+    assert "dropped 5 item(s)" in err
+
+
+def test_judge_batch_retries_all_exceptions_then_raises(monkeypatch):
+    # Gateway failures (not just malformed JSON) are retried, then reported.
+    monkeypatch.setattr(rank.time, "sleep", lambda *a, **k: None)
+    calls = []
+    def fake_chat(user_msg, system_msg):
+        calls.append(1)
+        raise RuntimeError("gateway gone")
+    monkeypatch.setattr(rank.llm, "chat", fake_chat)
+    items = [Item(title="t", url="u", date="d", body="b", source="arxiv")]
+    with pytest.raises(RuntimeError):
+        rank._judge_batch(items, "rubric")
+    assert len(calls) == rank.MAX_JUDGE_TRIES
+
+
+def test_judge_batch_retries_garbage_json_then_succeeds(monkeypatch):
+    monkeypatch.setattr(rank.time, "sleep", lambda *a, **k: None)
+    responses = [
+        "garbage",
+        "garbage",
+        json.dumps({"scores": [{"index": 0, "score": 0.7, "reason": "r",
+                                "labels": ["benchmarks"]}]}),
+    ]
+    calls = []
+    def fake_chat(user_msg, system_msg):
+        calls.append(1)
+        return responses[min(len(calls) - 1, len(responses) - 1)]
+    monkeypatch.setattr(rank.llm, "chat", fake_chat)
+    items = [Item(title="t", url="u", date="d", body="b", source="arxiv")]
+    out = rank._judge_batch(items, "rubric")
+    assert len(out) == 1 and out[0][0] == 0.7
+    assert len(calls) == 3
+
+
+def test_llm_chat_retries_rate_limit_then_succeeds(monkeypatch):
+    import httpx
+    from openai import RateLimitError
+    from pipeline import llm as llm_mod
+    monkeypatch.setenv("SKAINET_API_KEY", "test-key")
+    monkeypatch.setattr(llm_mod, "LLM_BACKOFF_BASE", 0.01)
+    calls = []
+    class FakeCompletions:
+        def create(self, **kw):
+            calls.append(kw)
+            if len(calls) == 1:
+                req = httpx.Request("POST", "http://x")
+                raise RateLimitError("rate limited",
+                                     response=httpx.Response(429, request=req),
+                                     body=None)
+            return types.SimpleNamespace(choices=[
+                types.SimpleNamespace(message=types.SimpleNamespace(content="ok"))])
+    class FakeChat:
+        completions = FakeCompletions()
+    class FakeClient:
+        chat = FakeChat()
+    monkeypatch.setattr(llm_mod, "get_client", lambda: FakeClient())
+    assert llm_mod.chat("u", "s") == "ok"
+    assert len(calls) == 2
+
+
+def test_llm_chat_does_not_retry_non_transient(monkeypatch):
+    import httpx
+    from openai import AuthenticationError
+    from pipeline import llm as llm_mod
+    monkeypatch.setenv("SKAINET_API_KEY", "test-key")
+    calls = []
+    class FakeCompletions:
+        def create(self, **kw):
+            calls.append(1)
+            req = httpx.Request("POST", "http://x")
+            raise AuthenticationError("bad key",
+                                      response=httpx.Response(401, request=req),
+                                      body=None)
+    class FakeChat:
+        completions = FakeCompletions()
+    class FakeClient:
+        chat = FakeChat()
+    monkeypatch.setattr(llm_mod, "get_client", lambda: FakeClient())
+    with pytest.raises(AuthenticationError):
+        llm_mod.chat("u", "s")
+    assert len(calls) == 1               # auth errors never retried
+
+
+def test_llm_chat_gives_up_after_transient_tries(monkeypatch):
+    import httpx
+    from openai import RateLimitError
+    from pipeline import llm as llm_mod
+    monkeypatch.setenv("SKAINET_API_KEY", "test-key")
+    monkeypatch.setattr(llm_mod, "LLM_BACKOFF_BASE", 0.01)
+    calls = []
+    class FakeCompletions:
+        def create(self, **kw):
+            calls.append(1)
+            req = httpx.Request("POST", "http://x")
+            raise RateLimitError("rate limited",
+                                 response=httpx.Response(429, request=req),
+                                 body=None)
+    class FakeChat:
+        completions = FakeCompletions()
+    class FakeClient:
+        chat = FakeChat()
+    monkeypatch.setattr(llm_mod, "get_client", lambda: FakeClient())
+    with pytest.raises(RateLimitError):
+        llm_mod.chat("u", "s")
+    assert len(calls) == llm_mod.LLM_MAX_RETRIES
+
+
 def test_rank_from_cache_loads_legacy_keys(tmp_path, monkeypatch):
     # A saved rank.json with removed Phase-2 fields still loads via the
     # tolerant key filter; items sort by score.
@@ -1611,6 +1737,50 @@ def test_config_rejects_unknown_topic_and_bad_alpha():
         config_mod.resolve(steering_alpha=1.5)
 
 
+def test_config_resolve_window_rejects_future_and_allows_past():
+    import datetime
+    today = datetime.date.today()
+    # A future window is invalid user input — rejected on the shared resolve.
+    with pytest.raises(ValueError):
+        config_mod.resolve(window_start="2099-01-01", window_end="2099-01-08")
+    with pytest.raises(ValueError):
+        config_mod.resolve(window_end="2099-01-01")
+    # Today and any past window stay allowed.
+    cfg = config_mod.resolve(window_end=today.isoformat())
+    assert cfg.window_end == today.isoformat()
+    cfg = config_mod.resolve(window_start="2020-01-01", window_end="2020-01-08")
+    assert cfg.window_end == "2020-01-08"
+    # The horizon is relative to the supplied ``today`` reference, so a caller
+    # ahead of the server (client-clock reference) is not falsely rejected.
+    ref = today + datetime.timedelta(days=1)
+    cfg = config_mod.resolve(
+        window_start=(ref - datetime.timedelta(days=7)).isoformat(),
+        window_end=ref.isoformat(), today=ref)
+    assert cfg.window_end == ref.isoformat()
+
+
+def test_client_today_reference_clamps_to_server_horizon():
+    import datetime
+    today = datetime.date.today()
+    assert config_mod.client_today_reference(None) == today
+    assert config_mod.client_today_reference("garbage") == today
+    assert config_mod.client_today_reference([1, 2]) == today
+    assert config_mod.client_today_reference(3.14) == today
+    # ±1 day skew is absorbed (real timezone offsets)...
+    assert config_mod.client_today_reference(
+        (today + datetime.timedelta(days=1)).isoformat()) == today + datetime.timedelta(days=1)
+    # ...anything absurd falls back to the server date.
+    assert config_mod.client_today_reference("2099-01-01T10:00:00") == today
+
+
+def test_store_make_run_id_malformed_now_does_not_crash():
+    # A non-string/non-datetime ``now`` (e.g. a JSON list in the request body)
+    # must fall back to the server clock, never raise AttributeError.
+    rid = store.make_run_id("2026-08-31", [1, 2])
+    assert len(rid) == len("31-08-2026-000000")
+    assert rid.startswith("31-08-2026-")
+
+
 def test_label_pool_removed_steering_alpha_defaults_to_constant():
     # The old top-K label pool is gone — labels ride the judge pass — but the
     # steering alpha still resolves from its constant, so nothing regresses.
@@ -1946,3 +2116,17 @@ def test_derive_label_all_normalizes_legacy_cache(tmp_path):
     items = [types.SimpleNamespace(title="a", url="https://a.example", body="b")]
     out = dt.label_all(items, "model", "sys", cache)
     assert out["https://a.example"] == ["post-training (rlhf)"]
+
+
+def test_derive_metric_lookups_use_normalized_url():
+    # Verification caches are keyed by normalized url; a raw-``.get`` misses
+    # entries whose key differs in case / trailing slash and would inflate the
+    # coverage gap. The metric helpers must look up with the same normalization.
+    from pipeline import derive_taxonomy as dt
+    from pipeline import topics
+    cache = {topics.normalize_url("https://arxiv.org/abs/2608.99999/"): ["agents", "other"]}
+    raw = "https://arxiv.org/abs/2608.99999"          # trailing-slash / case drift
+    assert dt._real_labels(cache, raw) == {"agents"}
+    assert dt._top_label(cache, raw) == "agents"
+    assert dt._real_labels(cache, "https://no.such/item") == set()
+    assert dt._top_label(cache, "https://no.such/item") == "other"

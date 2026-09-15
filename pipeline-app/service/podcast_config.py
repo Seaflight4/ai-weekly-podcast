@@ -119,14 +119,20 @@ def save(cfg: dict) -> dict:
     return stored
 
 
-def resolved_run_config(podcast: dict | None = None) -> dict:
+def resolved_run_config(podcast: dict | None = None,
+                        now: str | None = None) -> dict:
     """Merge the persistent config with per-run podcast overrides into the
-    flat knob dict ``jobs.full_run_cmd`` understands.
+    flat dict ``jobs.full_run_cmd`` understands.
 
     ``podcast`` (from the generate dialog) keys: window_start, window_end,
     length, depth. Any missing key falls back to the config file; without
     overrides the rolling window resolves at call time:
     end = today, start = today - window_days.
+
+    ``now`` is the client's wall-clock time (the browser's ``now``); its date
+    is the reference for the no-future-window check (clamped to ±1 day of the
+    server date), so a user ahead/behind the UTC server isn't rejected while a
+    genuinely future window still is.
 
     The merged result is run through ``pipeline.config.resolve`` so dates,
     vocabularies and the max window span are validated the same way the
@@ -134,7 +140,8 @@ def resolved_run_config(podcast: dict | None = None) -> dict:
     """
     cfg = load()
     over = podcast or {}
-    end = over.get("window_end") or datetime.date.today().isoformat()
+    ref = config_mod.client_today_reference(now)
+    end = over.get("window_end") or ref.isoformat()
     start = over.get("window_start")
     if not start:
         start = (datetime.date.fromisoformat(end)
@@ -150,6 +157,7 @@ def resolved_run_config(podcast: dict | None = None) -> dict:
         length=over.get("length") or cfg["podcast"]["length"],
         depth=over.get("depth") or cfg["podcast"]["depth"],
         mem_windows=int(cfg["podcast"]["mem_windows"]),
+        today=ref,
     )
     return {
         "window_start": run.window_start,
@@ -161,7 +169,8 @@ def resolved_run_config(podcast: dict | None = None) -> dict:
         "length": run.length,
         "depth": run.depth,
         "mem_windows": run.mem_windows,
-        "window_days": (run.resolve_window()[1] - run.resolve_window()[0]).days,
+        "window_days": (run.resolve_window(today=ref)[1]
+                        - run.resolve_window(today=ref)[0]).days,
         "num_sources": run.num_sources(),
     }
 

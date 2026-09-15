@@ -117,14 +117,27 @@ def main(argv: list[str]) -> None:
             rest.append(a)
     if rest:
         raise SystemExit(f"{USAGE}\n(error: unexpected argument {rest[0]!r})")
-    run(only=only, no_audio=no_audio,
-        from_cache=from_cache, date=date, transcript_in=transcript_in,
-        brief_in=brief_in, top_k=top_k, score_floor=score_floor,
-        config_path=config_path, window_start=window_start, window_end=window_end,
-        audience_level=audience_level, familiar_topics=familiar_topics,
-        topic_prefs=topic_prefs, steering_alpha=steering_alpha,
-        length=length, depth=depth, mem_windows=mem_windows,
-        force_label=force_label)
+    try:
+        run(only=only, no_audio=no_audio,
+            from_cache=from_cache, date=date, transcript_in=transcript_in,
+            brief_in=brief_in, top_k=top_k, score_floor=score_floor,
+            config_path=config_path, window_start=window_start, window_end=window_end,
+            audience_level=audience_level, familiar_topics=familiar_topics,
+            topic_prefs=topic_prefs, steering_alpha=steering_alpha,
+            length=length, depth=depth, mem_windows=mem_windows,
+            force_label=force_label)
+    except SystemExit:
+        raise
+    except Exception:
+        # Parse/usage errors above already raise SystemExit with a message;
+        # anything reaching here is a stage failure. Emit a loud, self-contained
+        # error block so the service's job log (and thus the panel) shows the
+        # real reason instead of a bare exit code.
+        import traceback
+        traceback.print_exc()
+        err = traceback.format_exc().strip().splitlines()[-1]
+        print("\nERROR: pipeline run failed\n" + err)
+        sys.exit(1)
 
 if __name__ == "__main__":
     main(sys.argv[1:])

@@ -402,6 +402,25 @@ def write_runtime_artifact(out_dir: str | pathlib.Path,
     return artifact
 
 
+def _real_labels(d: dict, url: str) -> set[str]:
+    """Non-'other' label ids for an item from a url-keyed cache.
+
+    The cached maps (``label_all`` output) are keyed by the *normalized* url,
+    so lookups must normalize too — a raw-``.get`` silently misses items whose
+    cached key differs in case / trailing slash, inflating the coverage gap
+    and skewing the verification metrics.
+    """
+    return {x for x in (d.get(topics.normalize_url(url)) or []) if x and x != "other"}
+
+
+def _top_label(d: dict, url: str) -> str:
+    """Most salient non-'other' label for an item (url-normalized lookup)."""
+    for x in (d.get(topics.normalize_url(url)) or []):
+        if x and x != "other":
+            return x
+    return "other"
+
+
 def derive(corpus_paths: list[str],
            out_dir: str | pathlib.Path,
            big: str | None = None,
@@ -525,13 +544,10 @@ def derive(corpus_paths: list[str],
                              out / f"closed__{slug(small)}__set{setver}.json")
 
     def real(d: dict[str, list[str]], url: str) -> set[str]:
-        return {x for x in (d.get(url) or []) if x and x != "other"}
+        return _real_labels(d, url)
 
     def top_label(d: dict[str, list[str]], url: str) -> str:
-        for x in (d.get(url) or []):
-            if x and x != "other":
-                return x
-        return "other"
+        return _top_label(d, url)
 
     n = len(hold)
     gaps = [it for it in hold if not real(big_closed, it.url)]

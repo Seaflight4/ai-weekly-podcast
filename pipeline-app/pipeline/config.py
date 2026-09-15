@@ -100,9 +100,17 @@ class RunConfig:
 
     # ------------------------------------------------------------------ utils
 
-    def resolve_window(self) -> tuple[datetime.date, datetime.date]:
-        """Return (start, end) dates, applying defaults and validating."""
-        end_s = self.window_end or datetime.date.today().isoformat()
+    def resolve_window(self, today: datetime.date | None = None
+                       ) -> tuple[datetime.date, datetime.date]:
+        """Return (start, end) dates, applying defaults and validating.
+
+        ``today`` is the reference "now" the future check compares the window
+        end against (the client's local date for API runs, the server date for
+        the CLI); defaults to the server's ``date.today()``. Past windows are
+        always allowed — only a window ending after the reference is rejected.
+        """
+        ref = today or datetime.date.today()
+        end_s = self.window_end or ref.isoformat()
         end = _parse_date(end_s, "window.end")
         if self.window_start:
             start = _parse_date(self.window_start, "window.start")
@@ -111,6 +119,11 @@ class RunConfig:
         if start > end:
             raise ValueError(
                 f"window.start {start.isoformat()} is after window.end {end.isoformat()}"
+            )
+        if end > ref:
+            raise ValueError(
+                f"window.end {end.isoformat()} is in the future "
+                f"(today is {ref.isoformat()})"
             )
         if (end - start).days > MAX_WINDOW_DAYS:
             raise ValueError(
@@ -216,15 +229,29 @@ def resolve(config_path: str | Path | None = None, *,
             steering_alpha: float | None = None,
             length: str | None = None,
             depth: str | None = None,
-            mem_windows: int | None = None) -> RunConfig:
-    """Build a ``RunConfig`` from defaults < config file < explicit overrides.
+            mem_windows: int | None = None,
+            podcast_config: dict | None = None,
+            today: datetime.date | None = None) -> RunConfig:
+    """Build a ``RunConfig`` from defaults < config file < podcast config
+    < explicit overrides.
 
     ``date`` is a back-compat alias for ``window_end`` (the run anchor/end
     date). Applies only when ``window_end`` is not otherwise set.
+
+    ``podcast_config`` is the persistent per-deployment settings dict (the
+    shape of ``data/podcast_config.yaml``: ``user`` + ``podcast`` sections). It
+    is applied above a ``--config`` file but below explicit keyword overrides,
+    so a plain CLI ``python -m pipeline run`` honours the same saved settings
+    the web UI uses (and the service's fully-explicit flag set still wins).
+
+    ``today`` is the reference "now" for the future check (see
+    ``RunConfig.resolve_window``); None uses the server date.
     """
     cfg = RunConfig()
     if config_path is not None:
         cfg = _apply_file(cfg, config_path)
+    if podcast_config is not None:
+        cfg = _apply_podcast(cfg, podcast_config)
     # --date back-compat: it is the window end / run anchor. Only applies when
     # it is an actual ISO date — a run id (DD-MM-YYYY-HHMMSS, the unique run
     # folder the stage re-runs target) must never be parsed as a window date.
@@ -243,11 +270,36 @@ def resolve(config_path: str | Path | None = None, *,
     ):
         if value is not None:
             setattr(cfg, name, value)
-    _validate(cfg)
+    _validate(cfg, today=today)
     return cfg
 
 
-def _validate(cfg: RunConfig) -> None:
+def client_today_reference(now) -> datetime.date:
+    """Turn a client-supplied wall-clock ``now`` into the reference date used
+    for the future-date check.
+
+    Returns the date of ``now`` only when it is within ±1 day of the server's
+    ``date.today()`` (absorbs real timezone skew between the browser and a UTC
+    server); anything unparseable or farther away falls back to the server
+    date, so a client clock cannot extend the window horizon into the future.
+    """
+    server_today = datetime.date.today()
+    try:
+        if isinstance(now, str):
+            dt = datetime.datetime.fromisoformat(now.strip())
+        elif isinstance(now, datetime.datetime):
+            dt = now
+        else:
+            return server_today
+        client_date = dt.date()
+    except (ValueError, AttributeError):
+        return server_today
+    if abs((client_date - server_today).days) <= 1:
+        return client_date
+    return server_today
+
+
+def _validate(cfg: RunConfig, today: datetime.date | None = None) -> None:
     if cfg.audience_level not in AUDIENCE_CHOICES:
         raise ValueError(f"audience level {cfg.audience_level!r} not in {AUDIENCE_CHOICES}")
     if cfg.length not in PODCAST_LENGTH_CHOICES:
@@ -263,7 +315,60 @@ def _validate(cfg: RunConfig) -> None:
     bad = [t for t in cfg.topic_prefs if t not in TAXONOMY_BY_ID]
     if bad:
         raise ValueError(f"unknown topic_prefs {bad!r} — valid ids: {sorted(TAXONOMY_BY_ID)}")
-    cfg.resolve_window()
+    cfg.resolve_window(today=today)
+
+
+def _apply_podcast(cfg: RunConfig, pc: dict) -> RunConfig:
+    """Merge a persistent podcast config dict (``data/podcast_config.yaml``
+    shape) into ``cfg`` as intermediate defaults.
+
+    Only well-formed values are applied (invalid ones are skipped silently —
+    the service validates on write; the pipeline just reads the file). The
+    ``podcast.window_days`` knob is not a ``RunConfig`` field: when no window
+    start is set, it sizes the default rolling window instead of the hardcoded
+    ``DEFAULT_WINDOW_DAYS``, matching the web UI's "past week" resolution.
+    """
+    out = dataclasses.replace(cfg)
+    user = pc.get("user") or {}
+    podcast = pc.get("podcast") or {}
+    if user.get("audience") in AUDIENCE_CHOICES:
+        out.audience_level = str(user["audience"])
+    if user.get("familiar_topics") is not None:
+        ft = user["familiar_topics"]
+        out.familiar_topics = [str(t) for t in (ft if isinstance(ft, list) else [ft])]
+    if user.get("topic_prefs") is not None:
+        tp = user["topic_prefs"]
+        out.topic_prefs = [str(t) for t in (tp if isinstance(tp, list) else [tp])]
+    try:
+        if user.get("steering_alpha") is not None:
+            out.steering_alpha = float(user["steering_alpha"])
+    except (TypeError, ValueError):
+        pass
+    if podcast.get("length") in PODCAST_LENGTH_CHOICES:
+        out.length = str(podcast["length"])
+    if podcast.get("depth") in TOPIC_DEPTH_CHOICES:
+        out.depth = str(podcast["depth"])
+    try:
+        if podcast.get("mem_windows") is not None:
+            out.mem_windows = int(podcast["mem_windows"])
+    except (TypeError, ValueError):
+        pass
+    if out.window_start is None:
+        # Size the default rolling window from the saved ``window_days`` (a
+        # ``RunConfig`` has no such field): end = the given end (or today when
+        # none was supplied), start = end - window_days — the same resolution
+        # the web UI's "past week" dialog uses.
+        try:
+            wd = int(podcast.get("window_days") or DEFAULT_WINDOW_DAYS)
+            if out.window_end is not None:
+                end = _parse_date(out.window_end, "window.end")
+            else:
+                end = datetime.date.today()
+                out.window_end = end.isoformat()
+            out.window_start = (end - datetime.timedelta(days=wd)).isoformat()
+        except (TypeError, ValueError):
+            pass
+    return out
 
 
 def _apply_file(cfg: RunConfig, path: str | Path) -> RunConfig:
