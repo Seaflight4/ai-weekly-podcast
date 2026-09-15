@@ -22,7 +22,9 @@ import json
 import pathlib
 import shutil
 
-DATA_ROOT = pathlib.Path("data/history")
+from . import DATA_ROOT as APP_DATA_ROOT
+
+DATA_ROOT = APP_DATA_ROOT / "history"
 DATE_FORMAT = "%d-%m-%Y"
 # Run folders are time-stamped (DD-MM-YYYY-HHMMSS) so a second episode
 # generated the same day gets its own folder instead of overwriting the first.

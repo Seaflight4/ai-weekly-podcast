@@ -8,15 +8,15 @@ services:
       args:
         APP_UID: ${PUID:-1000}
         APP_GID: ${PGID:-1000}
-    # Run as the host user so files written to ../data are owned by you
-    # (not root), so you can edit/delete them without sudo. Override
+    # Run as the host user so files written to ./data (mcp-app/data) are owned
+    # by you (not root), so you can edit/delete them without sudo. Override
     # PUID/PGID in .env on machines with a different host uid/gid.
     user: "${PUID:-1000}:${PGID:-1000}"
     command: python -m mcp_server
     ports:
       - "8001:8001"
     volumes:
-      - ../data:/app/data
+      - ./data:/app/data
     environment:
       # Required: the LLM/TTS gateway key both the engine's transcript LLM and
       # the TNG qwen3 TTS backend share.

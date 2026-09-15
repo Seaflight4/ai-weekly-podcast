@@ -1,6 +1,7 @@
 from . import Item
 from . import store
 from . import llm
+from . import arxiv_oai
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections.abc import Iterable, Callable
 import json, urllib.request, urllib.error, urllib.parse, datetime, re, time
@@ -174,11 +175,46 @@ def _collect_hn(date: str, start: datetime.date) -> list[Item]:
 
 
 def _collect_arxiv(date: str, start: datetime.date) -> list[Item]:
-    """arXiv branch: streamed fetch + coarse title-only relevance gate.
+    """arXiv branch: OAI metadata mirror first, throttled query API as fallback.
+
+    The preferred path reads the locally-mirrored ``cs:cs:AI`` metadata for the
+    window (``pipeline/arxiv_oai.py``) — arXiv's sanctioned bulk-metadata sync,
+    not subject to the query API's 429 throttling. The query API is used only
+    when the mirror fails outright or holds no records for the window.
+    """
+    try:
+        end = datetime.date.fromisoformat(date)
+        arxiv_oai.ensure_coverage(
+            start - datetime.timedelta(days=arxiv_oai.COVERAGE_BUFFER_DAYS))
+        records = arxiv_oai.records_for_window(start, end)
+    except Exception as e:  # noqa: BLE001 — mirror is best-effort, never fatal
+        print(f"      arxiv: OAI mirror unavailable ({e}); "
+              f"falling back to query API")
+        return _collect_arxiv_queryapi(date, start)
+    if not records:
+        print("      arxiv: OAI mirror has no cs.AI records for this window; "
+              "falling back to query API")
+        return _collect_arxiv_queryapi(date, start)
+
+    items = [
+        Item(title=r["title"], url=f"https://arxiv.org/abs/{r['id']}",
+             date=r["first_submitted"], body=r["abstract"], source="arxiv")
+        for r in records if r.get("abstract")
+    ]
+    print(f"      arxiv: {len(items)} raw items from OAI mirror")
+    kept = _arxiv_relevant_titles(iter(items))
+    print(f"      arxiv: {len(kept)}/{len(items)} survived the coarse title "
+          f"gate (OAI mirror)")
+    return kept
+
+
+def _collect_arxiv_queryapi(date: str, start: datetime.date) -> list[Item]:
+    """arXiv fallback: streamed query-API fetch + coarse title-only gate.
 
     Pages are fetched one at a time (arXiv throttles to ~1 req/3s + 5s sleep)
     and each accumulated gate batch is judged as soon as it is full, so the LLM
     gate overlaps the inter-page sleeps instead of waiting for the full fetch.
+    Used when the OAI mirror (``_collect_arxiv``) cannot serve the window.
     """
     n_raw = 0
     def items():

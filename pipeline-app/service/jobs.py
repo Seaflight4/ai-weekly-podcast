@@ -32,8 +32,9 @@ import time
 import uuid
 
 from . import events
+from . import DATA_ROOT as APP_DATA_ROOT
 
-LOG_DIR = pathlib.Path("data/.jobs")
+LOG_DIR = APP_DATA_ROOT / ".jobs"
 LOG_TAIL_LINES = 200
 
 # Cadence of the live progress pushes sent over the SSE stream while a job is

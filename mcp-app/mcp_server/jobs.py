@@ -5,7 +5,6 @@ Jobs are persisted in a sqlite database so status survives restarts.
 """
 from __future__ import annotations
 
-import pathlib
 import sqlite3
 import threading
 import time
@@ -15,8 +14,10 @@ from datetime import datetime, timedelta, timezone
 
 from podcast_engine import EngineConfig, Source, generate_podcast
 
+from . import DATA_ROOT
 
-_DB_PATH = pathlib.Path("data/.mcp_jobs.db")
+
+_DB_PATH = DATA_ROOT / ".mcp_jobs.db"
 _LOCK = threading.Lock()
 _EXECUTOR: ThreadPoolExecutor | None = None
 
@@ -116,9 +117,15 @@ def _run_job(job_id: str, sources: list[Source], config: EngineConfig) -> None:
         def on_part(idx: int, text: str) -> None:
             _update(job_id, stage=f"synthesizing part {idx + 1}")
 
+        # Anchor the engine's output to this app's data/ dir (engine.py only
+        # defaults to the CWD-relative data/engine/<ts> when run_dir is not
+        # given — mcp-app always runs with the app data root).
+        ts = datetime.now().strftime("%d-%m-%Y-%H%M%S")
+        run_dir = DATA_ROOT / "engine" / ts
         result = generate_podcast(
             sources=sources,
             config=config,
+            run_dir=run_dir,
             on_part=on_part,
         )
 

@@ -8,14 +8,14 @@ services:
       args:
         APP_UID: ${PUID:-1000}
         APP_GID: ${PGID:-1000}
-    # Run as the host user so files written to ../data are owned by you
-    # (not root), so you can edit/delete them without sudo. Override
-    # PUID/PGID in .env on machines with a different host uid/gid.
+    # Run as the host user so files written to ./data (pipeline-app/data) are
+    # owned by you (not root), so you can edit/delete them without sudo.
+    # Override PUID/PGID in .env on machines with a different host uid/gid.
     user: "${PUID:-1000}:${PGID:-1000}"
     ports:
       - "8000:8000"
     volumes:
-      - ../data:/app/data
+      - ./data:/app/data
     environment:
       # Required: the LLM/TTS gateway key the pipeline + podcastfy backend share.
       SKAINET_API_KEY: ${SKAINET_API_KEY}

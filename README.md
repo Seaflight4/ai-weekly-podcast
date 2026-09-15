@@ -10,8 +10,9 @@ A monorepo with two independently testable tools that share one library:
 ```
 
 Both apps import `podcast_engine` (single source of truth under
-`podcast-engine/`) and persist their runtime state under `data/`. They have
-**no dependency on each other** — build and run either one on its own.
+`podcast-engine/`) and persist their runtime state under **their own**
+`mcp-app/data/` / `pipeline-app/data/` folder — never a shared root `data/`.
+They have **no dependency on each other** — build and run either one on its own.
 
 ## Quick start — podcast MCP (mcp-app)
 
@@ -62,5 +63,6 @@ were retired in the refactor.
 | `pipeline-app/pipeline/` | Ranking pipeline (collect → rank → generate), `python -m pipeline run`. |
 | `pipeline-app/service/` + `static/` | FastAPI web app + browser UI over the pipeline. |
 | `pipeline-app/` | Pipeline Dockerfile, compose, pyproject, requirements, `.env.example` |
-| `data/` | Shared runtime volume (episodes, config, job logs) — gitignored. |
+| `mcp-app/data/` | mcp-app runtime volume (job DB, source PDFs, engine episodes/caches) — gitignored, mounted as the container's `/app/data`. |
+| `pipeline-app/data/` | pipeline-app runtime volume (episode history, config, job logs, arXiv mirror, caches) — gitignored, mounted as the container's `/app/data`. |
 | `tests/` | Shared `podcast_engine` tests (app tests live in each app's `tests/`). |

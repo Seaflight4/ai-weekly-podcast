@@ -1,6 +1,14 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
 
+import pathlib
+
+# Runtime state root for this app, anchored to the app directory (not the
+# process CWD), so `python -m pipeline` writes to pipeline-app/data/ whether
+# run from cmd or in Docker (where /app/data is the bind mount).
+APP_ROOT = pathlib.Path(__file__).resolve().parent.parent
+DATA_ROOT = APP_ROOT / "data"
+
 @dataclass
 class Item:
     title: str

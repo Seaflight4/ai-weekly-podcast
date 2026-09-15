@@ -28,14 +28,15 @@ pipeline never reads this file — the service is its only owner.
 from __future__ import annotations
 
 import datetime
-import pathlib
 
 import yaml
 
 from pipeline import config as config_mod
 from pipeline import topics as topics_mod
 
-CONFIG_PATH = pathlib.Path("data/podcast_config.yaml")
+from . import DATA_ROOT as APP_DATA_ROOT
+
+CONFIG_PATH = APP_DATA_ROOT / "podcast_config.yaml"
 
 # First-run defaults, per spec: past week, researcher, no familiar topics,
 # medium (15-20 min), deep-dive (~2 min/source).

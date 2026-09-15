@@ -43,6 +43,7 @@ from . import llm
 from . import label as label_mod
 from . import topics  # noqa: F401  (keeps id conventions consistent upstream)
 from .eval_labels import cohen_kappa
+from . import DATA_ROOT
 
 HOLD_OUT_FRAC = 0.15
 SEED = 42
@@ -628,7 +629,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(
         description="Derive (and optionally adopt) the topic taxonomy")
     ap.add_argument("--pool", nargs="+", required=True, help="corpus JSON file(s)")
-    ap.add_argument("--out", default="data/eval/taxonomy__derived__latest")
+    ap.add_argument("--out", default=str(DATA_ROOT / "eval/taxonomy__derived__latest"))
     ap.add_argument("--big", default=llm.JUDGE_MODEL,
                     help="model for the free-label pass")
     ap.add_argument("--small", default=label_mod.LABEL_MODEL,

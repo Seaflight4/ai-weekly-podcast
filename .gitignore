@@ -5,12 +5,9 @@ __pycache__/
 *.egg-info/
 
 # --- Runtime data ---
-# Everything under data/ is per-machine runtime state (episode history,
-# persisted podcast config, job logs, caches) served through the ./data bind
-# mount — it stays local. Only data/.gitkeep is tracked (so a fresh clone has
-# a real directory for the container's bind mount).
-/data/*
-!/data/.gitkeep
+# Per-app runtime state is ignored by each app's own .gitignore
+# (mcp-app/data, pipeline-app/data). Here we just ignore stray engine
+# cwd-relative output/ dirs in case code runs outside an app folder.
 output/
 
 # --- Whisper model cache (one-off ASR verifier) ---

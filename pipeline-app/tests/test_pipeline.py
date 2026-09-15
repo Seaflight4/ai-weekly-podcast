@@ -21,6 +21,19 @@ from pipeline import memory as memory_mod
 from podcast_engine import EpisodeResult
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_memory_chat(monkeypatch):
+    """Keep ``generate()``-path tests network-free: the memory summary LLM
+    (``memory._chat``) is never really called. It is best-effort code that
+    swallows Exceptions, but since the template became format-valid it reaches
+    ``llm._config`` — which SystemExits (BaseException) when SKAINET_API_KEY is
+    unset and would hit the network when it is. Stubbing it to return nothing
+    leaves ``derive_summary`` on its deterministic fallback. Per-test stubs
+    (``monkeypatch.setattr(memory_mod, '_chat', ...)``) override this.
+    """
+    monkeypatch.setattr(memory_mod, "_chat", lambda payload: None)
+
+
 # --- RankedItem -----------------------------------------------------------
 
 def test_rankeditem_round_trips():
@@ -1801,8 +1814,13 @@ def test_memory_prompt_is_multilabel_aware():
 
 # --- runtime taxonomy loading / refresh adoption --------------------------------
 
+# reload_taxonomy(path) mutates the module-global TAXONOMY_PATH, so capture the
+# pristine default here (before any test reloads) to restore to in teardown.
+_PRISTINE_TAXONOMY_PATH = topics.TAXONOMY_PATH
+
+
 def _restore_default_taxonomy():
-    topics.reload_taxonomy(pathlib.Path("data/taxonomy.json"))
+    topics.reload_taxonomy(_PRISTINE_TAXONOMY_PATH)
 
 
 def test_topics_default_fallback_when_artifact_missing(tmp_path, monkeypatch):

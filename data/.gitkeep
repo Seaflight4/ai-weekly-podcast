@@ -1,3 +1,0 @@
-# Placeholder so a fresh `git clone` has a real ./data directory for the
-# docker-compose bind mount (the container runs as root and manages its
-# content; nothing under data/ other than this file is tracked).

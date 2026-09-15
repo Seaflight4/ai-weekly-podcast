@@ -18,6 +18,7 @@ import random
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from . import collect
+from . import DATA_ROOT
 
 WINDOW_WEEKS = 4
 SAMPLE_N = 1000
@@ -118,7 +119,7 @@ def _fetch_hn_bodies(hn_items: list) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--out", default="data/eval/corpus__latest")
+    ap.add_argument("--out", default=str(DATA_ROOT / "eval/corpus__latest"))
     args = ap.parse_args()
 
     arxiv, hn = fetch()

@@ -12,12 +12,11 @@ or programmatically::
 from __future__ import annotations
 
 import json
-import pathlib
 
 from mcp.server.mcpserver import MCPServer
 
 from podcast_engine import EngineConfig
-from mcp_server import inputs, jobs
+from mcp_server import inputs, jobs, DATA_ROOT
 
 
 server = MCPServer(
@@ -71,7 +70,7 @@ def generate_podcast(
     if not sources:
         return json.dumps({"error": "at least one source is required"})
 
-    papers_dir = pathlib.Path("data/mcp/papers")
+    papers_dir = DATA_ROOT / "mcp/papers"
     engine_sources = inputs.normalize_sources(sources, papers_dir)
 
     config = EngineConfig(

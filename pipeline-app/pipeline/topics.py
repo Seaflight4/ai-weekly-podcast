@@ -22,6 +22,8 @@ import math
 import os
 import pathlib
 
+from . import DATA_ROOT
+
 DEFAULT_TAXONOMY: tuple[dict, ...] = (
     {"id": "agents", "label": "AI Agents",
      "description": "Autonomous or semi-autonomous AI systems that plan, act, and interact with environments."},
@@ -64,7 +66,8 @@ DEFAULT_TAXONOMY: tuple[dict, ...] = (
 # Path of the runtime-loaded taxonomy artifact (see derive_taxonomy.py). When
 # it exists and parses, it overrides the curated default so a refreshed
 # taxonomy can be adopted without code edits. Overridable via TAXONOMY_PATH.
-TAXONOMY_PATH = pathlib.Path(os.environ.get("TAXONOMY_PATH", "data/taxonomy.json"))
+TAXONOMY_PATH = pathlib.Path(
+    os.environ.get("TAXONOMY_PATH", str(DATA_ROOT / "taxonomy.json")))
 
 
 def _load_taxonomy() -> tuple[dict, ...]:

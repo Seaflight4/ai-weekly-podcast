@@ -20,4 +20,5 @@ In opencode, the `podcast` MCP (`opencode.json`, `podcast_generate_podcast`
 tool) points at `http://localhost:8001/mcp`. Start the container before
 launching opencode in this directory.
 
-Generated episodes + the sqlite job DB persist under `../data`.
+Generated episodes + the sqlite job DB persist under this app's own `./data`
+folder (i.e. `mcp-app/data`).

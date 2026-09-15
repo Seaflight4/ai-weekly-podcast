@@ -25,8 +25,10 @@ NOTES.md
 RESOURCES.md
 package-lock.json
 
-# Runtime state lives in the mounted ../data volume, never in an image.
-data/
+# Runtime state lives in each app's own mounted data volume
+# (mcp-app/data, pipeline-app/data -> /app/data); never in an image.
+mcp-app/data/
+pipeline-app/data/
 output/
 
 # Secrets

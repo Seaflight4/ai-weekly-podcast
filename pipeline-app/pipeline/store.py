@@ -1,8 +1,10 @@
 import datetime, json, os, pathlib
 
+from . import DATA_ROOT
+
 # Same tree the service reads (service/episodes.py). Overridable per
 # subprocess via PIPELINE_DATA_ROOT, which the service always sets.
-ROOT = pathlib.Path(os.environ.get("PIPELINE_DATA_ROOT", "data/history"))
+ROOT = pathlib.Path(os.environ.get("PIPELINE_DATA_ROOT", str(DATA_ROOT / "history")))
 DATE_FORMAT = "%d-%m-%Y"
 # Run folders are time-stamped so a second episode generated the same day gets
 # its own folder instead of overwriting the first. Legacy date-only folders

@@ -30,8 +30,10 @@ Always use `--build`: a plain `docker compose up` reuses the last-built image,
 so after pulling new code you would keep running the old version. With `--build`
 Docker rebuilds only the changed layers (fast when dependencies are unchanged).
 
-Your episodes, settings and job logs persist locally in the `../data` folder
-(gitignored, so nothing is shared or committed).
+Your episodes, settings and job logs persist locally in this app's own
+`./data` folder (i.e. `pipeline-app/data`, gitignored — nothing is shared or
+committed). Each app keeps its own data folder; the pipeline never writes to
+the repo-root `data/`.
 
 ## Using the app
 
@@ -176,10 +178,26 @@ The collect stage runs each source branch in parallel and is per-source
 resilient: a branch that fails (e.g. arXiv throttling with HTTP 429) is
 dropped with a warning and the run continues with the surviving sources — the
 episode then simply omits that source's content (e.g. an HN-only episode while
-arXiv is rate-limited). arXiv 429s are retried with a short backoff (~40s
-total) to give a transient throttle a chance, then degrades. `collect` only
-aborts when **no** source yields any item (it refuses to write an empty
-`collect.json`).
+arXiv is rate-limited). `collect` only aborts when **no** source yields any
+item (it refuses to write an empty `collect.json`).
+
+### arXiv: OAI metadata mirror (primary) + query API (fallback)
+
+arXiv's search API (`export.arxiv.org/api/query`) throttles this deployment's
+shared corporate egress with opaque 429s. Since the collect change, the arXiv
+branch reads a **local OAI-PMH metadata mirror** (`pipeline/arxiv_oai.py`) for
+the `cs:cs:AI` set instead: the mirror is arXiv's sanctioned bulk-metadata sync
+(`oaipmh.arxiv.org`, not throttled like the query API) and lives under
+`data/arxiv_mirror/` (overridable via `ARXIV_MIRROR`; must be on a persistent
+volume). Sync is **lazy**: `collect` deepens/bootstraps the mirror (≈56-day
+backfill) only when its cached coverage doesn't reach the requested window, then
+filters the weekly window locally by *primary* `cs.AI` category and first
+submitted date, so the query API is not called at all in steady state. Only
+metadata is mirrored (title/abstract/authors/categories/dates) — full-text
+PDFs are still fetched by the engine per episode from `arxiv.org/pdf` (a
+different, unthrottled endpoint) with its own abstract fallback. If the mirror
+fails or has nothing for the window, `collect` falls back to the throttled query
+API and otherwise degrades to an HN-only episode.
 
 ## Configuration
 
@@ -190,6 +208,7 @@ Environment variables (`.env`) only carry API keys/endpoints:
 | `SKAINET_API_KEY` | API key for the LLM judge/transcript backend (required); also used for TTS |
 | `LLM_API_BASE` | OpenAI-compatible LLM endpoint for the podcast transcript |
 | `TAXONOMY_PATH` | Optional: override the runtime taxonomy artifact path (default `data/taxonomy.json`) |
+| `ARXIV_MIRROR` | Optional: override the arXiv OAI mirror dir (default `data/arxiv_mirror`) |
 
 Everything user-facing (audience, familiar topics, topic prefs + α, window,
 length, depth, memory lookback) is edited in the UI and stored in
