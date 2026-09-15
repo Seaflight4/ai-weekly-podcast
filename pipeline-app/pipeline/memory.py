@@ -36,7 +36,8 @@ MEMORY_MODEL = "mistralai/Mistral-Small-3.2-24B-Instruct-2506"
 # Hard cap on one topic summary (chars). Keeps the injected MEMORY block small
 # enough that it never meaningfully grows a part's context.
 MAX_SUMMARY_CHARS = 900
-# Max prior summaries injected per topic (keep the block bounded).
+# Max prior summaries injected per topic (keep the block bounded); the most
+# recent episodes' summaries are kept (see context_for).
 MAX_PER_TOPIC = 2
 
 MEMORY_FILE = "memory.json"
@@ -93,11 +94,15 @@ def _payload(items) -> list[dict]:
         if not tids:
             tids = ["other"]
         date = (getattr(it, "date", "") or "")[:10]
+        # Ordered topic ids (dict insertion order preserved from rank, so the
+        # first id is the judge's most salient facet). Lets the summary prompt
+        # know where a multi-labeled item's full treatment belongs.
         entry = {
             "title": getattr(it, "title", ""),
             "url": getattr(it, "url", ""),
             "date": date,
             "judge_reason": getattr(it, "judge_reason", ""),
+            "labels": list(tids),
         }
         for tid in tids:
             grouped.setdefault(tid, []).append(entry)
@@ -109,8 +114,14 @@ _PROMPT_TEMPLATE = """You summarized a podcast episode for a weekly AI news podc
 episode can naturally reference genuine continuations — without inventing any.
 
 INPUT: a JSON array of this episode's aired topics. Each entry is one taxonomy
-topic with the items aired under it: [{"topic":"agents","items":[{"title", "url",
-"date", "judge_reason"}]}].
+topic with the items aired under it: [{{"topic":"agents","items":[{{"title", "url",
+"date", "judge_reason", "labels"}}]}}].
+
+Items may belong to several topics and then appear under EACH of those topics'
+item lists; each entry's "labels" lists its topic ids, most salient first. Write
+an item's FULL treatment only under its FIRST (most salient) topic; under its
+other topics give just the facet-relevant detail that topic's record needs. A
+story is never retold in full more than once.
 
 Write ONE summary per topic. Each summary is 2-4 sentences, factual, naming the
 concrete actors/models/stories covered (cite the item titles by name and date,
@@ -280,7 +291,8 @@ def context_for(items, mem_windows: int, episode_date: str | None = None,
                 wanted.add(k)
 
     prior: dict[str, list[str]] = {}
-    for p in sorted(store.ROOT.iterdir()):
+    eligible: list[tuple[datetime.date, pathlib.Path]] = []
+    for p in store.ROOT.iterdir():
         if not p.is_dir():
             continue
         wend = _window_end(p)
@@ -292,6 +304,10 @@ def context_for(items, mem_windows: int, episode_date: str | None = None,
             continue
         if wend < cutoff:
             continue
+        eligible.append((wend, p))
+    # Chronological by window-end (folder-name sort is day-major and not date-
+    # ordered across months), most recent last.
+    for _wend, p in sorted(eligible, key=lambda r: (r[0], r[1].name)):
         mem = read_episode_date_memory(p)
         if not mem:
             continue
@@ -301,7 +317,9 @@ def context_for(items, mem_windows: int, episode_date: str | None = None,
             summary = t.get("summary")
             if tid in wanted and isinstance(summary, str) and summary.strip():
                 prior.setdefault(tid, []).append(f"{ep_date}: {summary}")
-    return {tid: entries[:MAX_PER_TOPIC] for tid, entries in prior.items()}
+    # Keep the most RECENT episodes' summaries per topic: entries are appended
+    # in chronological window-end order, so the tail holds the newest MAX_PER_TOPIC.
+    return {tid: entries[-MAX_PER_TOPIC:] for tid, entries in prior.items()}
 
 
 def precedence_default_window() -> int:
