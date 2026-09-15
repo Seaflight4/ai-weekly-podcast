@@ -87,9 +87,10 @@ def _label_chunk(chunk: list, model: str) -> dict[str, dict[str, float]]:
     """One labeler request. Returns ``{normalized_url: {topic: weight}}``.
 
     The response uses the multi-label shape (a ``labels`` array per item, see
-    ``topics.label_prompt``); it is flattened into an equal-weight vector over
-    the globally-unique ids. On a malformed response the whole chunk yields no
-    labels (items stay neutral for steering) rather than failing the run.
+    ``topics.label_prompt``); it is flattened into a salience-weighted vector
+    over the globally-unique ids. On a malformed response the whole chunk
+    yields no labels (items stay neutral for steering) rather than failing the
+    run.
     """
     payload = [item_payload(it, i) for i, it in enumerate(chunk)]
     obj = None
@@ -119,25 +120,17 @@ def _label_chunk(chunk: list, model: str) -> dict[str, dict[str, float]]:
 
 
 def _flatten_label(entry: dict) -> dict[str, float]:
-    """Flatten one multi-label entry into an equal-weight flat vector.
+    """Flatten one multi-label entry into a salience-weighted vector.
 
-    Each assigned label id is carried at weight 1.0 (multi-label: every facet
-    is equally salient for steering). Accepts the ``labels`` array shape the
-    labeler prompt returns, and the legacy single ``label`` id for
-    backward-compat caches. Off-taxonomy ids are dropped.
+    Each assigned label id is weighted by its position (most salient first):
+    primary = 1.0, then decaying per ``topics.SALIENCE_WEIGHTS``. Accepts the
+    ``labels`` array shape the labeler prompt returns, and the legacy single
+    ``label`` id for backward-compat caches. Off-taxonomy ids are dropped.
     """
     raw = entry.get("labels")
     if raw is None:
         raw = entry.get("label")
-    if isinstance(raw, str):
-        raw = [raw]
-    if not isinstance(raw, list):
-        return {}
-    out: dict[str, float] = {}
-    for v in raw:
-        if isinstance(v, str) and v in topics.TAXONOMY_BY_ID:
-            out[v] = 1.0
-    return out
+    return topics.salience_weighted(raw)
 
 
 def label_items(items: list,

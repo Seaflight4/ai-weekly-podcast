@@ -318,9 +318,8 @@ def _clean_labels(raw) -> list[str] | None:
 def _to_ranked(item: Item, score: float, reason: str,
                labels: str | list[str] | None = None) -> RankedItem:
     r = RankedItem(**item.__dict__, score=score, judge_reason=reason)
-    if isinstance(labels, str):
-        labels = [labels]
-    for lab in (labels or []):
-        if lab in topics.TAXONOMY_BY_ID:
-            r.topics[lab] = 1.0
+    # Labels arrive ordered most salient first; weight them by salience
+    # (primary = 1.0, then decay) so steering reflects what the item is
+    # chiefly about, not a flat multi-hot.
+    r.topics = topics.salience_weighted(labels)
     return r

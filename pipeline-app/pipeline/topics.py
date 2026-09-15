@@ -2,11 +2,13 @@
 
 The taxonomy is derived from the news itself (``pipeline.derive_taxonomy.py``:
 free-form label a 4-week corpus sample -> cluster -> verify) and curated by
-hand. Every item gets ONE OR MORE topic ids (equal weight), so a label set is
-a flat ``{id: 1.0}`` vector over every facet that applies (a paper can be both
-``post_training`` and ``agents``). Nothing downstream hard-codes a single
-label: cosine ``personal_match``, the ranking blend, episode aggregation, the
-brief and history filtering all operate on these multi-hot vectors unchanged.
+hand. Every item gets ONE OR MORE topic ids ordered most salient first, so a
+label set is a weighted ``{id: weight}`` vector over every facet that applies
+(a paper can be both ``post_training`` and ``agents``) with the primary label
+weighted highest (see ``SALIENCE_WEIGHTS``). Nothing downstream hard-codes a
+single label: cosine ``personal_match``, the ranking blend, episode
+aggregation, the brief and history filtering all operate on these
+salience-weighted vectors unchanged.
 
 The taxonomy can be refreshed every few months by re-running the derivation
 pipeline (see ``pipeline.derive_taxonomy.py``) and dropping its runtime
@@ -120,6 +122,33 @@ def reload_taxonomy(path: str | os.PathLike | None = None) -> tuple[dict, ...]:
 # the blend is neutral, so final == importance.
 NEUTRAL_PERSONAL = 0.5
 
+# Label salience weights. The judge returns an item's labels ordered most
+# salient first; each label's weight decays by position (primary = 1.0). The
+# rubric caps labels at 3, so positions beyond this array drop out of the
+# vector (no weight -> no steering contribution).
+SALIENCE_WEIGHTS = (1.0, 0.6, 0.35)
+
+
+def salience_weighted(labels) -> dict[str, float]:
+    """Map an ordered label list (most salient first) to a weighted vector.
+
+    ``labels`` may be a list of taxonomy ids, a single id string, or None.
+    On-taxonomy ids get ``SALIENCE_WEIGHTS[pos]`` by position; off-taxonomy
+    ids are dropped and duplicates keep their first (highest) weight.
+    None/empty -> {}.
+    """
+    if isinstance(labels, str):
+        labels = [labels]
+    if not isinstance(labels, list):
+        return {}
+    out: dict[str, float] = {}
+    for i, lab in enumerate(labels):
+        if (not isinstance(lab, str) or lab not in TAXONOMY_BY_ID
+                or lab in out or i >= len(SALIENCE_WEIGHTS)):
+            continue
+        out[lab] = SALIENCE_WEIGHTS[i]
+    return out
+
 
 def label_prompt() -> str:
     """System prompt shared by the production labeler and the eval reference
@@ -177,8 +206,9 @@ def personal_match(item_topics: dict[str, float],
                    profile: dict[str, float]) -> float:
     """Cosine similarity of an item's topic vector and the user's profile.
 
-    Labels are equal-weight multi-hot vectors (each assigned id = 1.0), so the
-    cosine naturally measures overlap across all of an item's facets.
+    Labels are salience-weighted vectors (primary facet 1.0, later labels
+    decayed — see ``SALIENCE_WEIGHTS``), so the cosine naturally measures how
+    much of an item's most-salient content overlaps the profile.
 
     Returns ``NEUTRAL_PERSONAL`` (0.5) when no profile is configured so the
     blend is a no-op; 0.0 when the item has no labels or no overlap. Empty

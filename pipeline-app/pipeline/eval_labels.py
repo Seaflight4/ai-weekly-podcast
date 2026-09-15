@@ -152,7 +152,7 @@ def _label_stats(items, small, big) -> tuple[dict, float, float]:
 
 
 def _label_id(vector: dict) -> str | None:
-    """The primary (first) label id in an equal-weight flat vector."""
+    """The primary (first) label id in a salience-weighted vector."""
     for tid in topics.TAXONOMY_IDS:
         if vector.get(tid, 0.0) > 0:
             return tid

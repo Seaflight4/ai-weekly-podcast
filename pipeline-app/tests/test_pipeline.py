@@ -1127,6 +1127,35 @@ def test_validate_topic_map():
     assert "other" in ids
 
 
+def test_salience_weighted():
+    ws = topics.SALIENCE_WEIGHTS
+    assert ws[0] == 1.0 and ws[0] > ws[1] > ws[2]
+    # labels decay by position, primary keeps full weight
+    assert topics.salience_weighted(["post_training", "agents", "benchmarks"]) == {
+        "post_training": 1.0, "agents": ws[1], "benchmarks": ws[2]}
+    # a scalar id string is tolerated; primary keeps full weight
+    assert topics.salience_weighted("model_release") == {"model_release": 1.0}
+    # off-taxonomy ids dropped; duplicates keep their first (highest) weight
+    assert topics.salience_weighted(["bogus", "model_release", "model_release"]) \
+        == {"model_release": ws[1]}
+    # beyond the scope of SALIENCE_WEIGHTS the ids drop out entirely
+    assert set(topics.salience_weighted(["other", "agents", "policy", "robotics"])) \
+        == {"other", "agents", "policy"}
+    assert topics.salience_weighted(None) == {}
+    assert topics.salience_weighted({}) == {}
+
+
+def test_salience_weights_steer_toward_primary_label():
+    ws = topics.SALIENCE_WEIGHTS
+    # With a post_training profile, an item whose PRIMARY label is
+    # post_training matches better than one where it is only a secondary facet.
+    primary = {"post_training": 1.0, "agents": ws[1]}
+    secondary = {"agents": 1.0, "post_training": ws[1]}
+    profile = {"post_training": 1.0}
+    assert topics.personal_match(primary, profile) \
+        > topics.personal_match(secondary, profile)
+
+
 # --- label pass --------------------------------------------------------------
 
 def test_label_items_parses_and_filters_taxonomy(monkeypatch):
@@ -1335,6 +1364,31 @@ def test_memory_context_retention_and_topic_match(tmp_path, monkeypatch):
     assert len(entries) == 2
     assert any("2026-09-01" in e for e in entries)
     assert any("2026-08-25" in e for e in entries)
+
+
+def test_memory_context_keeps_most_recent_summaries(tmp_path, monkeypatch):
+    """When more prior episodes than MAX_PER_TOPIC cover a topic, the most
+    RECENT summaries win (not the oldest)."""
+    monkeypatch.setattr(memory_mod.store, "ROOT", tmp_path / "history")
+    root = tmp_path / "history"
+    _write_prior_run(root, "19-08-2026", "2026-08-19",
+                     ["agents"], episode_date="2026-08-19")
+    _write_prior_run(root, "26-08-2026", "2026-08-26",
+                     ["agents"], episode_date="2026-08-26")
+    _write_prior_run(root, "01-09-2026", "2026-09-01",
+                     ["agents"], episode_date="2026-09-01")
+
+    current = [RankedItem(title="C", url="u", date="2026-09-07", body="b",
+                          source="hn", score=0.9, judge_reason="r",
+                          topics={"agents": 1.0})]
+    ctx = memory_mod.context_for(current, mem_windows=3,
+                                 episode_date="2026-09-08",
+                                 window_span_days=7)
+    entries = ctx["agents"]
+    assert len(entries) == memory_mod.MAX_PER_TOPIC
+    assert not any(e.startswith("2026-08-19") for e in entries)
+    assert any(e.startswith("2026-08-26:") for e in entries)
+    assert any(e.startswith("2026-09-01:") for e in entries)
 
 
 def test_generate_writes_memory_artifact(tmp_path, monkeypatch):
@@ -1607,7 +1661,7 @@ def test_eval_labels_label_stats_uses_prevalent_topics():
     assert stats["other"]["prevalence"] == 0.0
 
 
-# --- multi-label items (equal-weight, cosine unchanged) -----------------------
+# --- multi-label items (salience-weighted, cosine unchanged) ----------------
 
 def test_clean_labels_normalizes_multi_and_single():
     assert rank._clean_labels(["post_training", "agents"]) == ["post_training", "agents"]
@@ -1620,8 +1674,9 @@ def test_clean_labels_normalizes_multi_and_single():
 
 def test_rank_to_ranked_multi_label():
     item = Item(title="t", url="u", date="d", body="b", source="arxiv")
+    # labels are weighted by salience order: primary 1.0, later labels decay
     r = rank._to_ranked(item, 0.9, "r", ["post_training", "agents"])
-    assert r.topics == {"post_training": 1.0, "agents": 1.0}
+    assert r.topics == {"post_training": 1.0, "agents": topics.SALIENCE_WEIGHTS[1]}
     # legacy single-string judge shape still supported
     assert rank._to_ranked(item, 0.9, "r", "post_training").topics == {"post_training": 1.0}
     assert rank._to_ranked(item, 0.9, "r", None).topics == {}
@@ -1656,7 +1711,7 @@ def test_personal_match_multi_label_item():
 
 def test_flatten_label_multi():
     assert label_mod._flatten_label({"index": 0, "labels": ["post_training", "agents"]}) \
-        == {"post_training": 1.0, "agents": 1.0}
+        == {"post_training": 1.0, "agents": topics.SALIENCE_WEIGHTS[1]}
     # off-taxonomy ids dropped; a scalar string id is tolerated
     assert label_mod._flatten_label({"index": 0, "labels": ["post_training", "bogus"]}) \
         == {"post_training": 1.0}
@@ -1675,7 +1730,9 @@ def test_label_items_parses_multi_labels(monkeypatch):
     items = [Item(title="a", url="https://a.example", date="d", body="b", source="arxiv"),
              Item(title="b", url="https://b.example", date="d", body="b", source="arxiv")]
     out = label_mod.label_items(items, workers=1)
-    assert out["https://a.example"] == {"post_training": 1.0, "agents": 1.0}
+    # multi-label vectors are salience-weighted (primary 1.0, then decay)
+    assert out["https://a.example"] == {"post_training": 1.0,
+                                        "agents": topics.SALIENCE_WEIGHTS[1]}
     assert out["https://b.example"] == {"model_release": 1.0}
 
 
@@ -1723,6 +1780,23 @@ def test_memory_payload_groups_under_each_label():
     assert by_topic["post_training"] == ["A"]
     assert by_topic["agents"] == ["A"]
     assert by_topic["other"] == ["B"]
+    # each entry carries the ordered label ids (most salient first), so the
+    # summary prompt knows where a dual-labeled item's full treatment belongs
+    by_labels = {e["topic"]: [i["labels"] for i in e["items"]] for e in payload}
+    assert by_labels["post_training"] == [["post_training", "agents"]]
+    assert by_labels["agents"] == [["post_training", "agents"]]
+    assert by_labels["other"] == [["other"]]
+
+
+def test_memory_prompt_is_multilabel_aware():
+    t = memory_mod._PROMPT_TEMPLATE
+    assert "labels" in t
+    assert "most salient" in t
+    assert "never retold in full more than once" in t
+    # the template must actually render (single-brace literals escaped), so the
+    # real _chat path reaches the model instead of always throwing a KeyError
+    rendered = t.format(max_chars=memory_mod.MAX_SUMMARY_CHARS)
+    assert "topics" in rendered
 
 
 # --- runtime taxonomy loading / refresh adoption --------------------------------
@@ -1790,3 +1864,67 @@ def test_write_runtime_artifact_and_adopt(tmp_path):
             == ["agents", "model_release", "other"]
     finally:
         _restore_default_taxonomy()
+
+
+# --- multi-label taxonomy derivation (derive_taxonomy) -----------------------
+
+def test_derive_extract_multi_and_legacy():
+    from pipeline import derive_taxonomy as dt
+    chunk = [
+        types.SimpleNamespace(title="a", url="https://a.example", body="b"),
+        types.SimpleNamespace(title="b", url="https://b.example", body="b"),
+        types.SimpleNamespace(title="c", url="https://c.example", body="b"),
+    ]
+    out = dt._extract({"labels": [
+        {"index": 0, "labels": ["post-training (rlhf)", "agents"]},
+        {"index": 1, "label": "benchmarks"},          # legacy single -> list
+        {"index": 2, "labels": []},                   # empty -> absent
+    ]}, chunk)
+    assert out["https://a.example"] == ["post-training (rlhf)", "agents"]
+    assert out["https://b.example"] == ["benchmarks"]
+    assert "https://c.example" not in out
+
+
+def test_derive_prompts_are_multilabel():
+    from pipeline import derive_taxonomy as dt
+    assert "1 to 3" in dt.FREE_SYSTEM
+    assert "most salient" in dt.FREE_SYSTEM
+    sys = dt.closed_system([
+        {"id": "agents", "definition": "Agent systems."},
+        {"id": "other", "definition": "Other."},
+    ])
+    assert "1 to 3" in sys and "most salient first" in sys
+    assert '"labels"' in sys  # array shape, not a single "label"
+
+
+def test_derive_map_raw_and_map_many():
+    from pipeline import derive_taxonomy as dt
+    canonicals_list = [
+        {"id": "post_training",
+         "covers": ["post-training (rlhf)", "post-training (distillation)"]},
+        {"id": "agents", "covers": ["agents", "agent tooling"]},
+        {"id": "other", "covers": []},
+    ]
+    cbl: dict[str, str] = {}
+    for c in canonicals_list:
+        for x in c.get("covers", []):
+            cbl.setdefault(dt._normalize(x), c["id"])
+    assert dt.map_raw("post-training (rlhf)", cbl, canonicals_list) == "post_training"
+    # case-insensitive normalize + id fallback
+    assert dt.map_raw("Post-Training (RLHF)", cbl, canonicals_list) == "post_training"
+    assert dt.map_raw("no such label", cbl, canonicals_list) == "other"
+    assert dt.map_raw("other", cbl, canonicals_list) == "other"
+    # dedup + order preserved; "other"-only degrades to an empty list
+    assert dt.map_many(
+        ["post-training (rlhf)", "agents", "post-training (distillation)"],
+        cbl, canonicals_list) == ["post_training", "agents"]
+    assert dt.map_many(["noise"], cbl, canonicals_list) == []
+
+
+def test_derive_label_all_normalizes_legacy_cache(tmp_path):
+    from pipeline import derive_taxonomy as dt
+    cache = tmp_path / "raw.json"
+    cache.write_text(json.dumps({"https://a.example": "post-training (rlhf)"}))
+    items = [types.SimpleNamespace(title="a", url="https://a.example", body="b")]
+    out = dt.label_all(items, "model", "sys", cache)
+    assert out["https://a.example"] == ["post-training (rlhf)"]
