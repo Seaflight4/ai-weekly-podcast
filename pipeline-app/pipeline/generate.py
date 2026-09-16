@@ -10,7 +10,6 @@ import pathlib, datetime, re, subprocess
 
 def generate(ranked: list[RankedItem], make_audio: bool = True,
              date: str | None = None,
-             transcript_in: str | None = None,
              brief_in: str | None = None,
              config: config_mod.RunConfig | None = None) -> Episode:
     """Feed the week's top items to the podcastfy audio backend and produce audio.
@@ -25,10 +24,6 @@ def generate(ranked: list[RankedItem], make_audio: bool = True,
     skipped and the episode manifest is reconstructed by matching the brief's
     URLs against ``ranked``; ``episode.json`` records ``selection_source:
     "customized"`` so the UI can show that the user curated the set.
-
-    ``transcript_in`` reuses a cached transcript file and skips the LLM step,
-    going straight to TTS — useful for retrying audio after a transient TTS
-    outage without paying the multi-minute LLM cost again.
     """
     run = store.run_dir(date)
     brief = run / "podcast_brief.md"
@@ -88,8 +83,8 @@ def generate(ranked: list[RankedItem], make_audio: bool = True,
         print(f"      [warn] memory context build failed (continuing without): {e}")
 
     # Forward monitor: surface low gate_score among aired items. A recurring
-    # low-score-but-aired item signals the small-model gate is misaligned with
-    # the big-LLM judge and the prefilter floor should be relaxed.
+    # low-score-but-aired item signals the small-model gate is misaligned
+    # with the big-LLM judge.
     scored = [c.gate_score for c in chosen if c.gate_score]
     if scored:
         print(f"      monitor: chosen gate_score min={min(scored):.2f} "
@@ -108,7 +103,6 @@ def generate(ranked: list[RankedItem], make_audio: bool = True,
                 config=engine_config,
                 run_dir=run,
                 memory_context=memory_context,
-                transcript_in=pathlib.Path(transcript_in) if transcript_in else None,
             )
             audio = result.audio_path
             backend_name = result.backend

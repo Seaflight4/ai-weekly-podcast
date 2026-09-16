@@ -111,7 +111,6 @@ def generate_podcast(
     run_dir: pathlib.Path | str | None = None,
     memory_context: dict | None = None,
     on_part: Callable[[int, str], None] | None = None,
-    transcript_in: pathlib.Path | str | None = None,
 ) -> EpisodeResult:
     """Generate a podcast episode from a list of provided sources.
 
@@ -127,8 +126,6 @@ def generate_podcast(
         memory_context: Optional cross-episode memory (empty = no memory).
         on_part: Optional callback ``on_part(idx, text)`` fired after each
             transcript part is generated (for progress reporting).
-        transcript_in: Optional path to a cached transcript file; when set,
-            skips the LLM and goes straight to TTS.
 
     Returns:
         :class:`EpisodeResult` with paths to the audio and transcript.
@@ -140,8 +137,6 @@ def generate_podcast(
     run_dir = pathlib.Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    transcript_path = pathlib.Path(transcript_in) if transcript_in else None
-
     backend = PodcastfyBackend()
     result: AudioResult = backend.generate(
         run_dir=run_dir,
@@ -151,7 +146,6 @@ def generate_podcast(
         config=config._overrides(),
         memory_context=memory_context or {},
         items=sources,
-        transcript_in=transcript_path,
     )
 
     duration_sec = None

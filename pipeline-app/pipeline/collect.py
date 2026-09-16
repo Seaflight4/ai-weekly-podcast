@@ -37,8 +37,8 @@ Return ONLY a JSON object with two keys:
 - "relevant": an array of the integer indices of the stories that pass.
 - "scores": an array of objects, one per story in the input, each with
   "index" (the integer index) and "score" (a float 0.0 to 1.0, how relevant
-  this story is to AI researchers — used to prefilter the expensive ranker
-  downstream). Score EVERY index in the batch, whether or not it is in
+  this story is to AI researchers — recorded as the item's gate score).
+  Score EVERY index in the batch, whether or not it is in
   "relevant".
 If none pass, return {"relevant": [], "scores": [{"index": 0, "score": 0.0}, ...]}.
 No prose before or after. No markdown fences.
@@ -91,8 +91,8 @@ Return ONLY a JSON object with two keys:
 - "relevant": an array of the integer indices of the papers that pass.
 - "scores": an array of objects, one per paper in the input, each with
   "index" (the integer index) and "score" (a float 0.0 to 1.0, how relevant
-  this paper is to practitioners — used to prefilter the expensive ranker
-  downstream). Score EVERY index in the batch, whether or not it is in
+  this paper is to practitioners — recorded as the item's gate score).
+  Score EVERY index in the batch, whether or not it is in
   "relevant".
 If none pass, return {"relevant": [], "scores": [{"index": 0, "score": 0.0}, ...]}.
 No prose before or after. No markdown fences.
@@ -134,7 +134,7 @@ Return ONLY a JSON object with two keys:
 - "relevant": an array of the integer indices of the titles that pass.
 - "scores": an array of objects, one per title in the input, each with
   "index" (the integer index) and "score" (a float 0.0 to 1.0, likelihood of
-  importance — used to prefilter the expensive ranker downstream). Score EVERY
+  importance — recorded as the item's gate score). Score EVERY
   index in the batch, whether or not it is in "relevant".
 If none pass, return {"relevant": [], "scores": [{"index": 0, "score": 0.0}, ...]}.
 No prose before or after. No markdown fences.

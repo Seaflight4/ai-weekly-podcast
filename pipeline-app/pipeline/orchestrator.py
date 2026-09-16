@@ -59,8 +59,7 @@ STAGES = ("collect", "rank", "generate", "transcribe", "label")
 
 def run(only: str | None = None, no_audio: bool = False,
         from_cache: str | None = None, date: str | None = None,
-        transcript_in: str | None = None, brief_in: str | None = None,
-        top_k: int | None = None, score_floor: float | None = None,
+        brief_in: str | None = None,
         config_path: str | None = None,
         window_start: str | None = None, window_end: str | None = None,
         audience_level: str | None = None,
@@ -104,14 +103,13 @@ def run(only: str | None = None, no_audio: bool = False,
 
         print("[2/3] ranking...")
         ranked = _timed("rank", rank.rank, items, date=date,
-                        top_k=top_k, score_floor=score_floor,
                         profile=profile, alpha=cfg.steering_alpha)
         print(f"      scored {len(ranked)} items")
 
         print("[3/3] generating...")
         episode = _timed("generate", generate.generate, ranked,
                          make_audio=not no_audio, date=date,
-                         transcript_in=transcript_in, brief_in=brief_in,
+                         brief_in=brief_in,
                          config=cfg)
         print(f"      audio -> {episode.audio_path}")
         print(f"      manifest has {len(episode.manifest)} items")
@@ -134,7 +132,6 @@ def run(only: str | None = None, no_audio: bool = False,
         items = _load("collect", Item, date=date)
         print(f"[2/3] ranking {len(items)} cached items...")
         ranked = _timed("rank", rank.rank, items, date=date,
-                        top_k=top_k, score_floor=score_floor,
                         profile=profile, alpha=cfg.steering_alpha)
         print(f"      scored {len(ranked)} items")
         return
@@ -146,7 +143,7 @@ def run(only: str | None = None, no_audio: bool = False,
               f"(audio={'yes' if make_audio else 'no'})...")
         episode = _timed("generate", generate.generate, ranked,
                          make_audio=make_audio, date=date,
-                         transcript_in=transcript_in, brief_in=brief_in,
+                         brief_in=brief_in,
                          config=cfg)
         print(f"      audio -> {episode.audio_path}")
         print(f"      manifest has {len(episode.manifest)} items")

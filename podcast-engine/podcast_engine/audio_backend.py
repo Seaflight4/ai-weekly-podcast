@@ -133,7 +133,6 @@ class PodcastfyBackend:
         self,
         run_dir: pathlib.Path,
         chosen: list | None = None,
-        transcript_in: pathlib.Path | None = None,
         config: dict | None = None,
         memory_context: dict | None = None,
         items: list | None = None,
@@ -174,16 +173,7 @@ class PodcastfyBackend:
             t_trans = 0.0
             t_audio = 0.0
             use_pipeline = False
-            if transcript_in is not None:
-                src = pathlib.Path(transcript_in)
-                if not src.exists():
-                    raise FileNotFoundError(
-                        f"--transcript-in not found: {src}")
-                transcript = src.read_text(encoding="utf-8")
-                transcript_out = src
-                print(f"[podcastfy] reusing cached transcript {src.name} "
-                      f"({len(transcript)} chars); skipping LLM")
-            elif transcript_out.exists() and _fingerprint_matches(marker_path, fingerprint):
+            if transcript_out.exists() and _fingerprint_matches(marker_path, fingerprint):
                 transcript = transcript_out.read_text(encoding="utf-8")
                 print(f"[podcastfy] reusing existing {transcript_out.name} "
                       f"({len(transcript)} chars); skipping LLM "

@@ -17,7 +17,8 @@ class Item:
     body: str
     source: str          # e.g. "hn", "arxiv"
     # Relevance score (0.0-1.0) from the collect-stage small-model gate
-    # (Mistral-Small). Used by the rank stage to prefilter the big-LLM input.
+    # (Mistral-Small). Carried into rank.json and surfaced by the generate
+    # stage's forward monitor to flag gate/judge misalignment.
     # 0.0 when the item predates the score field or the gate did not score it.
     gate_score: float = 0.0
     # Hacker News popularity signal: the highest point score among HN stories

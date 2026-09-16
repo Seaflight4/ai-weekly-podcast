@@ -100,7 +100,6 @@ UNIFIED_RUBRIC = _UNIFIED_BASE_RUBRIC + _label_block()
 
 
 def rank(items: list[Item], date: str | None = None,
-         top_k: int | None = None, score_floor: float | None = None,
          profile: dict | None = None, alpha: float = 0.3) -> list[RankedItem]:
     """Score and label every item in one fused judge pass (sorted desc).
 
@@ -111,22 +110,9 @@ def rank(items: list[Item], date: str | None = None,
     each item gets a ``personal_score`` (cosine match) and ``final_score =
     (1-α)·score + α·personal``; no profile => steering is a no-op (final ==
     importance).
-
-    Optional prefilter (``top_k`` / ``score_floor``) shrinks the big-LLM input
-    using the small-model ``gate_score`` set by the collect stage, per source
-    (HN and arXiv gate scores come from different prompts and are not on a
-    common scale, so the cut is applied within each source). ``top_k`` is a
-    total budget split proportionally across sources; ``score_floor`` drops
-    items below the floor first. Both None = score everything (legacy).
     """
     items = _dedup_by_url(items)
     print(f"      rank: {len(items)} items")
-    if top_k is not None or score_floor is not None:
-        before = len(items)
-        items = _prefilter_by_gate(items, top_k=top_k, score_floor=score_floor)
-        print(f"      rank: prefilter {before} -> {len(items)} by gate_score "
-              f"(top_k={top_k}, floor={score_floor})")
-
     ranked = _rank_pool(items, UNIFIED_RUBRIC)
     _apply_steering(ranked, profile or None, alpha)
     ranked.sort(key=lambda r: (r.final_score, r.score), reverse=True)
@@ -155,30 +141,6 @@ def _apply_steering(ranked: list[RankedItem], profile: dict | None,
         else:
             r.personal_score = topics.NEUTRAL_PERSONAL
             r.final_score = r.score
-
-
-def _prefilter_by_gate(items: list[Item], top_k: int | None,
-                       score_floor: float | None) -> list[Item]:
-    """Per-source gate_score cut. ``top_k`` is a total budget split across
-    sources in proportion to their share of the pool (min 10 each). Returns
-    items surviving the cut, in gate_score-descending order within source.
-    """
-    if not items:
-        return items
-    by_src: dict[str, list[Item]] = {}
-    for it in items:
-        by_src.setdefault(it.source, []).append(it)
-    kept: list[Item] = []
-    total = len(items)
-    for src, group in by_src.items():
-        group.sort(key=lambda i: i.gate_score, reverse=True)
-        if score_floor is not None:
-            group = [i for i in group if i.gate_score >= score_floor]
-        if top_k is not None:
-            quota = max(10, int(round(top_k * len(group) / total)))
-            group = group[:quota]
-        kept.extend(group)
-    return kept
 
 
 def rank_from_cache(cache_path: str, date: str | None = None) -> list[RankedItem]:
